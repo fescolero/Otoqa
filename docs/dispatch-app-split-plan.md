@@ -1,6 +1,10 @@
 # Otoqa Dispatch App — Split & Implementation Plan
 
-> Status: **v1.2 — Phases 0–2 device-verified.** Three verification passes completed (log at end); all open questions answered by the product owner 2026-07-25 (decisions D9–D19) except the deliberately deferred OQ-11. §0 security hotfix shipped.
+> Status: **v1.3 — Phases 0–2 device-verified; Phase 3 shipped.** Three verification passes completed (log at end); all open questions answered by the product owner 2026-07-25 (decisions D9–D19) except the deliberately deferred OQ-11. §0 security hotfix shipped.
+>
+> **Design parity audited 2026-08-21 (§5.9):** the Mobile8 bundle's *structure* shipped faithfully; its *visual system* never did — all 19 screens were on the legacy dark-orange driver theme while the design and the driver app were on v8 blue/neutral. Retheme shipped; light mode, text-role refinement and on-device confirmation remain. Five design-side corrections (D10 chat, D7 pay copy, D14 SSO copy, D6 permissions, four undesigned screens) are tracked in §5.9, not yet folded into the bundle.
+>
+> **Android push wiring 2026-08-21:** `expo-notifications` plugin + `POST_NOTIFICATIONS` added; `app.config.js` now wires `android.googleServicesFile` conditionally so builds keep working until the file exists and Android push activates the moment it lands. The remaining steps are console-side — see [docs/runbooks/dispatch-push-credentials.md](runbooks/dispatch-push-credentials.md).
 >
 > **⚠ OTA release rule (learned 2026-07-29):** `eas update` bundles `EXPO_PUBLIC_*` from the LOCAL `.env` files, NOT from `eas.json` (build-only). Publishing without `apps/dispatch/.env.local` ships a bundle with no Convex URL → crashes at startup → expo-updates silently rolls back → "nothing changed" with zero errors. Always `cp .env.example .env.local` (kept current) before `eas update --channel preview`. The Voice tab subtitle shows `v2 · ota <id>` vs `embedded js` to verify which bundle is actually running.
 >
@@ -210,6 +214,74 @@ Dropped entirely per user decision: no in-app messaging in either app. Consequen
 | Driver accept/decline | ~~Driver-app UI~~ **SHIPPED 2026-07-26 in the Dispatch app** | The actor is the OWNER/ADMIN carrier persona (assertCallerInCarrierOrg), which post-D3 lives in Otoqa Dispatch — building it into the driver app's owner tree would target §6-deleted code. Shipped: `dispatchMobile.listOffers` (OFFERED + ACCEPTED inbox), `dispatchMobile.acceptOffer`/`declineOffer` (token-derived org per §4.5; parity-tested field-for-field against the legacy mutations; decline raises the §5.2 OFFER_DECLINED alert), Board "Offers" section with Accept/Decline + confirm, accepted offers shown as "awaiting award". 8 convex-tests. |
 | Load-creation dictation | ~~5.6 + voice stack~~ **SHIPPED 2026-07-27** | `convex/voice.transcribeLoadDraft`: same Nova-3 STT leg (customer names ride the keyterms), Haiku tool-forced into a `LoadDraft` (customer/commodity/addresses/window dates+hours; today's date injected so "tomorrow" resolves server-side; `coerceLoadDraft` drops malformed fields instead of failing the draft — unit-tested). Client: mic in the New-load header via shared `useVoiceClip` hook (extracted from the device-validated Voice-tab flow), **pre-fill only** — "HEARD" transcript card shown, dispatcher reviews/edits, existing `createLoad` submit path unchanged; dictated windows replace the today-8/1 defaults and the labels show them. JS + backend only — no new native modules, rides the existing voice build. |
 | Cross-app sign-in handoff | deferred (D5) | Clerk sign-in tokens verified feasible |
+
+---
+
+## 5.9 Design parity with Otoqa_Mobile8 (audited 2026-08-21)
+
+The bundle (`~/Downloads/Otoqa Mobile(8).zip`, cut 2026-07-25) was never
+copied into the repo, which is why it is invisible from the codebase — only
+the two auth screens even name it. The audit found drift in **both**
+directions, and §8's "design-parity review vs Mobile8" cannot be signed off
+until each side is reconciled.
+
+### What was faithful
+
+Structure and behavior, thoroughly. The design's
+`TABS = ['board','drivers','voice','notifications','more']` is the shipped tab
+set exactly; the Board implements `lib-dispatch/capacity.jsx`'s bounded-work
+model (Offers → Rolling now → Next 4 hours → Today → Later → Unscheduled,
+never one flat list); every design screen has a real counterpart. The
+information architecture *is* the design.
+
+### What was not — and is now fixed
+
+**The visual system.** Every dispatch screen imported `colors`/`typography`/
+`borderRadius` from `@otoqa/mobile-core`'s legacy `theme.ts` — the dark-orange
+"Dark Logistics" driver palette (`#1A1D21` canvas, `#FF6B00` accent) — while
+the design, and the driver app (10+ screens on `palettes`/`typeScale`),
+were on v8 blue/neutral. Zero dispatch files used the v8 tokens. The two apps
+looked like different products, and the un-themed one is what store
+screenshots would have captured.
+
+**Shipped 2026-08-21:** `apps/dispatch/lib/theme.ts` serves the v8 palette
+under the legacy token *names*, so all 19 screens changed by exactly one line
+— their import. `#FF6B00` → `#2E5CFF`, `#1A1D21` → `#0E1017`, the type ramp
+snapped onto the v8 scale (`xs` 10→11, `md` 16→15). The token port itself
+(`design-tokens.ts`) needed no work: it already matched `styles/tokens.css`
+value-for-value. `lib/theme.test.ts` pins the palette with literal hexes so it
+cannot silently drift back.
+
+**Not done — deliberately deferred to a visual review:**
+
+- **Light mode.** `useThemeTokens()` (`lib/useThemeTokens.ts`) exists and
+  resolves live against `useColorScheme()`, but nothing consumes it yet.
+  Most screens declare styles at module scope (`const s = {...}`), where a
+  hook cannot reach; adopting it means hoisting those into component bodies,
+  screen by screen. Convert the whole set or none — a half-converted app
+  renders light in one place and dark everywhere else.
+- **Text-role refinement.** `foregroundMuted` covers both the design's
+  `text-secondary` and `text-tertiary`. It maps to secondary; captions and
+  section headers that the design puts on tertiary should move to
+  `foregroundSubtle`.
+- **Line-height and letter-spacing.** The v8 ramp pairs each size with both.
+  `typography.*` is consumed as a bare `fontSize`, so only sizes transferred.
+- **On-device confirmation.** The retheme is verified by unit test, typecheck
+  and lint only. It has not been seen running.
+
+### Corrections the bundle itself needs
+
+Five decisions post-date v8 and were never folded back into the design, so the
+bundle now misrepresents the product. Tracked here rather than by revising the
+handoff (owner's call, 2026-08-21):
+
+| # | Item | Design shows | Should be |
+|---|---|---|---|
+| 1 | **D10 — chat dropped** | `lib-dispatch/thread.jsx`, a Messages segment on Notifications, "Message driver" actions | Delete the thread screen entirely; **Call driver**. The code already did this. |
+| 2 | **D7 — pay period copy** | Hardcoded weekly cadence | Rendered from the org's WEEKLY/BIWEEKLY/MONTHLY config |
+| 3 | **D14 — staff SSO copy** | Hardcoded `otoqa.com` | Per-tenant, driven by the WorkOS org's SSO domains |
+| 4 | **D6 — permissions copy** | Predates voice; no mic | Mic + speech recognition are in scope since Phase 3 shipped |
+| 5 | **Four undesigned surfaces** | — | `/plan` (auto-plan), `/adjust` (window adjustment), the Board's Offers section, and load dictation all shipped after v8 was cut and have no design at all |
 
 ---
 

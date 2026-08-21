@@ -8,7 +8,7 @@
 import * as React from 'react';
 import { ActivityIndicator, Alert, Pressable, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { borderRadius, colors, typography } from '../../lib/theme';
 import { useActiveAuth } from '../../lib/convex';
 
 export default function StaffSignInScreen() {

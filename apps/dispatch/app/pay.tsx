@@ -8,7 +8,7 @@ import { useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@otoqa/convex-client';
-import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { borderRadius, colors, typography } from '../lib/theme';
 
 const day = (ms: number) =>
   new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });

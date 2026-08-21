@@ -6,7 +6,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMutation, useQuery } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@otoqa/convex-client';
-import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { borderRadius, colors, typography } from '../lib/theme';
 import { displayLoadId } from '../lib/format';
 
 const STEP_MS = 15 * 60 * 1000;

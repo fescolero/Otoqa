@@ -13,7 +13,7 @@ import { useRouter } from 'expo-router';
 import { useAction, useMutation, useQuery } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
 import { api, type Id } from '@otoqa/convex-client';
-import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { borderRadius, colors, typography } from '../lib/theme';
 import { useVoiceClip } from '../lib/hooks/useVoiceClip';
 
 /** Local date at hour; date "YYYY-MM-DD" or null = today. */

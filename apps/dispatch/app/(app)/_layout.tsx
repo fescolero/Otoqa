@@ -12,7 +12,7 @@ import { Redirect, Tabs } from 'expo-router';
 import { useConvexAuth, useQuery } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@otoqa/convex-client';
-import { colors, typography } from '@otoqa/mobile-core';
+import { colors, typography } from '../../lib/theme';
 import { useActiveAuth } from '../../lib/convex';
 import { usePushRegistration } from '../../lib/hooks/usePushRegistration';
 import { attachSessionContext } from '../../lib/analytics';

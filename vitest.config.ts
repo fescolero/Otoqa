@@ -37,6 +37,17 @@ export default defineConfig({
         },
       },
       {
+        resolve: {
+          alias: {
+            // The package barrel re-exports the legacy react-native theme, whose
+            // Flow syntax the node environment can't parse. Dispatch's theme
+            // imports the pure token file; mirror that resolution here.
+            '@otoqa/mobile-core/design-tokens': path.resolve(
+              __dirname,
+              'packages/mobile-core/design-tokens.ts',
+            ),
+          },
+        },
         test: {
           name: 'dispatch',
           globals: true,

@@ -5,7 +5,7 @@ import { ActivityIndicator, Linking, Pressable, SectionList, Text, View } from '
 import { useMutation, useQuery } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@otoqa/convex-client';
-import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { borderRadius, colors, typography } from '../../lib/theme';
 
 const KIND_LABEL: Record<string, string> = {
   TRACKING_LOST: 'Tracking lost',

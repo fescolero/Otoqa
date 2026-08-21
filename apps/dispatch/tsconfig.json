@@ -3,9 +3,21 @@
   "compilerOptions": {
     "strict": true,
     "paths": {
-      "@otoqa/convex-client": ["../../packages/convex-client/index.ts"],
-      "@otoqa/mobile-core": ["../../packages/mobile-core/index.ts"]
+      "@otoqa/convex-client": [
+        "../../packages/convex-client/index.ts"
+      ],
+      "@otoqa/mobile-core": [
+        "../../packages/mobile-core/index.ts"
+      ],
+      "@otoqa/mobile-core/design-tokens": [
+        "../../packages/mobile-core/design-tokens.ts"
+      ]
     }
   },
-  "include": ["**/*.ts", "**/*.tsx", ".expo/types/**/*.ts", "expo-env.d.ts"]
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    ".expo/types/**/*.ts",
+    "expo-env.d.ts"
+  ]
 }
