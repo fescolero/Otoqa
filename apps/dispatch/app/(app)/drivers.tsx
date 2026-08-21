@@ -18,6 +18,7 @@ import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '../../lib/theme';
 import {
   AvatarWithStatus,
+  hasHosSignal,
   HosBar,
   SearchField,
   SegRow,
@@ -103,16 +104,17 @@ function DriverRow({ row, onPress }: { row: Row; onPress: () => void }) {
         </Text>
 
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          {hos && (
-            <HosBar
-              onShift={hos.onShift}
-              windowRemainingHours={hos.windowRemainingHours}
-              cycleRemainingHours={hos.cycleRemainingHours}
-            />
+          {/* A driver with no shift history gets the absence stated, not a
+              full green bar implying they're fresh. */}
+          {hos && hasHosSignal(hos) ? (
+            <HosBar hos={hos} />
+          ) : (
+            <Text style={{ fontSize: typography.xs, color: colors.foregroundSubtle }}>
+              No HOS data
+            </Text>
           )}
           <Text style={{ fontSize: typography.xs, color: colors.foregroundSubtle }}>
-            {hos ? '· ' : ''}
-            {row.loadsToday ?? 0} today
+            · {row.loadsToday ?? 0} today
           </Text>
         </View>
       </View>

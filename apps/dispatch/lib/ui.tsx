@@ -12,6 +12,9 @@
 import { Text, TextInput, View, Pressable, ScrollView } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { borderRadius, colors, typography } from './theme';
+import { hasHosSignal, hosBarValue, hosTone, type HosLike } from './hos-display';
+
+export { hasHosSignal, hosBarValue, hosTone, type HosLike } from './hos-display';
 
 /**
  * The design's avatar hues, ported from oklch (unsupported in RN) to the
@@ -126,25 +129,20 @@ export function StatusPill({ status }: { status: DriverStatus }) {
 
 /**
  * Hours-of-service bar (D11 — a session-derived *estimate*, never an ELD
- * reading). On shift it tracks what's left of the 14h window; off shift, the
- * 70h cycle. The design's colour thresholds are hours-remaining, not a
- * percentage, so a long cycle doesn't read "green" at 2h left.
+ * reading). The rules live in hos-display.ts so they can be unit-tested;
+ * this is just their rendering.
+ *
+ * Renders nothing when there is no signal — check `hasHosSignal` to decide
+ * what to show instead.
  */
-export function HosBar({
-  onShift,
-  windowRemainingHours,
-  cycleRemainingHours,
-  width = 44,
-}: {
-  onShift: boolean;
-  windowRemainingHours: number | null;
-  cycleRemainingHours: number;
-  width?: number;
-}) {
-  const remaining = onShift ? (windowRemainingHours ?? 0) : cycleRemainingHours;
-  const max = onShift ? 14 : 70;
+export function HosBar({ hos, width = 44 }: { hos: HosLike; width?: number }) {
+  if (!hasHosSignal(hos)) return null;
+
+  const { remaining, max, label } = hosBarValue(hos);
   const pct = Math.max(0.04, Math.min(1, remaining / max));
-  const color = remaining < 2 ? colors.error : remaining < 4 ? colors.warning : colors.success;
+  const tone = hosTone(remaining);
+  const color =
+    tone === 'danger' ? colors.error : tone === 'warning' ? colors.warning : colors.success;
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
       <View
@@ -159,7 +157,7 @@ export function HosBar({
         <View style={{ width: `${pct * 100}%`, height: '100%', backgroundColor: color, borderRadius: 999 }} />
       </View>
       <Text style={{ fontSize: typography.sm, fontWeight: typography.semibold, color }}>
-        {`${Math.round(remaining)}h`}
+        {label}
       </Text>
     </View>
   );
