@@ -35,8 +35,14 @@ const matchesFilter = (status: DriverStatus, f: Filter) =>
   (f === 'attention' ? status === 'late' || status === 'offline' : status === f);
 
 function DriverRow({ row, onPress }: { row: Row; onPress: () => void }) {
-  const status = row.status as DriverStatus;
-  const route = row.route;
+  // Tolerate a bundle that reached an older backend. An OTA ships JS only, so
+  // a client can outrun the deployed Convex functions; reading `.onShift` off
+  // an absent `hos` would throw on every row, and expo-updates answers a
+  // startup crash by silently rolling back — the failure mode the OTA release
+  // rule in docs/dispatch-app-split-plan.md exists to prevent.
+  const status: DriverStatus = (row.status as DriverStatus) ?? 'idle';
+  const route = row.route ?? null;
+  const hos = row.hos ?? null;
   return (
     <Pressable
       onPress={onPress}
@@ -97,13 +103,16 @@ function DriverRow({ row, onPress }: { row: Row; onPress: () => void }) {
         </Text>
 
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <HosBar
-            onShift={row.hos.onShift}
-            windowRemainingHours={row.hos.windowRemainingHours}
-            cycleRemainingHours={row.hos.cycleRemainingHours}
-          />
+          {hos && (
+            <HosBar
+              onShift={hos.onShift}
+              windowRemainingHours={hos.windowRemainingHours}
+              cycleRemainingHours={hos.cycleRemainingHours}
+            />
+          )}
           <Text style={{ fontSize: typography.xs, color: colors.foregroundSubtle }}>
-            · {row.loadsToday} today
+            {hos ? '· ' : ''}
+            {row.loadsToday ?? 0} today
           </Text>
         </View>
       </View>
@@ -123,7 +132,7 @@ export default function DriversScreen() {
     if (!rows) return base;
     base.all = rows.length;
     for (const r of rows) {
-      const s = r.status as DriverStatus;
+      const s = (r.status as DriverStatus) ?? 'idle';
       if (s === 'idle') base.idle++;
       else if (s === 'moving') base.moving++;
       else base.attention++;
@@ -135,7 +144,7 @@ export default function DriversScreen() {
     if (!rows) return [];
     const needle = q.trim().toLowerCase();
     return rows.filter((r) => {
-      if (!matchesFilter(r.status as DriverStatus, filter)) return false;
+      if (!matchesFilter((r.status as DriverStatus) ?? 'idle', filter)) return false;
       if (!needle) return true;
       const hay = `${r.firstName ?? ''} ${r.lastName ?? ''} ${r.truckUnitId ?? ''} ${r.phone ?? ''}`;
       return hay.toLowerCase().includes(needle);

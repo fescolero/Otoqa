@@ -97,7 +97,7 @@ export function AvatarWithStatus({
           width: dot,
           height: dot,
           borderRadius: 999,
-          backgroundColor: DRIVER_STATUS[status].color,
+          backgroundColor: (DRIVER_STATUS[status] ?? DRIVER_STATUS.idle).color,
           borderWidth: 2,
           borderColor: colors.background,
         }}
@@ -107,7 +107,7 @@ export function AvatarWithStatus({
 }
 
 export function StatusPill({ status }: { status: DriverStatus }) {
-  const s = DRIVER_STATUS[status];
+  const s = DRIVER_STATUS[status] ?? DRIVER_STATUS.idle;
   return (
     <View
       style={{
