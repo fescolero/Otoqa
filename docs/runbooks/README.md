@@ -14,6 +14,7 @@ by `kind`, so **the filename must match the alert's `kind` value** —
 | `billing_drift` | [billing_drift.md](./billing_drift.md) | usage rose after the period was invoiced |
 | — | [break_glass.md](./break_glass.md) | the console or staff IdP is unavailable |
 | — | [billing_backfill.md](./billing_backfill.md) | reconstructing an account's invoices, payments and credits |
+| — | [dispatch-push-credentials.md](./dispatch-push-credentials.md) | standing up Android FCM / iOS APNs credentials for Otoqa Dispatch |
 
 ## Writing one
 
