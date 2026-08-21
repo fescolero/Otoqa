@@ -207,7 +207,15 @@ export interface SegItem<K extends string> {
   label: string;
 }
 
-/** Pill filter row. Scrolls horizontally so extra filters never wrap. */
+/**
+ * Pill filter row.
+ *
+ * Sized so the standard four filters fit a phone width without scrolling: a
+ * horizontally-scrolling row whose content *almost* fits is the worst of
+ * both worlds — the last chip looks sliced off rather than scrollable, and
+ * nobody discovers the gesture. The ScrollView stays for narrow screens and
+ * for surfaces that add a fifth filter, where scrolling is unmistakable.
+ */
 export function SegRow<K extends string>({
   items,
   value,
@@ -223,7 +231,7 @@ export function SegRow<K extends string>({
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
-      contentContainerStyle={{ gap: 6, paddingHorizontal: 24 }}
+      contentContainerStyle={{ gap: 6, paddingLeft: 24, paddingRight: 16 }}
     >
       {items.map((it) => {
         const on = it.k === value;
@@ -233,17 +241,17 @@ export function SegRow<K extends string>({
             onPress={() => onChange(it.k)}
             style={{
               minHeight: 34,
-              paddingHorizontal: 12,
+              paddingHorizontal: 11,
               borderRadius: borderRadius.full,
               backgroundColor: on ? colors.primary : colors.muted,
               flexDirection: 'row',
               alignItems: 'center',
-              gap: 6,
+              gap: 5,
             }}
           >
             <Text
               style={{
-                fontSize: typography.base,
+                fontSize: typography.sm,
                 fontWeight: typography.semibold,
                 color: on ? colors.primaryForeground : colors.foregroundMuted,
               }}
