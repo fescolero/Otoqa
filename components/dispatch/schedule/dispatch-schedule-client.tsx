@@ -173,10 +173,32 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
   const [zoom, setZoom] = React.useState<Zoom>('day');
   const [search, setSearch] = React.useState('');
   const [picked, setPicked] = React.useState<TripBar | null>(null);
-  const [anchor, setAnchor] = React.useState<number>(() => startOfDay(new Date()));
+  // `anchor` is the local midnight the timeline is centred on, and `now`
+  // drives the now-indicator. Both deliberately start as null and are only
+  // ever populated from an effect, because effects don't run during SSR.
+  //
+  // Seeding them from a useState initializer made this component
+  // hydration-unsafe: the initializer DOES run while Next prerenders a client
+  // component, and `startOfDay`/`formatDayLabel` resolve in the *server's*
+  // timezone (UTC on Vercel) while hydration re-renders the very same text
+  // node in the browser's timezone. For any viewer west of UTC after 19:00
+  // local, the two dates land on different calendar days — the toolbar label
+  // rendered "Fri, Aug 21" on the server and "Thu, Aug 20" in the browser,
+  // React discarded the server HTML for this tree and reported hydration
+  // error #418 on every visit to /dispatch/schedule.
+  //
+  // Holding a placeholder until the clock is established keeps the server and
+  // client first paints byte-identical; the real window appears on the same
+  // tick the interval is installed, while the page is still in `loading`.
+  const [anchor, setAnchor] = React.useState<number | null>(null);
+  const [now, setNow] = React.useState<number | null>(null);
 
-  const windowStartMs = zoom === 'day' ? anchor : startOfWeek(new Date(anchor));
-  const windowEndMs = windowStartMs + (zoom === 'day' ? DAY_MS : 7 * DAY_MS);
+  React.useEffect(() => {
+    setAnchor((a) => a ?? startOfDay(new Date()));
+  }, []);
+
+  const windowStartMs = anchor === null ? null : zoom === 'day' ? anchor : startOfWeek(new Date(anchor));
+  const windowEndMs = windowStartMs === null ? null : windowStartMs + (zoom === 'day' ? DAY_MS : 7 * DAY_MS);
 
   // Close the detail drawer whenever the picked trip would fall outside
   // the visible rows (entity switch) or the visible window (date change).
@@ -186,8 +208,8 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
 
   // "Now" tick — re-render every 60s so the now-indicator advances and the
   // render itself stays pure (no Date.now() in the render body).
-  const [now, setNow] = React.useState<number>(() => Date.now());
   React.useEffect(() => {
+    setNow(Date.now());
     const id = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(id);
   }, []);
@@ -197,11 +219,12 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
     brokerOrgId: organizationId,
   });
   const activeSessions = useAuthQuery(api.driverSessions.listActiveForOrg, {});
-  const schedule = useAuthQuery(api.dispatchLegs.getOrgSchedule, {
-    workosOrgId: organizationId,
-    startMs: windowStartMs,
-    endMs: windowEndMs,
-  });
+  const schedule = useAuthQuery(
+    api.dispatchLegs.getOrgSchedule,
+    windowStartMs === null || windowEndMs === null
+      ? 'skip'
+      : { workosOrgId: organizationId, startMs: windowStartMs, endMs: windowEndMs },
+  );
 
   const onShiftDriverIds = React.useMemo(() => {
     const s = new Set<string>();
@@ -315,7 +338,7 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
     return () => ro.disconnect();
   }, []);
   const cellCount = zoom === 'day' ? 24 : 7;
-  const windowDurMs = windowEndMs - windowStartMs;
+  const windowDurMs = windowStartMs === null || windowEndMs === null ? 0 : windowEndMs - windowStartMs;
   const pxPerMs = gridW > 0 && windowDurMs > 0 ? gridW / windowDurMs : 0;
 
   // Stats
@@ -334,19 +357,24 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
     { label: 'Conflicts', value: conflictsCount },
   ];
 
-  const showNowLine = now >= windowStartMs && now <= windowEndMs;
-  const nowX = (now - windowStartMs) * pxPerMs;
+  const showNowLine =
+    now !== null && windowStartMs !== null && windowEndMs !== null && now >= windowStartMs && now <= windowEndMs;
+  const nowX = now !== null && windowStartMs !== null ? (now - windowStartMs) * pxPerMs : 0;
+  const nowLabel = now === null ? '--:--' : formatHHMM(now);
 
   // Find the row object that owns the picked trip (used by detail drawer).
   const pickedOwner = picked ? filteredRows.find((r) => r.id === picked.rowId) : null;
 
   const shiftAnchor = (delta: number) => {
     const step = zoom === 'day' ? DAY_MS : 7 * DAY_MS;
-    setAnchor((a) => (zoom === 'day' ? a + delta * step : startOfWeek(new Date(a + delta * step))));
+    setAnchor((a) =>
+      a === null ? a : zoom === 'day' ? a + delta * step : startOfWeek(new Date(a + delta * step)),
+    );
   };
   const goToday = () => setAnchor(startOfDay(new Date()));
 
-  const loading = drivers === undefined || carriers === undefined || schedule === undefined;
+  const loading =
+    anchor === null || drivers === undefined || carriers === undefined || schedule === undefined;
 
   return (
     <div className="flex h-full min-h-0 flex-col relative min-w-0">
@@ -403,7 +431,11 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
             }}
           >
             <WIcon name="calendar" size={14} className="text-[var(--text-tertiary)]" />
-            {zoom === 'day' ? formatDayLabel(anchor) : formatWeekLabel(startOfWeek(new Date(anchor)))}
+            {windowStartMs === null
+              ? '—'
+              : zoom === 'day'
+                ? formatDayLabel(windowStartMs)
+                : formatWeekLabel(windowStartMs)}
           </button>
           <IconBtn icon="chevron-right" title="Next" onClick={() => shiftAnchor(1)} />
           <button
@@ -556,9 +588,13 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
                   </div>
                 ))
               : Array.from({ length: 7 }, (_, i) => {
-                  const dayMs = startOfWeek(new Date(anchor)) + i * DAY_MS;
+                  // windowStartMs is already the Monday of the visible week in
+                  // week zoom. `now` (not a fresh Date) decides "today" so the
+                  // header stays a pure function of state.
+                  const dayMs = (windowStartMs ?? 0) + i * DAY_MS;
                   const d = new Date(dayMs);
-                  const isToday = startOfDay(d) === startOfDay(new Date());
+                  const isToday =
+                    windowStartMs !== null && now !== null && startOfDay(d) === startOfDay(new Date(now));
                   return (
                     <div
                       key={i}
@@ -596,9 +632,11 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
                 })}
           </div>
 
-          {/* Rows + bars */}
+          {/* Rows + bars. Gated on the window because bar geometry is measured
+              from it — before the mount effect establishes the clock there is
+              no window to lay bars out against. */}
           <div style={{ width: '100%', position: 'relative' }}>
-            {filteredRows.map((r) => {
+            {windowStartMs !== null && windowEndMs !== null && filteredRows.map((r) => {
               const lay = layouts.get(r.id) ?? { trackByBar: new Map<string, number>(), trackCount: 1, height: ROW_H_DAY };
               const bars = barsByRow.get(r.id) ?? [];
               return (
@@ -617,7 +655,7 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
             })}
 
             {showNowLine && filteredRows.length > 0 && (
-              <NowIndicator x={nowX} totalH={totalH} label={formatHHMM(now)} />
+              <NowIndicator x={nowX} totalH={totalH} label={nowLabel} />
             )}
           </div>
         </div>
