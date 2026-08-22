@@ -1577,6 +1577,11 @@ export const boardCapacity = query({
         stopCount: run.items.reduce((n, it) => n + it.stopCount, 0),
         origin: head.origin,
         customerName: head.load?.customerName ?? null,
+        // On HCR contract work the same two cities repeat all day, so the
+        // route line identifies nothing. The contract and trip numbers are
+        // what actually distinguish one run from the next.
+        hcrs: [...new Set(run.items.map((it) => it.facets.hcr).filter((x): x is string => !!x))],
+        trips: run.items.map((it) => it.facets.trip).filter((x): x is string => !!x),
         loads: run.items.map((it) => lightLoad(it.load, it.facets)),
       };
     });
@@ -1655,6 +1660,8 @@ export const boardCapacity = query({
             from: sc.run.from,
             to: sc.run.to,
             via: sc.run.via,
+            hcrs: sc.run.hcrs,
+            trips: sc.run.trips,
             startT: sc.run.startT,
             loadedMiles: sc.run.loadedMiles,
             customerName: sc.run.customerName,

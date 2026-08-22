@@ -104,6 +104,7 @@ async function insertFixtures(ctx: MutationCtx) {
   /** One unassigned AWARDED load with a pickup and a delivery. */
   const mkBacklogLoad = async (
     internalId: string,
+    trip: string,
     from: { p: { lat: number; lng: number }; city: string; startMs: number },
     to: { p: { lat: number; lng: number }; city: string; endMs: number },
   ) => {
@@ -164,17 +165,34 @@ async function insertFixtures(ctx: MutationCtx) {
       offeredAt: now,
       createdBy: 'u',
     });
+    // HCR contract facets — what the run cards identify themselves by.
+    await ctx.db.insert('loadTags', {
+      workosOrgId: WORKOS_ORG,
+      loadId,
+      facetKey: 'HCR',
+      canonicalValue: '925L0',
+      value: '925L0',
+    });
+    await ctx.db.insert('loadTags', {
+      workosOrgId: WORKOS_ORG,
+      loadId,
+      facetKey: 'TRIP',
+      canonicalValue: trip,
+      value: trip,
+    });
     return loadId;
   };
 
   // Two loads that chain: Oakland→Fremont, then Fremont→San Jose later.
   await mkBacklogLoad(
     'L-CAP-1',
+    '211',
     { p: OAKLAND, city: 'Oakland', startMs: now + HOUR },
     { p: FREMONT, city: 'Fremont', endMs: now + 3 * HOUR },
   );
   await mkBacklogLoad(
     'L-CAP-2',
+    '212',
     { p: FREMONT, city: 'Fremont', startMs: now + 6 * HOUR },
     { p: SAN_JOSE, city: 'San Jose', endMs: now + 8 * HOUR },
   );
@@ -348,5 +366,29 @@ describe('boardCapacity — bundled runs', () => {
     const res = await call(t);
 
     expect(res.unassignedCount).toBe(2);
+  });
+});
+
+describe('boardCapacity — contract identity', () => {
+  it('carries the HCR and trip numbers the run cards lead with', async () => {
+    const { t, ready } = setup();
+    await ready;
+    const res = await call(t);
+
+    const run = res.runs[0];
+    // On HCR work the cities repeat all day; this is what tells one run from
+    // the next, so it has to reach the client.
+    expect(run.hcrs).toEqual(['925L0']);
+    expect(run.trips.sort()).toEqual(['211', '212']);
+  });
+
+  it('passes them onto truck suggestions too', async () => {
+    const { t, ready } = setup();
+    await ready;
+    const res = await call(t);
+
+    const suggestion = res.openTrucks.flatMap((tr) => tr.suggestions)[0];
+    expect(suggestion.hcrs).toEqual(['925L0']);
+    expect(suggestion.trips.length).toBe(2);
   });
 });

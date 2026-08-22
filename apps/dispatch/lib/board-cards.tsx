@@ -11,6 +11,7 @@ import { Pressable, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { borderRadius, colors, typography } from './theme';
 import { AvatarWithStatus, hasHosSignal, HosBar, type HosLike } from './ui';
+import { runIdentity } from './run-identity';
 
 const time = (ms: number) =>
   new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
@@ -29,50 +30,36 @@ export interface RunLike {
   loadedMiles: number;
   customerName: string | null;
   deadheadMi?: number | null;
+  hcrs?: string[];
+  trips?: string[];
 }
 
 /**
- * A run's shape, honestly: endpoints get the line, intermediate stops drop
- * to a secondary "via" row. Putting the whole chain on one phone-width row
- * ellipsizes every name into uselessness.
+ * What a run *is*, in two lines.
+ *
+ * The design led with geography. On HCR contract work that's the one thing
+ * every run has in common — the same two cities all day — so the contract
+ * and trip numbers lead instead, and the route drops to the second line
+ * where it still gives context without pretending to identify anything.
+ * Work with no contract facets keeps the route as its heading.
  */
 export function RunRoute({ run, size }: { run: RunLike; size?: number }) {
   const fontSize = size ?? typography.base;
-  const roundTrip = !!run.from && run.from === run.to;
+  const id = runIdentity(run);
   return (
     <View style={{ minWidth: 0 }}>
-      {roundTrip ? (
-        <Text numberOfLines={1} style={{ fontSize, fontWeight: typography.bold, color: colors.foreground }}>
-          {run.from} round trip
-        </Text>
-      ) : (
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, minWidth: 0 }}>
-          <Text
-            numberOfLines={1}
-            style={{ fontSize, fontWeight: typography.bold, color: colors.foreground, flexShrink: 0 }}
-          >
-            {run.from ?? '—'}
-          </Text>
-          <Ionicons name="arrow-forward" size={12} color={colors.foregroundSubtle} />
-          <Text
-            numberOfLines={1}
-            style={{
-              fontSize,
-              fontWeight: typography.bold,
-              color: colors.foregroundMuted,
-              flexShrink: 1,
-            }}
-          >
-            {run.to ?? '—'}
-          </Text>
-        </View>
-      )}
-      {run.via.length > 0 && (
+      <Text
+        numberOfLines={1}
+        style={{ fontSize, fontWeight: typography.bold, color: colors.foreground }}
+      >
+        {id.primary}
+      </Text>
+      {id.secondary && (
         <Text
           numberOfLines={1}
-          style={{ fontSize: typography.xs, color: colors.foregroundSubtle, marginTop: 2 }}
+          style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 2 }}
         >
-          via {run.via.join(', ')}
+          {id.secondary}
         </Text>
       )}
     </View>
