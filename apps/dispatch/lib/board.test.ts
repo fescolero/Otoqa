@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { countByHorizon, horizonOf, planIsEmpty, planSummary, type PlanLike } from './board';
+import {
+  countByHorizon,
+  horizonOf,
+  HORIZONS,
+  planIsEmpty,
+  planSummary,
+  type Horizon,
+  type PlanLike,
+} from './board';
 
 // A fixed mid-morning instant, so "end of day" is unambiguous.
 const NOW = new Date('2026-04-17T09:00:00').getTime();
@@ -96,5 +104,28 @@ describe('planIsEmpty', () => {
     expect(
       planIsEmpty({ runs: [{ loads: [1], candidates: [1], start: NOW }], unplannable: [] }),
     ).toBe(false);
+  });
+});
+
+describe('HORIZONS covers the rule', () => {
+  it('gives every scheduled horizon a tile', () => {
+    // The Board once counted tiles with `horizonOf` while its list sections
+    // used their own boundaries and had no Tomorrow bucket — two loads sat
+    // under a "Tomorrow: 2" tile and a "LATER" heading at the same time.
+    // Sections are now generated from this list, so a horizon missing here
+    // would silently vanish from the board.
+    const scheduled: Horizon[] = ['now', 'today', 'tomorrow', 'later'];
+    expect(HORIZONS.map((h) => h.k)).toEqual(scheduled);
+  });
+
+  it('leaves unscheduled out of the tiles — it is not a point in time', () => {
+    expect(HORIZONS.some((h) => h.k === 'unscheduled')).toBe(false);
+  });
+
+  it('labels every tile', () => {
+    for (const h of HORIZONS) {
+      expect(h.label.length).toBeGreaterThan(0);
+      expect(h.sub.length).toBeGreaterThan(0);
+    }
   });
 });

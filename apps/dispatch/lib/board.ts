@@ -11,7 +11,7 @@
 export type Horizon = 'now' | 'today' | 'tomorrow' | 'later' | 'unscheduled';
 
 export const HORIZONS: { k: Horizon; label: string; sub: string }[] = [
-  { k: 'now', label: 'Next 4h', sub: 'Needs a driver now' },
+  { k: 'now', label: 'Next 4h', sub: 'Starting within 4h' },
   { k: 'today', label: 'Today', sub: 'Rest of the day' },
   { k: 'tomorrow', label: 'Tomorrow', sub: 'Next 24h' },
   { k: 'later', label: 'Later', sub: 'Beyond tomorrow' },

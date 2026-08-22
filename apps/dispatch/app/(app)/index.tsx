@@ -35,20 +35,26 @@ function nextWindow(r: Row | OfferRow): number | null {
   return t ?? null;
 }
 
+/**
+ * Sections derive from `horizonOf` — the same rule the tiles count with.
+ * They used to carry their own boundaries and no Tomorrow bucket at all,
+ * which put two loads under a "Tomorrow: 2" tile and a "LATER" heading on
+ * the same screen. A summary that disagrees with the thing it summarises is
+ * worse than no summary.
+ *
+ * Rolling work keeps its own section and is deliberately excluded from the
+ * horizon buckets: it has already started, so "when does it need a driver"
+ * is not the question being asked of it.
+ */
 function bucketsOf(rows: Row[], now: number): Section[] {
-  const in4h = now + 4 * 3600_000;
-  const endOfDay = new Date(now).setHours(23, 59, 59, 999);
-  const rolling = rows.filter((r) => r.status === 'IN_PROGRESS');
-  const awarded = rows.filter((r) => r.status === 'AWARDED');
-  const withT = awarded.map((r) => ({ r, t: nextWindow(r) }));
-  const pick = (f: (t: number | null) => boolean) =>
-    withT.filter(({ t }) => f(t)).map(({ r }) => r).sort((a, b) => (nextWindow(a) ?? 0) - (nextWindow(b) ?? 0));
+  const inHorizon = (k: Horizon) =>
+    rows
+      .filter((r) => r.status === 'AWARDED' && horizonOf(nextWindow(r), now) === k)
+      .sort((a, b) => (nextWindow(a) ?? 0) - (nextWindow(b) ?? 0));
   return [
-    { title: 'Rolling now', hot: false, data: rolling },
-    { title: 'Next 4 hours', hot: true, data: pick((t) => t != null && t <= in4h) },
-    { title: 'Today', hot: false, data: pick((t) => t != null && t > in4h && t <= endOfDay) },
-    { title: 'Later', hot: false, data: pick((t) => t != null && t > endOfDay) },
-    { title: 'Unscheduled', hot: false, data: pick((t) => t == null) },
+    { title: 'Rolling now', hot: false, data: rows.filter((r) => r.status === 'IN_PROGRESS') },
+    ...HORIZONS.map((h) => ({ title: h.label, hot: h.k === 'now', data: inHorizon(h.k) })),
+    { title: 'Unscheduled', hot: false, data: inHorizon('unscheduled') },
   ].filter((s) => s.data.length > 0);
 }
 
@@ -313,7 +319,13 @@ export default function BoardScreen() {
     return () => clearInterval(id);
   }, []);
 
-  const counts = useMemo(() => countByHorizon(rows ?? [], nextWindow, now), [rows, now]);
+  // Counted over the same set the horizon sections render, so the tiles are
+  // a true summary of the list rather than a second opinion on it.
+  const scheduled = useMemo(
+    () => (rows ?? []).filter((r) => r.status === 'AWARDED'),
+    [rows],
+  );
+  const counts = useMemo(() => countByHorizon(scheduled, nextWindow, now), [scheduled, now]);
   const unassigned = useMemo(
     () => (rows ?? []).filter((r) => r.status === 'AWARDED' && !r.driver).length,
     [rows],
@@ -326,7 +338,7 @@ export default function BoardScreen() {
     if (loading) return [];
     if (horizon) {
       const meta = HORIZONS.find((h) => h.k === horizon);
-      const data = rows.filter((r) => horizonOf(nextWindow(r), now) === horizon);
+      const data = scheduled.filter((r) => horizonOf(nextWindow(r), now) === horizon);
       return data.length > 0
         ? [{ title: meta?.label ?? horizon, hot: horizon === 'now', data }]
         : [];
@@ -337,7 +349,7 @@ export default function BoardScreen() {
         : []),
       ...bucketsOf(rows, now),
     ];
-  }, [loading, horizon, rows, offers, now]);
+  }, [loading, horizon, rows, offers, now, scheduled]);
 
   // One driver, one run, committed through the same guarded path the plan
   // sheet uses — conflicts are skipped and reported, never clobbered.
