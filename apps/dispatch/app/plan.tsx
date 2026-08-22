@@ -13,6 +13,31 @@ import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '../lib/theme';
 import { displayLoadId } from '../lib/format';
 import { trackAction } from '../lib/analytics';
+import { planSummary } from '../lib/board';
+
+/** Small labelled fact, per the design's Meta chip. */
+function Meta({ children, tone }: { children: string; tone: 'good' | 'warn' | 'plain' }) {
+  const map = {
+    good: { bg: 'rgba(16,185,129,0.12)', fg: colors.success },
+    warn: { bg: 'rgba(245,158,11,0.14)', fg: colors.warning },
+    plain: { bg: colors.muted, fg: colors.foregroundMuted },
+  } as const;
+  const t = map[tone];
+  return (
+    <View
+      style={{
+        backgroundColor: t.bg,
+        paddingHorizontal: 8,
+        paddingVertical: 3,
+        borderRadius: borderRadius.full,
+      }}
+    >
+      <Text style={{ color: t.fg, fontSize: typography.sm, fontWeight: typography.semibold }}>
+        {children}
+      </Text>
+    </View>
+  );
+}
 
 const fmt = (t: number) =>
   new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
@@ -24,6 +49,16 @@ export default function PlanScreen() {
   const [choice, setChoice] = useState<Record<number, number>>({});
   const [excluded, setExcluded] = useState<Record<number, boolean>>({});
   const [busy, setBusy] = useState(false);
+
+  // The design puts these counts on the Board's plan card. They live here
+  // instead: the summary needs the ranked plan, and ranking reads every
+  // driver's location and HOS per run — too heavy for a reactive landing
+  // screen, free here where the plan is already loaded.
+  // Captured once at mount rather than ticked: this sheet is transient, and
+  // only `urgent` is time-dependent. Re-reading the clock each render would
+  // be impure for no behavioural gain.
+  const [openedAt] = useState(() => Date.now());
+  const summary = plan ? planSummary(plan, openedAt) : null;
 
   const includedPicks = (plan?.runs ?? [])
     .map((run, i) => ({ run, i }))
@@ -64,10 +99,30 @@ export default function PlanScreen() {
         <Pressable onPress={() => router.back()} hitSlop={12}>
           <Ionicons name="chevron-back" size={24} color={colors.foreground} />
         </Pressable>
-        <Text style={{ fontSize: typography.xl, fontWeight: typography.bold, color: colors.foreground }}>
-          Auto-plan
-        </Text>
+        <View style={{ flex: 1 }}>
+          <Text style={{ fontSize: typography.xl, fontWeight: typography.bold, color: colors.foreground }}>
+            Auto-plan
+          </Text>
+          {summary && summary.trucks > 0 && (
+            <Text style={{ fontSize: typography.sm, color: colors.foregroundSubtle, marginTop: 2 }}>
+              {summary.loads} load{summary.loads === 1 ? '' : 's'} across {summary.trucks} truck
+              {summary.trucks === 1 ? '' : 's'}
+              {summary.needsCall > 0 ? ` · ${summary.needsCall} need your call` : ''}
+            </Text>
+          )}
+        </View>
       </View>
+      {summary && summary.trucks > 0 && (
+        <View
+          style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap', paddingHorizontal: 24, marginTop: 12 }}
+        >
+          <Meta tone="good">{`${summary.clean} clean`}</Meta>
+          {summary.needsCall > 0 && (
+            <Meta tone="warn">{`${summary.needsCall} exception${summary.needsCall === 1 ? '' : 's'}`}</Meta>
+          )}
+          {summary.urgent > 0 && <Meta tone="plain">{`${summary.urgent} in the next 4h`}</Meta>}
+        </View>
+      )}
       {plan === undefined ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 48 }} />
       ) : plan.runs.length === 0 && plan.unplannable.length === 0 ? (

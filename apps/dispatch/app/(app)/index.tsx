@@ -1,10 +1,14 @@
-/** Board — live assignments bucketed by horizon (v8 design): pending
+/** Board — the capacity-first view from the v8 design
+ * (`lib-dispatch/capacity.jsx`): horizon tiles summarising what lands when,
+ * a one-tap route into batch planning, then the work itself.
+ *
+ * Live assignments bucketed by horizon: pending
  * broker OFFERS first (accept/decline — Phase 3), then what's rolling
  * now, then AWARDED work by urgency of its next window — Next 4 hours /
  * Today / Later / Unscheduled. The backlog is never one flat list.
  * Buckets compute client-side from the stops the read wrapper already
  * returns. */
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, SectionList, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -12,6 +16,7 @@ import { useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '../../lib/theme';
 import { displayLoadId } from '../../lib/format';
+import { countByHorizon, horizonOf, HORIZONS, type Horizon } from '../../lib/board';
 import { useDispatchSession } from './_layout';
 
 type Row = NonNullable<ReturnType<typeof useQuery<typeof api.dispatchMobile.listActiveAssignments>>>[number];
@@ -29,10 +34,9 @@ function nextWindow(r: Row | OfferRow): number | null {
   return t ?? null;
 }
 
-function bucketsOf(rows: Row[]): Section[] {
-  const now = Date.now();
+function bucketsOf(rows: Row[], now: number): Section[] {
   const in4h = now + 4 * 3600_000;
-  const endOfDay = new Date().setHours(23, 59, 59, 999);
+  const endOfDay = new Date(now).setHours(23, 59, 59, 999);
   const rolling = rows.filter((r) => r.status === 'IN_PROGRESS');
   const awarded = rows.filter((r) => r.status === 'AWARDED');
   const withT = awarded.map((r) => ({ r, t: nextWindow(r) }));
@@ -157,18 +161,161 @@ function OfferCard({ offer }: { offer: OfferRow }) {
   );
 }
 
+/** One horizon tile: a count, its label, and what it means. */
+function HorizonTile({
+  label,
+  sub,
+  count,
+  hot,
+  selected,
+  onPress,
+}: {
+  label: string;
+  sub: string;
+  count: number;
+  hot: boolean;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  const accent = hot && count > 0;
+  return (
+    <Pressable
+      onPress={onPress}
+      style={{
+        flexBasis: '48%',
+        flexGrow: 1,
+        padding: 13,
+        borderRadius: borderRadius.lg,
+        backgroundColor: accent ? 'rgba(245,158,11,0.10)' : colors.card,
+        borderWidth: 1,
+        borderColor: selected
+          ? colors.primary
+          : accent
+            ? 'rgba(245,158,11,0.32)'
+            : colors.borderSubtle,
+      }}
+    >
+      <Text
+        style={{
+          fontSize: 26,
+          lineHeight: 30,
+          fontWeight: typography.bold,
+          color: accent ? colors.warning : colors.foreground,
+        }}
+      >
+        {count}
+      </Text>
+      <Text
+        style={{
+          fontSize: typography.sm,
+          fontWeight: typography.bold,
+          color: colors.foreground,
+          marginTop: 3,
+        }}
+      >
+        {label}
+      </Text>
+      <Text style={{ fontSize: typography.xs, color: colors.foregroundSubtle, marginTop: 1 }}>
+        {sub}
+      </Text>
+    </Pressable>
+  );
+}
+
+/**
+ * Route into batch planning.
+ *
+ * Deliberately does NOT run `suggestPlan` to show the design's clean /
+ * exception counts: that query ranks every org driver — location and HOS
+ * reads apiece — once per proposed run, and the Board is a reactive
+ * subscription on the landing screen. The full summary renders on /plan,
+ * where the plan is already loaded and the cost is paid once, on purpose.
+ */
+function AutoPlanCard({ unassigned, onPress }: { unassigned: number; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={{
+        marginTop: 12,
+        padding: 15,
+        borderRadius: borderRadius.lg,
+        backgroundColor: colors.accentTint,
+        borderWidth: 1,
+        borderColor: colors.primary,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 11,
+      }}
+    >
+      <View
+        style={{
+          width: 28,
+          height: 28,
+          borderRadius: 999,
+          backgroundColor: colors.primary,
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <Ionicons name="sparkles" size={15} color={colors.primaryForeground} />
+      </View>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text
+          style={{ fontSize: typography.md, fontWeight: typography.bold, color: colors.foreground }}
+        >
+          Plan the backlog
+        </Text>
+        <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 2 }}>
+          {unassigned} load{unassigned === 1 ? '' : 's'} waiting on a driver
+        </Text>
+      </View>
+      <Ionicons name="chevron-forward" size={18} color={colors.primary} />
+    </Pressable>
+  );
+}
+
 export default function BoardScreen() {
   const session = useDispatchSession();
   const router = useRouter();
   const rows = useQuery(api.dispatchMobile.listActiveAssignments, {});
   const offers = useQuery(api.dispatchMobile.listOffers, {});
   const loading = rows === undefined || offers === undefined;
-  const sections: Section[] = loading
-    ? []
-    : [
-        ...(offers.length > 0 ? [{ title: 'Offers', hot: true, offers: true, data: offers as (Row | OfferRow)[] }] : []),
-        ...bucketsOf(rows),
-      ];
+  const [horizon, setHorizon] = useState<Horizon | null>(null);
+
+  // One clock for the screen, ticking every minute. Horizon membership is
+  // time-dependent: a load crossing from "Today" into "Next 4h" is exactly
+  // what the tiles exist to surface, and it must not wait for a data change.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const counts = useMemo(() => countByHorizon(rows ?? [], nextWindow, now), [rows, now]);
+  const unassigned = useMemo(
+    () => (rows ?? []).filter((r) => r.status === 'AWARDED' && !r.driver).length,
+    [rows],
+  );
+
+  // Picking a tile replaces the bucketed view with that one horizon, rather
+  // than filtering inside it — otherwise "Next 4h" would still render a
+  // "Rolling now" section above it and read as though the filter missed.
+  const sections: Section[] = useMemo(() => {
+    if (loading) return [];
+    if (horizon) {
+      const meta = HORIZONS.find((h) => h.k === horizon);
+      const data = rows.filter((r) => horizonOf(nextWindow(r), now) === horizon);
+      return data.length > 0
+        ? [{ title: meta?.label ?? horizon, hot: horizon === 'now', data }]
+        : [];
+    }
+    return [
+      ...(offers.length > 0
+        ? [{ title: 'Offers', hot: true, offers: true, data: offers as (Row | OfferRow)[] }]
+        : []),
+      ...bucketsOf(rows, now),
+    ];
+  }, [loading, horizon, rows, offers, now]);
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: 70 }}>
@@ -194,7 +341,10 @@ export default function BoardScreen() {
       </View>
       {loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 48 }} />
-      ) : sections.length === 0 ? (
+      ) : rows.length === 0 && offers.length === 0 ? (
+        // Only when the board is genuinely empty. Keyed off the data, not off
+        // `sections`, so a horizon filter that matches nothing still renders
+        // the tiles — otherwise the filter hides its own escape hatch.
         <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, textAlign: 'center', marginTop: 48, lineHeight: 20 }}>
           No loads on the board yet.{'\n'}Tap + to create one, or wait for offers and awarded loads.
         </Text>
@@ -202,8 +352,54 @@ export default function BoardScreen() {
         <SectionList
           sections={sections}
           keyExtractor={(r) => r._id}
+          style={{ flex: 1 }}
           contentContainerStyle={{ padding: 24, paddingTop: 12 }}
           stickySectionHeadersEnabled={false}
+          ListHeaderComponent={
+            <View>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                {HORIZONS.map((hz) => (
+                  <HorizonTile
+                    key={hz.k}
+                    label={hz.label}
+                    sub={hz.sub}
+                    count={counts[hz.k]}
+                    hot={hz.k === 'now'}
+                    selected={horizon === hz.k}
+                    onPress={() => setHorizon((cur) => (cur === hz.k ? null : hz.k))}
+                  />
+                ))}
+              </View>
+              {unassigned > 0 && (
+                <AutoPlanCard unassigned={unassigned} onPress={() => router.push('/plan')} />
+              )}
+              {horizon && (
+                <Pressable onPress={() => setHorizon(null)} style={{ marginTop: 12 }}>
+                  <Text
+                    style={{
+                      color: colors.primary,
+                      fontSize: typography.sm,
+                      fontWeight: typography.semibold,
+                    }}
+                  >
+                    ← Show everything
+                  </Text>
+                </Pressable>
+              )}
+            </View>
+          }
+          ListEmptyComponent={
+            <Text
+              style={{
+                color: colors.foregroundSubtle,
+                fontSize: typography.base,
+                textAlign: 'center',
+                paddingVertical: 40,
+              }}
+            >
+              Nothing in this horizon.
+            </Text>
+          }
           renderSectionHeader={({ section }) => (
             <Text style={{ color: section.hot ? colors.warning : colors.foregroundMuted, fontSize: typography.xs, fontWeight: typography.bold, letterSpacing: 1, textTransform: 'uppercase', marginTop: 14, marginBottom: 6 }}>
               {section.title} · {section.data.length}
