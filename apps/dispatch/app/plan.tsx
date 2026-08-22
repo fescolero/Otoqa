@@ -23,6 +23,7 @@ import { borderRadius, colors, typography } from '../lib/theme';
 import { displayLoadId } from '../lib/format';
 import { trackAction } from '../lib/analytics';
 import { planSummary } from '../lib/board';
+import { loadIdentity } from '../lib/run-identity';
 import { Avatar, SearchField } from '../lib/ui';
 
 /** Small labelled fact, per the design's Meta chip. */
@@ -292,10 +293,11 @@ export default function PlanScreen() {
                         </Text>
                       )}
                       <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold }}>
-                        {l.load ? displayLoadId(l.load.internalId) : '—'}{' '}
+                        {loadIdentity(l.load ?? {})}{' '}
                         <Text style={{ color: colors.foregroundMuted, fontWeight: typography.medium }}>
-                          {l.load?.tripNumber ? `Trip ${l.load.tripNumber} · ` : ''}
-                          {l.load?.customerName ?? ''} · {fmt(l.start)}
+                          {l.load?.customerName ? `${l.load.customerName} · ` : ''}
+                          {fmt(l.start)}
+                          {l.load?.internalId ? ` · ${displayLoadId(l.load.internalId)}` : ''}
                         </Text>
                       </Text>
                     </View>

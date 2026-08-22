@@ -12,6 +12,7 @@ import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '../../lib/theme';
 import { displayLoadId } from '../../lib/format';
+import { loadIdentity } from '../../lib/run-identity';
 import type { Id } from '@otoqa/convex-client';
 
 const fmtWindow = (date?: string | null, begin?: string | null, end?: string | null) => {
@@ -85,6 +86,8 @@ export default function LoadDetailScreen() {
   }
 
   const rolling = load.legStatus === 'ACTIVE' || load.trackingStatus === 'In Transit';
+  const title = loadIdentity(load);
+  const loadNumber = displayLoadId(load.internalId);
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: 64 }}>
@@ -92,22 +95,34 @@ export default function LoadDetailScreen() {
         <Pressable onPress={() => router.back()} hitSlop={12}>
           <Ionicons name="chevron-back" size={24} color={colors.foreground} />
         </Pressable>
-        <Text style={{ fontSize: typography.xl, fontWeight: typography.bold, color: colors.foreground, flex: 1 }}>
-          {displayLoadId(load.internalId)}
-        </Text>
+        {/* Titled the way you got here from: a card reading "HCR 945L4 ·
+            Trip 27" must not land on a screen headed "120065381". The number
+            keeps a home directly beneath, unless it IS the title because the
+            load carries no contract facets. */}
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text
+            numberOfLines={1}
+            style={{ fontSize: typography.xl, fontWeight: typography.bold, color: colors.foreground }}
+          >
+            {title}
+          </Text>
+          {title !== loadNumber && (
+            <Text style={{ fontSize: typography.sm, color: colors.foregroundSubtle, marginTop: 1 }}>
+              {loadNumber}
+            </Text>
+          )}
+        </View>
         <Text style={{ color: rolling ? colors.primary : colors.foregroundMuted, fontSize: typography.xs, fontWeight: typography.bold }}>
           {rolling ? 'In transit' : (load.trackingStatus ?? load.status)}
         </Text>
       </View>
 
       <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 48 }}>
-        {(load.tripNumber || load.hcr || load.externalSource) && (
+        {load.externalSource ? (
           <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
-            {load.tripNumber ? <Chip label={`Trip ${load.tripNumber}`} /> : null}
-            {load.hcr ? <Chip label={`HCR ${load.hcr}`} /> : null}
-            {load.externalSource ? <Chip label={load.externalSource} /> : null}
+            <Chip label={load.externalSource} />
           </View>
-        )}
+        ) : null}
 
         <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, paddingHorizontal: 14, paddingVertical: 8, marginBottom: 12 }}>
           {load.customerName ? <MetaRow label="Customer" value={load.customerName} /> : null}
