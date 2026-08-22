@@ -10,10 +10,16 @@
 
 export type Horizon = 'now' | 'today' | 'tomorrow' | 'later' | 'unscheduled';
 
+/**
+ * The tiles count work that still needs a driver — this is an assignment
+ * tool, so "how much is unassigned, and how soon is it due" is the question
+ * the board opens with. Work that already has a driver is status, not a
+ * to-do, and belongs below rather than in the counts.
+ */
 export const HORIZONS: { k: Horizon; label: string; sub: string }[] = [
-  { k: 'now', label: 'Next 4h', sub: 'Starting within 4h' },
-  { k: 'today', label: 'Today', sub: 'Rest of the day' },
-  { k: 'tomorrow', label: 'Tomorrow', sub: 'Next 24h' },
+  { k: 'now', label: 'Next 4h', sub: 'Needs a driver now' },
+  { k: 'today', label: 'Today', sub: 'Unassigned today' },
+  { k: 'tomorrow', label: 'Tomorrow', sub: 'Unassigned tomorrow' },
   { k: 'later', label: 'Later', sub: 'Beyond tomorrow' },
 ];
 

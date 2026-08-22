@@ -23,7 +23,19 @@ import { useDispatchSession } from './_layout';
 type Row = NonNullable<ReturnType<typeof useQuery<typeof api.dispatchMobile.listActiveAssignments>>>[number];
 type OfferRow = NonNullable<ReturnType<typeof useQuery<typeof api.dispatchMobile.listOffers>>>[number];
 
-type Section = { title: string; hot: boolean; offers?: boolean; data: (Row | OfferRow)[] };
+type Section = {
+  title: string;
+  hot: boolean;
+  offers?: boolean;
+  /** Rows in this section still need a driver — show the assign affordance. */
+  assign?: boolean;
+  data: (Row | OfferRow)[];
+};
+
+/** Awarded to us, nobody driving it yet — the thing this app exists to fix. */
+function isUnassigned(r: Row): boolean {
+  return r.status === 'AWARDED' && !r.driver;
+}
 
 /** Earliest window of a not-yet-checked-in stop — the load's "next action" time. */
 function nextWindow(r: Row | OfferRow): number | null {
@@ -36,25 +48,34 @@ function nextWindow(r: Row | OfferRow): number | null {
 }
 
 /**
- * Sections derive from `horizonOf` — the same rule the tiles count with.
- * They used to carry their own boundaries and no Tomorrow bucket at all,
- * which put two loads under a "Tomorrow: 2" tile and a "LATER" heading on
- * the same screen. A summary that disagrees with the thing it summarises is
- * worse than no summary.
+ * The board is an assignment tool, so it leads with work that still needs a
+ * driver, bucketed by how soon it's due — exactly what the tiles count.
  *
- * Rolling work keeps its own section and is deliberately excluded from the
- * horizon buckets: it has already started, so "when does it need a driver"
- * is not the question being asked of it.
+ * Everything else is status rather than a to-do: rolling work has started,
+ * and assigned work is handled. Both stay visible, below, so the board is
+ * still a complete picture — but they don't compete with the backlog for
+ * the top of the screen, and they aren't counted in the tiles.
  */
 function bucketsOf(rows: Row[], now: number): Section[] {
-  const inHorizon = (k: Horizon) =>
+  const needsDriver = (k: Horizon) =>
     rows
-      .filter((r) => r.status === 'AWARDED' && horizonOf(nextWindow(r), now) === k)
+      .filter((r) => isUnassigned(r) && horizonOf(nextWindow(r), now) === k)
       .sort((a, b) => (nextWindow(a) ?? 0) - (nextWindow(b) ?? 0));
+
+  const assigned = rows
+    .filter((r) => r.status === 'AWARDED' && !isUnassigned(r))
+    .sort((a, b) => (nextWindow(a) ?? 0) - (nextWindow(b) ?? 0));
+
   return [
+    ...HORIZONS.map((h) => ({
+      title: h.label,
+      hot: h.k === 'now',
+      assign: true,
+      data: needsDriver(h.k),
+    })),
+    { title: 'Unscheduled', hot: false, assign: true, data: needsDriver('unscheduled') },
     { title: 'Rolling now', hot: false, data: rows.filter((r) => r.status === 'IN_PROGRESS') },
-    ...HORIZONS.map((h) => ({ title: h.label, hot: h.k === 'now', data: inHorizon(h.k) })),
-    { title: 'Unscheduled', hot: false, data: inHorizon('unscheduled') },
+    { title: 'Assigned', hot: false, data: assigned },
   ].filter((s) => s.data.length > 0);
 }
 
@@ -321,10 +342,7 @@ export default function BoardScreen() {
 
   // Counted over the same set the horizon sections render, so the tiles are
   // a true summary of the list rather than a second opinion on it.
-  const scheduled = useMemo(
-    () => (rows ?? []).filter((r) => r.status === 'AWARDED'),
-    [rows],
-  );
+  const scheduled = useMemo(() => (rows ?? []).filter(isUnassigned), [rows]);
   const counts = useMemo(() => countByHorizon(scheduled, nextWindow, now), [scheduled, now]);
   const unassigned = useMemo(
     () => (rows ?? []).filter((r) => r.status === 'AWARDED' && !r.driver).length,
@@ -340,7 +358,7 @@ export default function BoardScreen() {
       const meta = HORIZONS.find((h) => h.k === horizon);
       const data = scheduled.filter((r) => horizonOf(nextWindow(r), now) === horizon);
       return data.length > 0
-        ? [{ title: meta?.label ?? horizon, hot: horizon === 'now', data }]
+        ? [{ title: meta?.label ?? horizon, hot: horizon === 'now', assign: true, data }]
         : [];
     }
     return [
@@ -387,9 +405,14 @@ export default function BoardScreen() {
             </Pressable>
           </View>
         </View>
+        {/* Leads with the number this screen exists to drive to zero. */}
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 4 }}>
           {session?.orgName ?? ''}
-          {rows ? ` · ${rows.length} active` : ''}
+          {rows
+            ? scheduled.length > 0
+              ? ` · ${scheduled.length} need${scheduled.length === 1 ? 's' : ''} a driver`
+              : ' · all assigned'
+            : ''}
           {offers && offers.length > 0 ? ` · ${offers.length} offer${offers.length === 1 ? '' : 's'}` : ''}
         </Text>
       </View>
@@ -534,10 +557,49 @@ export default function BoardScreen() {
                   {row.load?.customerName ?? 'Customer'} · {row.stops.length} stop{row.stops.length === 1 ? '' : 's'}
                   {t ? ` · ${fmtTime(t)}` : ''}
                 </Text>
-                <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 2 }}>
-                  {row.driver ? `${row.driver.firstName} ${row.driver.lastName}` : 'No driver assigned'}
+                <Text
+                  style={{
+                    color: row.driver ? colors.foregroundMuted : colors.warning,
+                    fontSize: typography.sm,
+                    fontWeight: row.driver ? typography.normal : typography.semibold,
+                    marginTop: 2,
+                  }}
+                >
+                  {row.driver ? `${row.driver.firstName} ${row.driver.lastName}` : 'Needs a driver'}
                 </Text>
                 <FacetTags load={row.load} />
+                {/* The whole card already opens the assign sheet, but a load
+                    waiting on a driver deserves a visible verb — this is the
+                    one action the board exists for. Legs assign through the
+                    web TMS, so the button only appears where it can work. */}
+                {(section as Section).assign && row.source !== 'leg' && (
+                  <Pressable
+                    onPress={() =>
+                      router.push({ pathname: '/assign', params: { assignmentId: row._id } })
+                    }
+                    style={{
+                      marginTop: 12,
+                      minHeight: 38,
+                      borderRadius: borderRadius.md,
+                      backgroundColor: colors.accentTint,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 6,
+                    }}
+                  >
+                    <Ionicons name="person-add-outline" size={15} color={colors.primary} />
+                    <Text
+                      style={{
+                        color: colors.primary,
+                        fontSize: typography.sm,
+                        fontWeight: typography.bold,
+                      }}
+                    >
+                      Assign driver
+                    </Text>
+                  </Pressable>
+                )}
               </Pressable>
             );
           }}
