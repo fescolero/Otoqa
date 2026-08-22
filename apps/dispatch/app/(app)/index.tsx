@@ -16,7 +16,13 @@ import { useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '../../lib/theme';
 import { displayLoadId } from '../../lib/format';
-import { countByHorizon, horizonOf, HORIZONS, type Horizon } from '../../lib/board';
+import {
+  countByHorizon,
+  horizonOf,
+  horizonTiles,
+  HORIZON_ORDER,
+  type Horizon,
+} from '../../lib/board';
 import { AllTrucksLoadedCard, RunRow, TruckNeedCard } from '../../lib/board-cards';
 import { useDispatchSession } from './_layout';
 
@@ -66,12 +72,13 @@ function bucketsOf(rows: Row[], now: number): Section[] {
     .filter((r) => r.status === 'AWARDED' && !isUnassigned(r))
     .sort((a, b) => (nextWindow(a) ?? 0) - (nextWindow(b) ?? 0));
 
+  const tiles = horizonTiles(now);
   return [
-    ...HORIZONS.map((h) => ({
-      title: h.label,
-      hot: h.k === 'now',
+    ...HORIZON_ORDER.map((k) => ({
+      title: tiles.find((t) => t.k === k)?.label ?? k,
+      hot: k === 'now' || k === 'overdue',
       assign: true,
-      data: needsDriver(h.k),
+      data: needsDriver(k),
     })),
     { title: 'Unscheduled', hot: false, assign: true, data: needsDriver('unscheduled') },
     { title: 'Rolling now', hot: false, data: rows.filter((r) => r.status === 'IN_PROGRESS') },
@@ -212,18 +219,23 @@ function HorizonTile({
   label,
   sub,
   count,
-  hot,
+  tone,
   selected,
   onPress,
 }: {
   label: string;
   sub: string;
   count: number;
-  hot: boolean;
+  tone: 'danger' | 'warn' | 'plain';
   selected: boolean;
   onPress: () => void;
 }) {
-  const accent = hot && count > 0;
+  // Only colour a tile that has something in it — an empty Overdue tile
+  // glowing red is a false alarm every time the board is healthy.
+  const lit = count > 0 && tone !== 'plain';
+  const fg = tone === 'danger' ? colors.error : colors.warning;
+  const bg = tone === 'danger' ? 'rgba(239,68,68,0.10)' : 'rgba(245,158,11,0.10)';
+  const bd = tone === 'danger' ? 'rgba(239,68,68,0.32)' : 'rgba(245,158,11,0.32)';
   return (
     <Pressable
       onPress={onPress}
@@ -232,13 +244,9 @@ function HorizonTile({
         flexGrow: 1,
         padding: 13,
         borderRadius: borderRadius.lg,
-        backgroundColor: accent ? 'rgba(245,158,11,0.10)' : colors.card,
+        backgroundColor: lit ? bg : colors.card,
         borderWidth: 1,
-        borderColor: selected
-          ? colors.primary
-          : accent
-            ? 'rgba(245,158,11,0.32)'
-            : colors.borderSubtle,
+        borderColor: selected ? colors.primary : lit ? bd : colors.borderSubtle,
       }}
     >
       <Text
@@ -246,7 +254,7 @@ function HorizonTile({
           fontSize: 26,
           lineHeight: 30,
           fontWeight: typography.bold,
-          color: accent ? colors.warning : colors.foreground,
+          color: lit ? fg : colors.foreground,
         }}
       >
         {count}
@@ -355,7 +363,7 @@ export default function BoardScreen() {
   const sections: Section[] = useMemo(() => {
     if (loading) return [];
     if (horizon) {
-      const meta = HORIZONS.find((h) => h.k === horizon);
+      const meta = horizonTiles(now).find((h) => h.k === horizon);
       const data = scheduled.filter((r) => horizonOf(nextWindow(r), now) === horizon);
       return data.length > 0
         ? [{ title: meta?.label ?? horizon, hot: horizon === 'now', assign: true, data }]
@@ -435,13 +443,13 @@ export default function BoardScreen() {
           ListHeaderComponent={
             <View>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                {HORIZONS.map((hz) => (
+                {horizonTiles(now).map((hz) => (
                   <HorizonTile
                     key={hz.k}
                     label={hz.label}
                     sub={hz.sub}
                     count={counts[hz.k]}
-                    hot={hz.k === 'now'}
+                    tone={hz.k === 'overdue' ? 'danger' : hz.k === 'now' ? 'warn' : 'plain'}
                     selected={horizon === hz.k}
                     onPress={() => setHorizon((cur) => (cur === hz.k ? null : hz.k))}
                   />

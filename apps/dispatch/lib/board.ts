@@ -8,20 +8,7 @@
  * one pass. These are the rules behind that.
  */
 
-export type Horizon = 'now' | 'today' | 'tomorrow' | 'later' | 'unscheduled';
-
-/**
- * The tiles count work that still needs a driver — this is an assignment
- * tool, so "how much is unassigned, and how soon is it due" is the question
- * the board opens with. Work that already has a driver is status, not a
- * to-do, and belongs below rather than in the counts.
- */
-export const HORIZONS: { k: Horizon; label: string; sub: string }[] = [
-  { k: 'now', label: 'Next 4h', sub: 'Needs a driver now' },
-  { k: 'today', label: 'Today', sub: 'Unassigned today' },
-  { k: 'tomorrow', label: 'Tomorrow', sub: 'Unassigned tomorrow' },
-  { k: 'later', label: 'Later', sub: 'Beyond tomorrow' },
-];
+export type Horizon = 'overdue' | 'now' | 'today' | 'tomorrow' | 'later' | 'unscheduled';
 
 const FOUR_HOURS = 4 * 3600_000;
 
@@ -31,15 +18,54 @@ function endOfDay(ms: number): number {
   return d.getTime();
 }
 
+const clock = (ms: number) =>
+  new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+const calendar = (ms: number) =>
+  new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+/**
+ * The tiles, with the range each one actually covers.
+ *
+ * Static labels made the counts look broken: at 7pm "Next 4h" runs to 11pm,
+ * so "Today" is the 58 minutes left after it — which reads as nonsense next
+ * to a 4-hour bucket holding 34 loads. The buckets are a partition, and the
+ * sub-label has to say so, exactly as the design's does ("by 1:40 PM", "to
+ * 8:00 PM").
+ *
+ * Overdue is its own tile for the same reason. Folding past-due work into
+ * "Next 4h" both inflated that count and buried the most urgent thing on the
+ * board inside a label that says the opposite.
+ */
+export function horizonTiles(now: number): { k: Horizon; label: string; sub: string }[] {
+  const windowEnd = now + FOUR_HOURS;
+  const todayEnd = endOfDay(now);
+  return [
+    { k: 'overdue', label: 'Overdue', sub: 'Window already passed' },
+    { k: 'now', label: 'Next 4h', sub: `by ${clock(windowEnd)}` },
+    {
+      k: 'today',
+      label: 'Today',
+      // Once the 4h window reaches midnight there is no "rest of today" left.
+      sub: windowEnd >= todayEnd ? 'Covered by Next 4h' : `to ${clock(todayEnd)}`,
+    },
+    { k: 'tomorrow', label: 'Tomorrow', sub: calendar(now + 86_400_000) },
+    { k: 'later', label: 'Later', sub: `${calendar(now + 2 * 86_400_000)} onward` },
+  ];
+}
+
+/** Stable ordering for section headings, independent of the clock. */
+export const HORIZON_ORDER: Horizon[] = ['overdue', 'now', 'today', 'tomorrow', 'later'];
+
 /**
  * Which bucket a load's next action falls in.
  *
- * Anything already overdue counts as `now` rather than sliding into a past
- * bucket and disappearing — a window that closed an hour ago is the most
- * urgent thing on the board, not the least.
+ * Overdue is separated rather than folded forward: a window that closed an
+ * hour ago is the most urgent thing on the board, and counting it under
+ * "Next 4h" tells a dispatcher the opposite of the truth.
  */
 export function horizonOf(nextWindowMs: number | null, now: number): Horizon {
   if (nextWindowMs == null) return 'unscheduled';
+  if (nextWindowMs < now) return 'overdue';
   if (nextWindowMs <= now + FOUR_HOURS) return 'now';
   if (nextWindowMs <= endOfDay(now)) return 'today';
   if (nextWindowMs <= endOfDay(now + 86_400_000)) return 'tomorrow';
@@ -53,6 +79,7 @@ export function countByHorizon<T>(
   now: number,
 ): Record<Horizon, number> {
   const counts: Record<Horizon, number> = {
+    overdue: 0,
     now: 0,
     today: 0,
     tomorrow: 0,

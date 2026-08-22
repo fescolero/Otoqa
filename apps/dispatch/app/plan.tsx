@@ -4,8 +4,17 @@
  * driver suggestion (tap the driver row to cycle the top 3 — warned
  * candidates ranked, never hidden), and an include/exclude toggle.
  * Conflicts on apply are skipped-and-reported, never clobbered. */
-import { useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, Text, View } from 'react-native';
+import { useMemo, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Modal,
+  Pressable,
+  ScrollView,
+  Text,
+  View,
+} from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useMutation, useQuery } from 'convex/react';
@@ -14,6 +23,7 @@ import { borderRadius, colors, typography } from '../lib/theme';
 import { displayLoadId } from '../lib/format';
 import { trackAction } from '../lib/analytics';
 import { planSummary } from '../lib/board';
+import { Avatar, SearchField } from '../lib/ui';
 
 /** Small labelled fact, per the design's Meta chip. */
 function Meta({ children, tone }: { children: string; tone: 'good' | 'warn' | 'plain' }) {
@@ -50,6 +60,25 @@ export default function PlanScreen() {
   const [excluded, setExcluded] = useState<Record<number, boolean>>({});
   const [busy, setBusy] = useState(false);
 
+  // Cycling the top three reaches the drivers the scorer liked. Overriding
+  // reaches the one the dispatcher already had in mind — which on a fleet
+  // this size is the difference between one tap and a scroll.
+  const roster = useQuery(api.dispatchMobile.listAvailableDrivers, {});
+  const [pickerFor, setPickerFor] = useState<number | null>(null);
+  const [override, setOverride] = useState<
+    Record<number, { _id: string; firstName: string; lastName: string }>
+  >({});
+  const [q, setQ] = useState('');
+
+  const rosterMatches = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const all = roster ?? [];
+    if (!needle) return all;
+    return all.filter((d) =>
+      `${d.firstName ?? ''} ${d.lastName ?? ''} ${d.phone ?? ''}`.toLowerCase().includes(needle),
+    );
+  }, [roster, q]);
+
   // The design puts these counts on the Board's plan card. They live here
   // instead: the summary needs the ranked plan, and ranking reads every
   // driver's location and HOS per run — too heavy for a reactive landing
@@ -62,7 +91,7 @@ export default function PlanScreen() {
 
   const includedPicks = (plan?.runs ?? [])
     .map((run, i) => ({ run, i }))
-    .filter(({ run, i }) => !excluded[i] && run.candidates.length > 0);
+    .filter(({ run, i }) => !excluded[i] && (run.candidates.length > 0 || !!override[i]));
 
   const apply = async () => {
     if (!plan || includedPicks.length === 0) return;
@@ -70,7 +99,8 @@ export default function PlanScreen() {
     try {
       const res = await applyPlan({
         picks: includedPicks.map(({ run, i }) => ({
-          driverId: run.candidates[(choice[i] ?? 0) % run.candidates.length]._id,
+          driverId: (override[i]?._id ??
+            run.candidates[(choice[i] ?? 0) % run.candidates.length]._id) as never,
           assignmentIds: run.loads.map((l) => l.assignmentId),
         })),
       });
@@ -131,6 +161,96 @@ export default function PlanScreen() {
         </Text>
       ) : (
         <>
+          <Modal
+            visible={pickerFor !== null}
+            animationType="slide"
+            transparent={false}
+            onRequestClose={() => setPickerFor(null)}
+          >
+            <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: 64 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, gap: 8 }}>
+                <Pressable onPress={() => setPickerFor(null)} hitSlop={12}>
+                  <Ionicons name="chevron-back" size={24} color={colors.foreground} />
+                </Pressable>
+                <Text style={{ fontSize: typography.xl, fontWeight: typography.bold, color: colors.foreground }}>
+                  {pickerFor !== null ? `Driver for run ${pickerFor + 1}` : 'Pick a driver'}
+                </Text>
+              </View>
+              <View style={{ paddingHorizontal: 24, paddingTop: 14 }}>
+                <SearchField
+                  value={q}
+                  onChangeText={setQ}
+                  placeholder={`Search ${(roster ?? []).length} drivers`}
+                />
+              </View>
+              {roster === undefined ? (
+                <ActivityIndicator color={colors.primary} style={{ marginTop: 48 }} />
+              ) : (
+                <FlatList
+                  data={rosterMatches}
+                  keyExtractor={(d) => d._id}
+                  style={{ flex: 1 }}
+                  keyboardShouldPersistTaps="handled"
+                  contentContainerStyle={{ padding: 24, gap: 8 }}
+                  ListEmptyComponent={
+                    <Text
+                      style={{
+                        color: colors.foregroundSubtle,
+                        fontSize: typography.base,
+                        textAlign: 'center',
+                        paddingVertical: 40,
+                      }}
+                    >
+                      No drivers match.
+                    </Text>
+                  }
+                  renderItem={({ item }) => (
+                    <Pressable
+                      onPress={() => {
+                        if (pickerFor === null) return;
+                        setOverride((o) => ({
+                          ...o,
+                          [pickerFor]: {
+                            _id: item._id,
+                            firstName: item.firstName,
+                            lastName: item.lastName,
+                          },
+                        }));
+                        setPickerFor(null);
+                      }}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 11,
+                        backgroundColor: colors.card,
+                        borderWidth: 1,
+                        borderColor: colors.borderSubtle,
+                        borderRadius: borderRadius.lg,
+                        padding: 12,
+                      }}
+                    >
+                      <Avatar id={item._id} first={item.firstName} last={item.lastName} size={34} />
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text
+                          numberOfLines={1}
+                          style={{ color: colors.foreground, fontSize: typography.base, fontWeight: typography.semibold }}
+                        >
+                          {item.firstName} {item.lastName}
+                        </Text>
+                        {item.phone ? (
+                          <Text style={{ color: colors.foregroundSubtle, fontSize: typography.sm, marginTop: 2 }}>
+                            {item.phone}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <Ionicons name="chevron-forward" size={16} color={colors.foregroundSubtle} />
+                    </Pressable>
+                  )}
+                />
+              )}
+            </View>
+          </Modal>
+
           <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 120 }}>
             {plan.runs.map((run, i) => {
               const off = !!excluded[i];
@@ -173,32 +293,79 @@ export default function PlanScreen() {
                       </Text>
                     </View>
                   ))}
-                  {cand ? (
+                  {cand || override[i] ? (
                     <Pressable
                       onPress={() =>
-                        run.candidates.length > 1 && setChoice((c) => ({ ...c, [i]: (c[i] ?? 0) + 1 }))
+                        !override[i] &&
+                        run.candidates.length > 1 &&
+                        setChoice((c) => ({ ...c, [i]: (c[i] ?? 0) + 1 }))
                       }
                       style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border }}
                     >
                       <Ionicons name="person-circle-outline" size={20} color={colors.primary} />
                       <View style={{ flex: 1 }}>
                         <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold }}>
-                          {cand.firstName} {cand.lastName}
-                          {cand.milesFromPickup != null ? `  ·  ${cand.milesFromPickup} mi out` : ''}
+                          {override[i]
+                            ? `${override[i].firstName} ${override[i].lastName}`
+                            : `${cand!.firstName} ${cand!.lastName}`}
+                          {!override[i] && cand!.milesFromPickup != null
+                            ? `  ·  ${cand!.milesFromPickup} mi out`
+                            : ''}
                         </Text>
-                        {cand.warns.length > 0 && (
-                          <Text style={{ color: colors.warning, fontSize: typography.xs, marginTop: 1 }}>
-                            {cand.warns.join(' · ')}
+                        {override[i] ? (
+                          <Text style={{ color: colors.foregroundSubtle, fontSize: typography.xs, marginTop: 1 }}>
+                            Chosen by you
                           </Text>
+                        ) : (
+                          cand!.warns.length > 0 && (
+                            <Text style={{ color: colors.warning, fontSize: typography.xs, marginTop: 1 }}>
+                              {cand!.warns.join(' · ')}
+                            </Text>
+                          )
                         )}
                       </View>
-                      {run.candidates.length > 1 && (
+                      {!override[i] && run.candidates.length > 1 && (
                         <Ionicons name="swap-vertical" size={16} color={colors.foregroundMuted} />
                       )}
+                      <Pressable
+                        onPress={() => {
+                          setQ('');
+                          setPickerFor(i);
+                        }}
+                        hitSlop={8}
+                        style={{ paddingHorizontal: 6 }}
+                      >
+                        <Text style={{ color: colors.primary, fontSize: typography.xs, fontWeight: typography.bold }}>
+                          {override[i] ? 'CHANGE' : 'PICK'}
+                        </Text>
+                      </Pressable>
                     </Pressable>
                   ) : (
-                    <Text style={{ color: colors.warning, fontSize: typography.xs, marginTop: 12 }}>
-                      No available driver to suggest — assign manually from the Board.
+                    <Pressable
+                      onPress={() => {
+                        setQ('');
+                        setPickerFor(i);
+                      }}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 6,
+                        marginTop: 12,
+                        minHeight: 38,
+                        borderRadius: borderRadius.md,
+                        backgroundColor: colors.accentTint,
+                      }}
+                    >
+                      <Ionicons name="person-add-outline" size={15} color={colors.primary} />
+                      <Text style={{ color: colors.primary, fontSize: typography.sm, fontWeight: typography.bold }}>
+                        Pick a driver
+                      </Text>
+                    </Pressable>
+                  )}
+                  {!cand && !override[i] && (
+                    <Text style={{ color: colors.warning, fontSize: typography.xs, marginTop: 8 }}>
+                      No driver scored well for this run — pick one above to include it.
                     </Text>
                   )}
                 </View>

@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   countByHorizon,
   horizonOf,
-  HORIZONS,
+  horizonTiles,
+  HORIZON_ORDER,
   planIsEmpty,
   planSummary,
   type Horizon,
@@ -23,11 +24,12 @@ describe('horizonOf', () => {
     expect(horizonOf(null, NOW)).toBe('unscheduled');
   });
 
-  it('keeps overdue work in the most urgent bucket, never a past one', () => {
-    // A window that closed an hour ago is the most urgent thing on the
-    // board. Sliding it out of view is how loads get forgotten.
-    expect(horizonOf(h(-1), NOW)).toBe('now');
-    expect(horizonOf(h(-48), NOW)).toBe('now');
+  it('separates overdue from Next 4h', () => {
+    // Folding past-due work forward both inflated "Next 4h" and hid the most
+    // urgent thing on the board behind a label claiming it was upcoming.
+    expect(horizonOf(h(-1), NOW)).toBe('overdue');
+    expect(horizonOf(h(-48), NOW)).toBe('overdue');
+    expect(horizonOf(h(0.5), NOW)).toBe('now');
   });
 
   it('puts the last minute of today in today, and the first of tomorrow in tomorrow', () => {
@@ -40,14 +42,22 @@ describe('horizonOf', () => {
 
 describe('countByHorizon', () => {
   it('tallies every row into exactly one bucket', () => {
-    const rows = [h(1), h(2), h(7), h(30), h(200), null];
+    const rows = [h(-3), h(1), h(2), h(7), h(30), h(200), null];
     const counts = countByHorizon(rows, (r) => r, NOW);
-    expect(counts).toEqual({ now: 2, today: 1, tomorrow: 1, later: 1, unscheduled: 1 });
+    expect(counts).toEqual({
+      overdue: 1,
+      now: 2,
+      today: 1,
+      tomorrow: 1,
+      later: 1,
+      unscheduled: 1,
+    });
     expect(Object.values(counts).reduce((a, b) => a + b, 0)).toBe(rows.length);
   });
 
   it('returns all-zero for an empty board rather than undefined counts', () => {
     expect(countByHorizon([] as number[], (r) => r, NOW)).toEqual({
+      overdue: 0,
       now: 0,
       today: 0,
       tomorrow: 0,
@@ -107,25 +117,36 @@ describe('planIsEmpty', () => {
   });
 });
 
-describe('HORIZONS covers the rule', () => {
-  it('gives every scheduled horizon a tile', () => {
-    // The Board once counted tiles with `horizonOf` while its list sections
-    // used their own boundaries and had no Tomorrow bucket — two loads sat
-    // under a "Tomorrow: 2" tile and a "LATER" heading at the same time.
-    // Sections are now generated from this list, so a horizon missing here
-    // would silently vanish from the board.
-    const scheduled: Horizon[] = ['now', 'today', 'tomorrow', 'later'];
-    expect(HORIZONS.map((h) => h.k)).toEqual(scheduled);
+describe('horizon tiles', () => {
+  it('covers every scheduled bucket, in the order sections render', () => {
+    expect(horizonTiles(NOW).map((t) => t.k)).toEqual(HORIZON_ORDER);
   });
 
   it('leaves unscheduled out of the tiles — it is not a point in time', () => {
-    expect(HORIZONS.some((h) => h.k === 'unscheduled')).toBe(false);
+    expect(horizonTiles(NOW).some((t) => t.k === 'unscheduled')).toBe(false);
   });
 
-  it('labels every tile', () => {
-    for (const h of HORIZONS) {
-      expect(h.label.length).toBeGreaterThan(0);
-      expect(h.sub.length).toBeGreaterThan(0);
-    }
+  it('states the range each tile covers, so a small Today reads as a remainder', () => {
+    // 9am: Next 4h runs to 1pm, so Today is 1pm→midnight. Static labels made
+    // that look broken next to a bigger 4-hour count.
+    const tiles = horizonTiles(NOW);
+    const now4h = tiles.find((t) => t.k === 'now')!;
+    const today = tiles.find((t) => t.k === 'today')!;
+    expect(now4h.sub).toContain('1:00');
+    expect(today.sub).toContain('11:59');
+  });
+
+  it('says so when the 4h window has already swallowed the rest of today', () => {
+    const late = new Date('2026-04-17T22:30:00').getTime();
+    const today = horizonTiles(late).find((t) => t.k === 'today')!;
+    expect(today.sub).toBe('Covered by Next 4h');
+    // And nothing can land in that bucket, so the count is honestly zero.
+    expect(horizonOf(new Date('2026-04-17T23:30:00').getTime(), late)).toBe('now');
+  });
+
+  it('dates the forward tiles rather than labelling them vaguely', () => {
+    const tiles = horizonTiles(NOW);
+    expect(tiles.find((t) => t.k === 'tomorrow')!.sub).toContain('18');
+    expect(tiles.find((t) => t.k === 'later')!.sub).toContain('19');
   });
 });
