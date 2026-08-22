@@ -159,7 +159,29 @@ async function insertFixtures(ctx: MutationCtx) {
     updatedAt: now,
   });
 
-  return { soon, later, dispatched, driverId };
+  // A leg created by the web TMS that nobody has been put on yet. The board
+  // showed it as needing a driver but offered no way to give it one.
+  const orphanLoad = await mkOpenLoad('L-LEG-ORPHAN', day(1), now + 20 * 3600_000);
+  await ctx.db.patch(orphanLoad, { status: 'Assigned' });
+  const orphanStops = await ctx.db
+    .query('loadStops')
+    .withIndex('by_load', (q) => q.eq('loadId', orphanLoad))
+    .collect();
+  await ctx.db.insert('dispatchLegs', {
+    loadId: orphanLoad,
+    sequence: 1,
+    startStopId: orphanStops[0]._id,
+    endStopId: orphanStops[1]._id,
+    legLoadedMiles: 15,
+    legEmptyMiles: 0,
+    status: 'PENDING',
+    scheduledStartMs: now + 20 * 3600_000,
+    workosOrgId: WORKOS_ORG,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  return { soon, later, dispatched, driverId, orphanLoad };
 }
 
 function setup() {
@@ -238,13 +260,13 @@ describe('open loads count toward the backlog', () => {
   });
 });
 
-describe('suggestDriversForOpenLoad', () => {
+describe('suggestDriversForTmsLoad', () => {
   it('ranks candidates for a load with no carrier assignment', async () => {
     const { t, ready } = setup();
     const { soon } = await ready;
     const ranked = await t
       .withIdentity(staff as never)
-      .query(api.dispatchMobile.suggestDriversForOpenLoad, { loadId: soon });
+      .query(api.dispatchMobile.suggestDriversForTmsLoad, { loadId: soon });
 
     expect(ranked.length).toBeGreaterThan(0);
     expect(ranked[0]).toHaveProperty('hosLabel');
@@ -256,7 +278,7 @@ describe('suggestDriversForOpenLoad', () => {
     await expect(
       t
         .withIdentity({ ...staff, org_id: 'org_someone_else' } as never)
-        .query(api.dispatchMobile.suggestDriversForOpenLoad, { loadId: soon }),
+        .query(api.dispatchMobile.suggestDriversForTmsLoad, { loadId: soon }),
     ).rejects.toThrow();
   });
 });
@@ -355,5 +377,62 @@ describe('the planner refuses past-due work', () => {
     expect(res.unassignedCount).toBe(1);
     expect(proposed).toHaveLength(1);
     expect(stillOffered.every((id) => proposed.includes(id))).toBe(true);
+  });
+});
+
+describe('driverless legs can be assigned', () => {
+  it('shows up on the board as needing a driver', async () => {
+    const { t, ready } = setup();
+    await ready;
+    const rows = await board(t);
+
+    const orphan = rows.find((r) => r.load?.internalId === 'L-LEG-ORPHAN')!;
+    expect(orphan.source).toBe('leg');
+    expect(orphan.driver).toBeNull();
+    // AWARDED is how a PENDING leg surfaces, and no driver puts it in the
+    // tiles — which is what made the missing action a dead end.
+    expect(orphan.status).toBe('AWARDED');
+  });
+
+  it('ranks candidates for it, despite the load not being status Open', async () => {
+    const { t, ready } = setup();
+    const { orphanLoad } = await ready;
+    const ranked = await t
+      .withIdentity(staff as never)
+      .query(api.dispatchMobile.suggestDriversForTmsLoad, { loadId: orphanLoad });
+
+    expect(ranked.length).toBeGreaterThan(0);
+  });
+
+  it('assigns by patching the existing leg rather than creating a second one', async () => {
+    const { t, ready } = setup();
+    const { orphanLoad, driverId } = await ready;
+
+    const before = await t.run(async (ctx) =>
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_load', (q) => q.eq('loadId', orphanLoad))
+        .collect(),
+    );
+    expect(before).toHaveLength(1);
+
+    const res = await t
+      .withIdentity(staff as never)
+      .mutation(api.dispatchMobile.assignDriverToLoadsWeb, {
+        loadIds: [orphanLoad],
+        driverId,
+      });
+    expect(res.results[0].success).toBe(true);
+
+    const after = await t.run(async (ctx) =>
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_load', (q) => q.eq('loadId', orphanLoad))
+        .collect(),
+    );
+    // Patched, not duplicated — a second leg would double the load's pay and
+    // put two rows on the driver's day.
+    expect(after).toHaveLength(1);
+    expect(after[0].driverId).toBe(driverId);
   });
 });

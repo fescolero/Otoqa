@@ -574,13 +574,17 @@ export default function BoardScreen() {
             return (
               <Pressable
                 onPress={
-                  row.source === 'open'
-                    ? () => router.push({ pathname: '/assign', params: { loadId: row.loadId } })
-                    : row.source === 'leg'
-                      ? row.load
+                  // Anything still needing a driver opens the assign sheet;
+                  // work that has one opens the load. Which sheet depends on
+                  // the model: legs and open loads commit by loadId, brokered
+                  // work by its carrier assignment.
+                  row.source === 'assignment'
+                    ? () => router.push({ pathname: '/assign', params: { assignmentId: row._id } })
+                    : !row.driver && row.load
+                      ? () => router.push({ pathname: '/assign', params: { loadId: row.load!._id } })
+                      : row.load
                         ? () => router.push({ pathname: '/load/[id]', params: { id: row.load!._id } })
                         : undefined
-                      : () => router.push({ pathname: '/assign', params: { assignmentId: row._id } })
                 }
                 onLongPress={() => Alert.alert('Load payload (debug)', JSON.stringify(row.load, null, 2))}
                 style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}
@@ -617,15 +621,14 @@ export default function BoardScreen() {
                 <FacetTags load={row.load} />
                 {/* The whole card already opens the assign sheet, but a load
                     waiting on a driver deserves a visible verb — this is the
-                    one action the board exists for. Legs assign through the
-                    web TMS, so the button only appears where it can work. */}
-                {(section as Section).assign && row.source !== 'leg' && (
+                    one action the board exists for. */}
+                {(section as Section).assign && (row.source === 'assignment' || row.load) && (
                   <Pressable
                     onPress={() =>
                       router.push(
-                        row.source === 'open'
-                          ? { pathname: '/assign', params: { loadId: row.loadId } }
-                          : { pathname: '/assign', params: { assignmentId: row._id } },
+                        row.source === 'assignment'
+                          ? { pathname: '/assign', params: { assignmentId: row._id } }
+                          : { pathname: '/assign', params: { loadId: row.load!._id } },
                       )
                     }
                     style={{

@@ -252,6 +252,36 @@ snapped onto the v8 scale (`xs` 10→11, `md` 16→15). The token port itself
 value-for-value. `lib/theme.test.ts` pins the palette with literal hexes so it
 cannot silently drift back.
 
+**Screen work shipped 2026-08-21**, closing the gaps the audit found:
+
+| Screen | What landed |
+|---|---|
+| Drivers | Avatar + status dot, truck, running route, HOS bar, status pill, search, All/Available/Rolling/Off-plan filters. `listDrivers` gained a data-backed status (`offline` deliberately distinct from `idle` — a truck rolling blind is not available) and merges both work models. |
+| Notifications | Per-kind icon tiles, severity sections, filters, and the action that *resolves* each alert (Move window → `/adjust`, Assign someone else → `/assign`, Call, View load/map). Actions are dropped when their data is absent rather than offered as dead ends. |
+| Board | Horizon tiles with live ranges, plan entry, Trucks needing work, Bundled runs, inline **Assign driver**. |
+| Assign | Search on both the assign sheet and the plan sheet's driver picker; the plan sheet gains a full-roster override labelled "Chosen by you". |
+
+**Two structural fixes worth recording:**
+
+- **Open TMS loads were invisible.** The board read carrier assignments and
+  dispatch legs; a `status: 'Open'` load has neither, so the entire population
+  the app exists to assign never reached it and every horizon tile was
+  structurally zero for a carrier running its own TMS. `openBacklog()` now
+  reads them off `by_org_status_first_stop`, bounded to −1/+14 days with a 200
+  cap, and `truncated` flows to the UI so a capped count renders "200+".
+- **One planner, two commit paths.** `PlanItem` carries a `WorkRef`
+  discriminating brokered assignments from open loads, because they commit
+  differently — patch the assignment, or create the leg. `applyPlan` takes
+  both id lists. `assignDriverInternal` patches an existing driverless leg
+  rather than creating a second one, so a leg-sourced row assigns the same way.
+
+**Product decision 2026-08-21 — past-due work leaves the board.** A pickup
+window that has already closed isn't work a phone can act on; assigning a
+driver can't un-miss it. `isActionable` is the single place that decides, and
+it applies to tiles, sections, header count, runs and truck suggestions alike,
+so every number on the screen describes one population. The loads remain
+visible in the web TMS.
+
 **Not done — deliberately deferred to a visual review:**
 
 - **Light mode.** `useThemeTokens()` (`lib/useThemeTokens.ts`) exists and

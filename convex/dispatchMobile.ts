@@ -1120,12 +1120,17 @@ export const suggestDriversForLoad = query({
  * Conflict-aware per §4.6: returns alreadyAssigned instead of clobbering.
  */
 /**
- * Ranked candidates for an **open** TMS load — the same scorer
- * suggestDriversForLoad uses, keyed by loadId because an open load has no
- * carrier assignment to key on. Committing is assignDriverToLoadsWeb, which
- * creates the leg that dispatching a load actually means.
+ * Ranked candidates for a TMS load — the same scorer suggestDriversForLoad
+ * uses, keyed by loadId rather than by a carrier assignment.
+ *
+ * Serves any load that commits through the leg model, whether it has no leg
+ * yet (status Open) or an existing driverless one: assignDriverInternal
+ * patches assignable legs when they exist and creates one when they don't.
+ * Deliberately not gated on status — a driverless PENDING leg needs a driver
+ * exactly as much as an untouched open load, and gating here would leave
+ * that row on the board with nothing to press.
  */
-export const suggestDriversForOpenLoad = query({
+export const suggestDriversForTmsLoad = query({
   args: { loadId: v.id('loadInformation') },
   handler: async (ctx, args) => {
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');

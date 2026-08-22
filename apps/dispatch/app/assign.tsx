@@ -34,7 +34,7 @@ export default function AssignScreen() {
     id ? { assignmentId: id } : 'skip',
   );
   const rankedOpen = useQuery(
-    api.dispatchMobile.suggestDriversForOpenLoad,
+    api.dispatchMobile.suggestDriversForTmsLoad,
     !id && openId ? { loadId: openId } : 'skip',
   );
   const ranked = id ? rankedAssignment : rankedOpen;
