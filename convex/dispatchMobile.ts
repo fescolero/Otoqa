@@ -286,6 +286,73 @@ async function assignmentsByStatus(
  * the web TMS create dispatchLegs, not loadCarrierAssignments — without
  * the merge their Board is empty (same model gap listDriverHistory
  * closes). Leg rows are read-only on the client (source: 'leg'). */
+/**
+ * Open loads — the web-TMS backlog.
+ *
+ * The board previously read two sources: brokered carrier assignments, and
+ * dispatch legs. A load that is `status: 'Open'` has neither — no broker
+ * assignment because nobody brokered it, and no leg because a leg is what
+ * dispatching one *creates*. So the entire population this app exists to
+ * assign was invisible to it, and the horizon tiles read zero while the
+ * backlog sat in the TMS.
+ *
+ * Bounded on purpose, per the design's premise that a phone never shows
+ * "all unassigned": a date window off the by_org_status_first_stop index,
+ * plus a hard cap. `truncated` tells the client the tiles are a floor
+ * rather than a total, so a big backlog never renders as a small one.
+ */
+const OPEN_BACKLOG_CAP = 200;
+const OPEN_BACKLOG_DAYS_BACK = 1;
+const OPEN_BACKLOG_DAYS_FORWARD = 14;
+
+const dateKey = (ms: number) => new Date(ms).toISOString().split('T')[0];
+
+async function openBacklog(ctx: QueryCtx, resolved: ResolvedOrg, now: number) {
+  const from = dateKey(now - OPEN_BACKLOG_DAYS_BACK * 86_400_000);
+  const to = dateKey(now + OPEN_BACKLOG_DAYS_FORWARD * 86_400_000);
+  const orgScopes = [...new Set([...resolved.driverOrgIds, resolved.externalId])];
+
+  const loads: Doc<'loadInformation'>[] = [];
+  for (const orgId of orgScopes) {
+    loads.push(
+      ...(await ctx.db
+        .query('loadInformation')
+        .withIndex('by_org_status_first_stop', (q) =>
+          q.eq('workosOrgId', orgId).eq('status', 'Open').gte('firstStopDate', from).lte('firstStopDate', to),
+        )
+        .take(OPEN_BACKLOG_CAP + 1)),
+    );
+  }
+
+  // A load that already has a leg is dispatched, whatever its status says —
+  // it must not appear twice on one board.
+  const legged = new Set<string>();
+  for (const orgId of orgScopes) {
+    for (const status of ['PENDING', 'ACTIVE'] as const) {
+      for (const leg of await ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_org_status', (q) => q.eq('workosOrgId', orgId).eq('status', status))
+        .collect()) {
+        legged.add(leg.loadId as string);
+      }
+    }
+  }
+
+  const seen = new Set<string>();
+  const fresh = loads.filter((l) => {
+    const key = l._id as string;
+    if (legged.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  fresh.sort((a, b) => (a.firstStopDate ?? '').localeCompare(b.firstStopDate ?? ''));
+
+  return {
+    loads: fresh.slice(0, OPEN_BACKLOG_CAP),
+    truncated: fresh.length > OPEN_BACKLOG_CAP,
+  };
+}
+
 export const listActiveAssignments = query({
   args: {},
   handler: async (ctx) => {
@@ -406,7 +473,44 @@ export const listActiveAssignments = query({
       });
     }
 
-    return [...assignmentRows, ...legRows];
+    // Open loads: the web-TMS backlog, which has neither a carrier assignment
+    // nor a leg. Shaped like the other rows so the board's bucketing, tiles
+    // and assign affordance treat them uniformly.
+    const { loads: openLoads, truncated } = await openBacklog(ctx, resolved, now);
+    const openRows = await Promise.all(
+      openLoads
+        .filter((load) => !seenLoads.has(load._id as string))
+        .map(async (load) => {
+          const stops = await ctx.db
+            .query('loadStops')
+            .withIndex('by_load', (q) => q.eq('loadId', load._id))
+            .collect();
+          const facets = await getLoadFacets(ctx, load._id);
+          return {
+            _id: load._id as unknown as Id<'loadCarrierAssignments'>,
+            loadId: load._id,
+            source: 'open' as const,
+            status: 'AWARDED' as const,
+            openBacklogTruncated: truncated,
+            load: {
+              _id: load._id,
+              internalId: load.internalId,
+              customerName: load.customerName,
+              trackingStatus: load.trackingStatus,
+              effectiveMiles: load.effectiveMiles,
+              equipmentType: load.equipmentType,
+              tripNumber: facets.trip,
+              hcr: facets.hcr,
+              facets: facets.all,
+            },
+            stops: stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber),
+            driver: null,
+            driverLocation: null,
+          };
+        }),
+    );
+
+    return [...assignmentRows, ...legRows, ...openRows];
   },
 });
 
@@ -1015,6 +1119,36 @@ export const suggestDriversForLoad = query({
  * path can't serve WorkOS staff (assignments key on the CLERK org id).
  * Conflict-aware per §4.6: returns alreadyAssigned instead of clobbering.
  */
+/**
+ * Ranked candidates for an **open** TMS load — the same scorer
+ * suggestDriversForLoad uses, keyed by loadId because an open load has no
+ * carrier assignment to key on. Committing is assignDriverToLoadsWeb, which
+ * creates the leg that dispatching a load actually means.
+ */
+export const suggestDriversForOpenLoad = query({
+  args: { loadId: v.id('loadInformation') },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const load = await ctx.db.get(args.loadId);
+    const orgScopes = new Set([...resolved.driverOrgIds, resolved.externalId]);
+    if (!load || !orgScopes.has(load.workosOrgId)) {
+      throw new ConvexError('Load not found');
+    }
+    const stops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', load._id))
+      .collect();
+    const pickup = stops
+      .filter((st) => st.stopType === 'PICKUP')
+      .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
+    const origin =
+      pickup?.latitude != null && pickup?.longitude != null
+        ? { lat: pickup.latitude, lng: pickup.longitude }
+        : null;
+    return await rankDriversForOrigin(ctx, resolved, origin);
+  },
+});
+
 export const assignDriverToLoad = mutation({
   args: {
     assignmentId: v.id('loadCarrierAssignments'),
@@ -1452,11 +1586,16 @@ export const boardCapacity = query({
       }),
     );
 
+    // Open loads count toward the backlog even though they don't chain into
+    // runs yet (they carry no carrier assignment, which is what applyPlan
+    // commits). Counting them keeps the "Every truck is loaded" card from
+    // claiming an empty backlog while work sits unassigned in the TMS.
+    const { loads: openLoads } = await openBacklog(ctx, resolved, Date.now());
     return {
       runs,
       openTrucks,
-      /** Loads with no driver at all — what the sections above are drawn from. */
-      unassignedCount: plannable.length,
+      /** Loads with no driver at all — brokered backlog plus open TMS loads. */
+      unassignedCount: plannable.length + openLoads.length,
     };
   },
 });

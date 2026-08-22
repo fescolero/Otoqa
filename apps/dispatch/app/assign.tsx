@@ -1,5 +1,14 @@
-/** Assign sheet — ranked candidates per §5.1/v8: best match on top, warned
- * candidates ranked (never hidden), conflict-aware assignment (§4.6). */
+/**
+ * Assign sheet — ranked candidates per §5.1/v8: best match on top, warned
+ * candidates ranked (never hidden), conflict-aware assignment (§4.6).
+ *
+ * Serves both backlogs, because the board shows both. A brokered load is
+ * keyed by its carrier assignment and commits through assignDriverToLoad; an
+ * open TMS load has no assignment to key on, so it is keyed by loadId and
+ * commits through assignDriverToLoadsWeb — which creates the leg that
+ * dispatching a load actually means. Same scorer either way.
+ */
+import { useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Pressable, Text, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMutation, useQuery } from 'convex/react';
@@ -9,17 +18,50 @@ import { borderRadius, colors, typography } from '../lib/theme';
 
 export default function AssignScreen() {
   const router = useRouter();
-  const { assignmentId } = useLocalSearchParams<{ assignmentId: string }>();
-  const id = assignmentId as Id<'loadCarrierAssignments'>;
-  const ranked = useQuery(api.dispatchMobile.suggestDriversForLoad, id ? { assignmentId: id } : 'skip');
+  const { assignmentId, loadId } = useLocalSearchParams<{
+    assignmentId?: string;
+    loadId?: string;
+  }>();
+  const id = assignmentId as Id<'loadCarrierAssignments'> | undefined;
+  const openId = loadId as Id<'loadInformation'> | undefined;
+
+  const rankedAssignment = useQuery(
+    api.dispatchMobile.suggestDriversForLoad,
+    id ? { assignmentId: id } : 'skip',
+  );
+  const rankedOpen = useQuery(
+    api.dispatchMobile.suggestDriversForOpenLoad,
+    !id && openId ? { loadId: openId } : 'skip',
+  );
+  const ranked = id ? rankedAssignment : rankedOpen;
+
   const assign = useMutation(api.dispatchMobile.assignDriverToLoad);
+  const assignWeb = useMutation(api.dispatchMobile.assignDriverToLoadsWeb);
+  const [busy, setBusy] = useState(false);
 
   const pick = async (driverId: Id<'drivers'>) => {
-    const res = await assign({ assignmentId: id, driverId });
-    if (res.success) {
-      router.back();
-    } else {
-      Alert.alert('Already assigned', `This load was just assigned to ${res.alreadyAssigned.driverName}.`);
+    setBusy(true);
+    try {
+      if (id) {
+        const res = await assign({ assignmentId: id, driverId });
+        if (res.success) {
+          router.back();
+        } else {
+          Alert.alert(
+            'Already assigned',
+            `This load was just assigned to ${res.alreadyAssigned.driverName}.`,
+          );
+        }
+        return;
+      }
+      if (openId) {
+        await assignWeb({ loadIds: [openId], driverId });
+        router.back();
+      }
+    } catch (e) {
+      Alert.alert('Something went wrong', e instanceof Error ? e.message : 'Please try again.');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -52,8 +94,9 @@ export default function AssignScreen() {
                   {index === 0 && <Text style={{ color: colors.primary, fontSize: typography.xs }}>  BEST</Text>}
                 </Text>
                 <Pressable
-                  onPress={() => pick(item._id)}
-                  style={{ backgroundColor: colors.primary, borderRadius: borderRadius.md, paddingHorizontal: 14, paddingVertical: 8 }}
+                  disabled={busy}
+                  onPress={() => void pick(item._id)}
+                  style={{ backgroundColor: colors.primary, borderRadius: borderRadius.md, paddingHorizontal: 14, paddingVertical: 8, opacity: busy ? 0.6 : 1 }}
                 >
                   <Text style={{ color: colors.primaryForeground, fontWeight: typography.semibold, fontSize: typography.sm }}>Assign</Text>
                 </Pressable>

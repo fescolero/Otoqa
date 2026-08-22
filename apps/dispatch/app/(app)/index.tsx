@@ -529,11 +529,13 @@ export default function BoardScreen() {
             return (
               <Pressable
                 onPress={
-                  row.source === 'leg'
-                    ? row.load
-                      ? () => router.push({ pathname: '/load/[id]', params: { id: row.load!._id } })
-                      : undefined
-                    : () => router.push({ pathname: '/assign', params: { assignmentId: row._id } })
+                  row.source === 'open'
+                    ? () => router.push({ pathname: '/assign', params: { loadId: row.loadId } })
+                    : row.source === 'leg'
+                      ? row.load
+                        ? () => router.push({ pathname: '/load/[id]', params: { id: row.load!._id } })
+                        : undefined
+                      : () => router.push({ pathname: '/assign', params: { assignmentId: row._id } })
                 }
                 onLongPress={() => Alert.alert('Load payload (debug)', JSON.stringify(row.load, null, 2))}
                 style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}
@@ -575,7 +577,11 @@ export default function BoardScreen() {
                 {(section as Section).assign && row.source !== 'leg' && (
                   <Pressable
                     onPress={() =>
-                      router.push({ pathname: '/assign', params: { assignmentId: row._id } })
+                      router.push(
+                        row.source === 'open'
+                          ? { pathname: '/assign', params: { loadId: row.loadId } }
+                          : { pathname: '/assign', params: { assignmentId: row._id } },
+                      )
                     }
                     style={{
                       marginTop: 12,
