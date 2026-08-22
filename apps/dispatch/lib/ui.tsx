@@ -298,3 +298,140 @@ export function SegRow<K extends string>({
     </ScrollView>
   );
 }
+
+
+/**
+ * The Otoqa orbit mark, ported from the design bundle's `OrbitOSymbol`.
+ *
+ * Pure Views rather than SVG: the shape is four concentric circles, and
+ * `react-native-svg` isn't a dependency of this app — adding one for a logo
+ * would be a poor trade. Geometry follows the design's 100-unit viewBox, so
+ * proportions hold at any size.
+ */
+export function BrandMark({ size = 46, color }: { size?: number; color?: string }) {
+  const accent = color ?? colors.primary;
+  const u = size / 100;
+  const ring = 64 * u;
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      {/* Outer orbit */}
+      <View
+        style={{
+          width: ring,
+          height: ring,
+          borderRadius: ring / 2,
+          borderWidth: 8 * u,
+          borderColor: accent,
+        }}
+      />
+      {/* Solid core */}
+      <View
+        style={{
+          position: 'absolute',
+          width: 24 * u,
+          height: 24 * u,
+          borderRadius: 12 * u,
+          backgroundColor: accent,
+        }}
+      />
+      {/* The travelling dot punches a hole in the ring, then sits in it. */}
+      <View
+        style={{
+          position: 'absolute',
+          left: 66 * u,
+          top: 22 * u,
+          width: 20 * u,
+          height: 20 * u,
+          borderRadius: 10 * u,
+          backgroundColor: colors.background,
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          left: 70 * u,
+          top: 26 * u,
+          width: 12 * u,
+          height: 12 * u,
+          borderRadius: 6 * u,
+          backgroundColor: accent,
+        }}
+      />
+    </View>
+  );
+}
+
+/** Centred brand block — mark, title, one line of context. */
+export function Brand({ title, sub }: { title: string; sub: string }) {
+  return (
+    <View style={{ alignItems: 'center' }}>
+      <BrandMark size={46} />
+      <Text
+        style={{
+          fontSize: typography.lg,
+          fontWeight: typography.bold,
+          color: colors.foreground,
+          marginTop: 14,
+        }}
+      >
+        {title}
+      </Text>
+      <Text
+        style={{
+          fontSize: typography.base,
+          lineHeight: 19,
+          color: colors.foregroundSubtle,
+          marginTop: 5,
+          textAlign: 'center',
+        }}
+      >
+        {sub}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Numeric keypad for code entry (design `signin.jsx`).
+ *
+ * Deliberately replaces the system keyboard on the OTP step: bigger targets,
+ * no keyboard-height reflow, and it fills the space the design allots it.
+ */
+export function Keypad({ onKey, onBack }: { onKey: (k: string) => void; onBack: () => void }) {
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'];
+  return (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+      {keys.map((k, i) =>
+        k === '' ? (
+          <View key={i} style={{ flexBasis: '31%', flexGrow: 1, minHeight: 52 }} />
+        ) : (
+          <Pressable
+            key={i}
+            onPress={() => (k === '⌫' ? onBack() : onKey(k))}
+            style={{
+              flexBasis: '31%',
+              flexGrow: 1,
+              minHeight: 52,
+              borderRadius: borderRadius.lg,
+              backgroundColor: colors.card,
+              borderWidth: 1,
+              borderColor: colors.borderSubtle,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Text
+              style={{
+                fontSize: k === '⌫' ? 17 : 21,
+                fontWeight: typography.semibold,
+                color: colors.foreground,
+              }}
+            >
+              {k}
+            </Text>
+          </Pressable>
+        ),
+      )}
+    </View>
+  );
+}
