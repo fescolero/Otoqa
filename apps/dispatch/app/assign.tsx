@@ -8,13 +8,17 @@
  * commits through assignDriverToLoadsWeb — which creates the leg that
  * dispatching a load actually means. Same scorer either way.
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Pressable, Text, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMutation, useQuery } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
 import { api, type Id } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '../lib/theme';
+import { SearchField } from '../lib/ui';
+
+/** Below this many candidates, scrolling is quicker than typing. */
+const SEARCH_THRESHOLD = 6;
 
 export default function AssignScreen() {
   const router = useRouter();
@@ -38,6 +42,22 @@ export default function AssignScreen() {
   const assign = useMutation(api.dispatchMobile.assignDriverToLoad);
   const assignWeb = useMutation(api.dispatchMobile.assignDriverToLoadsWeb);
   const [busy, setBusy] = useState(false);
+  const [q, setQ] = useState('');
+
+  // Filter, never re-rank: the order is the scorer's answer to "who should
+  // take this", and typing a name is a way to reach a driver, not a claim
+  // about fit.
+  const visible = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!needle || !ranked) return ranked ?? [];
+    return ranked.filter((r) =>
+      `${r.firstName ?? ''} ${r.lastName ?? ''} ${r.phone ?? ''}`.toLowerCase().includes(needle),
+    );
+  }, [ranked, q]);
+
+  // BEST belongs to the top-ranked driver, not to whoever lands in row 0
+  // once a search narrows the list.
+  const bestId = ranked?.[0]?._id ?? null;
 
   const pick = async (driverId: Id<'drivers'>) => {
     setBusy(true);
@@ -83,15 +103,42 @@ export default function AssignScreen() {
         </Text>
       ) : (
         <FlatList
-          data={ranked}
+          data={visible}
+          style={{ flex: 1 }}
+          keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={
+            ranked.length > SEARCH_THRESHOLD ? (
+              <View style={{ paddingBottom: 12 }}>
+                <SearchField
+                  value={q}
+                  onChangeText={setQ}
+                  placeholder={`Search ${ranked.length} drivers`}
+                />
+              </View>
+            ) : null
+          }
+          ListEmptyComponent={
+            <Text
+              style={{
+                color: colors.foregroundSubtle,
+                fontSize: typography.base,
+                textAlign: 'center',
+                paddingVertical: 40,
+              }}
+            >
+              No drivers match.
+            </Text>
+          }
           keyExtractor={(r) => r._id}
           contentContainerStyle={{ padding: 20, gap: 10 }}
-          renderItem={({ item, index }) => (
-            <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: index === 0 ? colors.primary : colors.border, borderRadius: borderRadius.lg, padding: 14 }}>
+          renderItem={({ item }) => (
+            <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: item._id === bestId ? colors.primary : colors.border, borderRadius: borderRadius.lg, padding: 14 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                 <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
                   {item.firstName} {item.lastName}
-                  {index === 0 && <Text style={{ color: colors.primary, fontSize: typography.xs }}>  BEST</Text>}
+                  {item._id === bestId && (
+                    <Text style={{ color: colors.primary, fontSize: typography.xs }}>  BEST</Text>
+                  )}
                 </Text>
                 <Pressable
                   disabled={busy}
