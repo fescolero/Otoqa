@@ -17,6 +17,7 @@ import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '../../lib/theme';
 import { displayLoadId } from '../../lib/format';
 import { countByHorizon, horizonOf, HORIZONS, type Horizon } from '../../lib/board';
+import { AllTrucksLoadedCard, RunRow, TruckNeedCard } from '../../lib/board-cards';
 import { useDispatchSession } from './_layout';
 
 type Row = NonNullable<ReturnType<typeof useQuery<typeof api.dispatchMobile.listActiveAssignments>>>[number];
@@ -161,6 +162,24 @@ function OfferCard({ offer }: { offer: OfferRow }) {
   );
 }
 
+/** Uppercase section label, matching the list's own section headers. */
+function SectionLabel({ children }: { children: string }) {
+  return (
+    <Text
+      style={{
+        color: colors.foregroundSubtle,
+        fontSize: typography.xs,
+        fontWeight: typography.bold,
+        letterSpacing: 1,
+        textTransform: 'uppercase',
+        marginBottom: 8,
+      }}
+    >
+      {children}
+    </Text>
+  );
+}
+
 /** One horizon tile: a count, its label, and what it means. */
 function HorizonTile({
   label,
@@ -279,6 +298,9 @@ export default function BoardScreen() {
   const router = useRouter();
   const rows = useQuery(api.dispatchMobile.listActiveAssignments, {});
   const offers = useQuery(api.dispatchMobile.listOffers, {});
+  const capacity = useQuery(api.dispatchMobile.boardCapacity, {});
+  const applyPlan = useMutation(api.dispatchMobile.applyPlan);
+  const [assigning, setAssigning] = useState(false);
   const loading = rows === undefined || offers === undefined;
   const [horizon, setHorizon] = useState<Horizon | null>(null);
 
@@ -316,6 +338,26 @@ export default function BoardScreen() {
       ...bucketsOf(rows, now),
     ];
   }, [loading, horizon, rows, offers, now]);
+
+  // One driver, one run, committed through the same guarded path the plan
+  // sheet uses — conflicts are skipped and reported, never clobbered.
+  const giveWork = async (driverId: string, assignmentIds: string[]) => {
+    if (assignmentIds.length === 0) return;
+    setAssigning(true);
+    try {
+      const res = await applyPlan({
+        picks: [{ driverId: driverId as never, assignmentIds: assignmentIds as never }],
+      });
+      const failed = res.results.filter((r) => !r.success);
+      if (failed.length > 0) {
+        Alert.alert('Not assigned', failed.map((f) => `• ${f.reason ?? 'Skipped'}`).join('\n'));
+      }
+    } catch (e) {
+      Alert.alert('Something went wrong', e instanceof Error ? e.message : 'Please try again.');
+    } finally {
+      setAssigning(false);
+    }
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: 70 }}>
@@ -373,6 +415,44 @@ export default function BoardScreen() {
               {unassigned > 0 && (
                 <AutoPlanCard unassigned={unassigned} onPress={() => router.push('/plan')} />
               )}
+
+              {/* Bounded by fleet size, not backlog size — and it empties out
+                  as work is assigned, which is the point of the section. */}
+              {!horizon && capacity && (
+                <View style={{ marginTop: 18 }}>
+                  <SectionLabel>Trucks needing work</SectionLabel>
+                  {capacity.openTrucks.some((t) => t.suggestions.length > 0) ? (
+                    capacity.openTrucks.map((truck) => (
+                      <TruckNeedCard
+                        key={truck._id}
+                        truck={truck}
+                        busy={assigning}
+                        onAssign={(run) => void giveWork(truck._id, run.assignmentIds ?? [])}
+                      />
+                    ))
+                  ) : (
+                    <AllTrucksLoadedCard backlog={capacity.unassignedCount} />
+                  )}
+                </View>
+              )}
+
+              {!horizon && capacity && capacity.runs.length > 0 && (
+                <View style={{ marginTop: 18 }}>
+                  <SectionLabel>Bundled runs</SectionLabel>
+                  {capacity.runs.map((run) => (
+                    <RunRow
+                      key={run.key}
+                      run={run}
+                      onPress={() =>
+                        run.loads[0]?._id
+                          ? router.push({ pathname: '/load/[id]', params: { id: run.loads[0]._id } })
+                          : router.push('/plan')
+                      }
+                    />
+                  ))}
+                </View>
+              )}
+
               {horizon && (
                 <Pressable onPress={() => setHorizon(null)} style={{ marginTop: 12 }}>
                   <Text

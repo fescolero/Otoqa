@@ -1081,6 +1081,9 @@ interface PlanItem {
   endT: number;
   origin: { lat: number; lng: number } | null;
   dest: { lat: number; lng: number } | null;
+  /** Endpoint cities, for the run route line. Display only. */
+  originCity: string | null;
+  destCity: string | null;
 }
 
 const lightLoad = (
@@ -1114,82 +1117,115 @@ const lightLoad = (
  * the proposal never double-books. Top 3 candidates returned per run —
  * warned candidates ranked, never hidden.
  */
+/**
+ * Shape the unassigned AWARDED backlog into chainable items.
+ *
+ * Shared by suggestPlan and boardCapacity so the two can never disagree
+ * about what is plannable or where a load starts and ends.
+ */
+async function shapeBacklog(ctx: QueryCtx, resolved: ResolvedOrg) {
+  const backlog = (await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')).filter(
+    (a) => !a.assignedDriverId,
+  );
+
+  const shaped: (
+    | PlanItem
+    | {
+        assignment: Doc<'loadCarrierAssignments'>;
+        load: Doc<'loadInformation'> | null;
+        facets: { trip?: string; hcr?: string };
+        reason: string;
+      }
+  )[] = await Promise.all(
+    backlog.map(async (assignment) => {
+      const load = await ctx.db.get(assignment.loadId);
+      const facets = load ? await getLoadFacets(ctx, load._id) : {};
+      const stops = (
+        await ctx.db
+          .query('loadStops')
+          .withIndex('by_load', (q) => q.eq('loadId', assignment.loadId))
+          .collect()
+      ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+      const pickup = stops.filter((s) => s.stopType === 'PICKUP')[0] ?? stops[0];
+      const lastStop = stops[stops.length - 1];
+      const startT = pickup?.windowBeginTime ? Date.parse(pickup.windowBeginTime) : NaN;
+      const startCloseT = pickup?.windowEndTime ? Date.parse(pickup.windowEndTime) : startT;
+      const endT = lastStop?.windowEndTime
+        ? Date.parse(lastStop.windowEndTime)
+        : lastStop?.windowBeginTime
+          ? Date.parse(lastStop.windowBeginTime)
+          : NaN;
+      if (!Number.isFinite(startT) || !Number.isFinite(endT)) {
+        return { assignment, load, facets, reason: 'Missing appointment windows' };
+      }
+      return {
+        assignment,
+        load,
+        facets,
+        stopCount: stops.length,
+        startT,
+        startCloseT: Number.isFinite(startCloseT) ? startCloseT : startT,
+        endT,
+        origin:
+          pickup?.latitude != null && pickup?.longitude != null
+            ? { lat: pickup.latitude, lng: pickup.longitude }
+            : null,
+        dest:
+          lastStop?.latitude != null && lastStop?.longitude != null
+            ? { lat: lastStop.latitude, lng: lastStop.longitude }
+            : null,
+        originCity: pickup?.city ?? pickup?.state ?? null,
+        destCity: lastStop?.city ?? lastStop?.state ?? null,
+      };
+    }),
+  );
+
+  const unplannable = shaped
+    .filter((x): x is Extract<typeof x, { reason: string }> => 'reason' in x)
+    .map((x) => ({
+      assignmentId: x.assignment._id,
+      load: lightLoad(x.load, x.facets),
+      reason: x.reason,
+    }));
+  const plannable = shaped
+    .filter((x): x is PlanItem => !('reason' in x))
+    .sort((a, b) => a.startT - b.startT || (a.assignment._id < b.assignment._id ? -1 : 1));
+
+  return { plannable, unplannable };
+}
+
+/**
+ * Greedy chaining onto the first run whose tail can feasibly reach the next
+ * pickup. Pure — deterministic for a given snapshot, which is what lets
+ * convex-test pin the bundling behavior.
+ */
+function chainIntoRuns(plannable: PlanItem[]): { items: PlanItem[]; deadheads: number[] }[] {
+  const runs: { items: PlanItem[]; deadheads: number[] }[] = [];
+  for (const it of plannable) {
+    let placed = false;
+    for (const run of runs) {
+      const tail = run.items[run.items.length - 1];
+      if (!tail.dest || !it.origin) continue;
+      const deadhead = milesBetween(tail.dest.lat, tail.dest.lng, it.origin.lat, it.origin.lng);
+      if (deadhead > PLAN_MAX_DEADHEAD_MI) continue;
+      const arrival = tail.endT + PLAN_CHAIN_BUFFER_MS + (deadhead / PLAN_AVG_MPH) * 3600_000;
+      if (arrival > it.startCloseT) continue;
+      run.items.push(it);
+      run.deadheads.push(deadhead);
+      placed = true;
+      break;
+    }
+    if (!placed) runs.push({ items: [it], deadheads: [] });
+  }
+  return runs;
+}
+
 export const suggestPlan = query({
   args: {},
   handler: async (ctx) => {
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');
-    const backlog = (await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')).filter(
-      (a) => !a.assignedDriverId,
-    );
-
-    const shaped: (PlanItem | { assignment: Doc<'loadCarrierAssignments'>; load: Doc<'loadInformation'> | null; facets: { trip?: string; hcr?: string }; reason: string })[] =
-      await Promise.all(
-        backlog.map(async (assignment) => {
-          const load = await ctx.db.get(assignment.loadId);
-          const facets = load ? await getLoadFacets(ctx, load._id) : {};
-          const stops = (
-            await ctx.db
-              .query('loadStops')
-              .withIndex('by_load', (q) => q.eq('loadId', assignment.loadId))
-              .collect()
-          ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-          const pickup = stops.filter((s) => s.stopType === 'PICKUP')[0] ?? stops[0];
-          const lastStop = stops[stops.length - 1];
-          const startT = pickup?.windowBeginTime ? Date.parse(pickup.windowBeginTime) : NaN;
-          const startCloseT = pickup?.windowEndTime ? Date.parse(pickup.windowEndTime) : startT;
-          const endT = lastStop?.windowEndTime
-            ? Date.parse(lastStop.windowEndTime)
-            : lastStop?.windowBeginTime
-              ? Date.parse(lastStop.windowBeginTime)
-              : NaN;
-          if (!Number.isFinite(startT) || !Number.isFinite(endT)) {
-            return { assignment, load, facets, reason: 'Missing appointment windows' };
-          }
-          return {
-            assignment,
-            load,
-            facets,
-            stopCount: stops.length,
-            startT,
-            startCloseT: Number.isFinite(startCloseT) ? startCloseT : startT,
-            endT,
-            origin:
-              pickup?.latitude != null && pickup?.longitude != null
-                ? { lat: pickup.latitude, lng: pickup.longitude }
-                : null,
-            dest:
-              lastStop?.latitude != null && lastStop?.longitude != null
-                ? { lat: lastStop.latitude, lng: lastStop.longitude }
-                : null,
-          };
-        }),
-      );
-
-    const unplannable = shaped
-      .filter((s): s is Extract<typeof s, { reason: string }> => 'reason' in s)
-      .map((s) => ({ assignmentId: s.assignment._id, load: lightLoad(s.load, s.facets), reason: s.reason }));
-    const plannable = shaped
-      .filter((s): s is PlanItem => !('reason' in s))
-      .sort((a, b) => a.startT - b.startT || (a.assignment._id < b.assignment._id ? -1 : 1));
-
-    // Greedy chaining onto the first run whose tail can feasibly reach it.
-    const runs: { items: PlanItem[]; deadheads: number[] }[] = [];
-    for (const it of plannable) {
-      let placed = false;
-      for (const run of runs) {
-        const tail = run.items[run.items.length - 1];
-        if (!tail.dest || !it.origin) continue;
-        const deadhead = milesBetween(tail.dest.lat, tail.dest.lng, it.origin.lat, it.origin.lng);
-        if (deadhead > PLAN_MAX_DEADHEAD_MI) continue;
-        const arrival = tail.endT + PLAN_CHAIN_BUFFER_MS + (deadhead / PLAN_AVG_MPH) * 3600_000;
-        if (arrival > it.startCloseT) continue;
-        run.items.push(it);
-        run.deadheads.push(deadhead);
-        placed = true;
-        break;
-      }
-      if (!placed) runs.push({ items: [it], deadheads: [] });
-    }
+    const { plannable, unplannable } = await shapeBacklog(ctx, resolved);
+    const runs = chainIntoRuns(plannable);
 
     // Rank per run; never suggest one driver for two runs in one plan.
     const taken = new Set<string>();
@@ -1285,6 +1321,146 @@ export const applyPlan = mutation({
 
 
 /** Upsert this device's Expo push token for high-severity alert fan-out (§5.7). */
+/**
+ * Capacity-first board data (§5.9, design `lib-dispatch/capacity.jsx`).
+ *
+ * The design's premise: a phone never shows "all unassigned". It shows work
+ * bounded by *fleet size* — the trucks that need loads — plus the bundled
+ * runs the backlog chains into.
+ *
+ * Deliberately cheaper than suggestPlan, which is why it can back the
+ * landing screen: suggestPlan ranks every driver once per proposed run
+ * (a location and an HOS read apiece, per run). This inverts the direction —
+ * each driver is read once, each backlog load once, and the driver→work
+ * scoring is pure haversine over what's already in memory. Reads are
+ * O(drivers + backlog), not O(runs × drivers).
+ */
+export const boardCapacity = query({
+  args: {},
+  handler: async (ctx) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const { plannable } = await shapeBacklog(ctx, resolved);
+    const chained = chainIntoRuns(plannable);
+
+    // ── Bundled runs ────────────────────────────────────────────────────
+    const runs = chained.map((run) => {
+      const head = run.items[0];
+      const tail = run.items[run.items.length - 1];
+      // Full point list, then squash repeats: a drop and the next pickup in
+      // the same city should read as one waypoint, not two.
+      const points: (string | null)[] = [];
+      for (const it of run.items) points.push(it.originCity, it.destCity);
+      const named = points.filter((c): c is string => !!c);
+      const squashed = named.filter((c, i) => i === 0 || c !== named[i - 1]);
+      return {
+        key: head.assignment._id,
+        assignmentIds: run.items.map((it) => it.assignment._id),
+        loadCount: run.items.length,
+        from: squashed[0] ?? null,
+        to: squashed.length > 1 ? squashed[squashed.length - 1] : null,
+        via: squashed.slice(1, -1),
+        startT: head.startT,
+        endT: tail.endT,
+        loadedMiles: run.items.reduce((n, it) => n + (it.load?.effectiveMiles ?? 0), 0),
+        deadheadMiles: Math.round(run.deadheads.reduce((n, d) => n + d, 0)),
+        stopCount: run.items.reduce((n, it) => n + it.stopCount, 0),
+        origin: head.origin,
+        customerName: head.load?.customerName ?? null,
+        loads: run.items.map((it) => lightLoad(it.load, it.facets)),
+      };
+    });
+
+    // ── Open trucks ─────────────────────────────────────────────────────
+    const drivers = await orgDrivers(ctx, resolved);
+    const inProgress = await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS');
+
+    const orgScopes = [...new Set([...resolved.driverOrgIds, resolved.externalId])];
+    const openLegs: Doc<'dispatchLegs'>[] = [];
+    for (const orgId of orgScopes) {
+      for (const status of ['PENDING', 'ACTIVE'] as const) {
+        openLegs.push(
+          ...(await ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_org_status', (q) => q.eq('workosOrgId', orgId).eq('status', status))
+            .collect()),
+        );
+      }
+    }
+    const busyDrivers = new Set<string>();
+    for (const leg of openLegs) if (leg.driverId) busyDrivers.add(leg.driverId as string);
+    for (const a of inProgress) if (a.assignedDriverId) busyDrivers.add(a.assignedDriverId as string);
+
+    // Bounded by fleet size, not backlog size — and it empties out as work
+    // is assigned, which is the whole point of the section.
+    const open = drivers.filter((d) => !busyDrivers.has(d._id as string));
+
+    const openTrucks = await Promise.all(
+      open.map(async (driver) => {
+        const location = await latestLocation(ctx, driver._id);
+        const hos = await hosForDriver(ctx, driver._id);
+        const truck = driver.currentTruckId ? await ctx.db.get(driver.currentTruckId) : null;
+
+        const warns: string[] = [];
+        if (hos.onShift && hos.windowRemainingHours != null && hos.windowRemainingHours < 3) {
+          warns.push(`~${hos.windowRemainingHours}h left in 14h window (est)`);
+        }
+        if (hos.cycleRemainingHours < 5) {
+          warns.push(`~${hos.cycleRemainingHours}h left in 70h cycle (est)`);
+        }
+
+        // Nearest work first. Without a fix we cannot rank by distance, so
+        // fall back to soonest-starting rather than inventing a position.
+        const scored = runs
+          .map((run) => ({
+            run,
+            deadheadMi:
+              location && run.origin
+                ? Math.round(
+                    milesBetween(location.latitude, location.longitude, run.origin.lat, run.origin.lng),
+                  )
+                : null,
+          }))
+          .sort((a, b) => {
+            if (a.deadheadMi != null && b.deadheadMi != null) return a.deadheadMi - b.deadheadMi;
+            return a.run.startT - b.run.startT;
+          })
+          .slice(0, 3);
+
+        return {
+          _id: driver._id,
+          firstName: driver.firstName,
+          lastName: driver.lastName,
+          phone: driver.phone,
+          truckUnitId: truck?.unitId ?? null,
+          hos,
+          hosLabel: hosChipLabel(hos),
+          warns,
+          lastFixAt: location?.recordedAt ?? null,
+          suggestions: scored.map((sc) => ({
+            key: sc.run.key,
+            assignmentIds: sc.run.assignmentIds,
+            loadCount: sc.run.loadCount,
+            from: sc.run.from,
+            to: sc.run.to,
+            via: sc.run.via,
+            startT: sc.run.startT,
+            loadedMiles: sc.run.loadedMiles,
+            customerName: sc.run.customerName,
+            deadheadMi: sc.deadheadMi,
+          })),
+        };
+      }),
+    );
+
+    return {
+      runs,
+      openTrucks,
+      /** Loads with no driver at all — what the sections above are drawn from. */
+      unassignedCount: plannable.length,
+    };
+  },
+});
+
 export const registerPushToken = mutation({
   args: { token: v.string(), platform: v.union(v.literal('ios'), v.literal('android')) },
   handler: async (ctx, args) => {
