@@ -21,6 +21,7 @@ import {
   horizonOf,
   horizonTiles,
   HORIZON_ORDER,
+  isActionable,
   type Horizon,
 } from '../../lib/board';
 import { AllTrucksLoadedCard, RunRow, TruckNeedCard } from '../../lib/board-cards';
@@ -65,7 +66,12 @@ function nextWindow(r: Row | OfferRow): number | null {
 function bucketsOf(rows: Row[], now: number): Section[] {
   const needsDriver = (k: Horizon) =>
     rows
-      .filter((r) => isUnassigned(r) && horizonOf(nextWindow(r), now) === k)
+      .filter(
+        (r) =>
+          isUnassigned(r) &&
+          isActionable(nextWindow(r), now) &&
+          horizonOf(nextWindow(r), now) === k,
+      )
       .sort((a, b) => (nextWindow(a) ?? 0) - (nextWindow(b) ?? 0));
 
   const assigned = rows
@@ -76,7 +82,7 @@ function bucketsOf(rows: Row[], now: number): Section[] {
   return [
     ...HORIZON_ORDER.map((k) => ({
       title: tiles.find((t) => t.k === k)?.label ?? k,
-      hot: k === 'now' || k === 'overdue',
+      hot: k === 'now',
       assign: true,
       data: needsDriver(k),
     })),
@@ -226,16 +232,16 @@ function HorizonTile({
   label: string;
   sub: string;
   count: number;
-  tone: 'danger' | 'warn' | 'plain';
+  tone: 'warn' | 'plain';
   selected: boolean;
   onPress: () => void;
 }) {
-  // Only colour a tile that has something in it — an empty Overdue tile
-  // glowing red is a false alarm every time the board is healthy.
-  const lit = count > 0 && tone !== 'plain';
-  const fg = tone === 'danger' ? colors.error : colors.warning;
-  const bg = tone === 'danger' ? 'rgba(239,68,68,0.10)' : 'rgba(245,158,11,0.10)';
-  const bd = tone === 'danger' ? 'rgba(239,68,68,0.32)' : 'rgba(245,158,11,0.32)';
+  // Only colour a tile that has something in it — a lit tile on an empty
+  // bucket is a false alarm every time the board is healthy.
+  const lit = count > 0 && tone === 'warn';
+  const fg = colors.warning;
+  const bg = 'rgba(245,158,11,0.10)';
+  const bd = 'rgba(245,158,11,0.32)';
   return (
     <Pressable
       onPress={onPress}
@@ -350,12 +356,13 @@ export default function BoardScreen() {
 
   // Counted over the same set the horizon sections render, so the tiles are
   // a true summary of the list rather than a second opinion on it.
-  const scheduled = useMemo(() => (rows ?? []).filter(isUnassigned), [rows]);
-  const counts = useMemo(() => countByHorizon(scheduled, nextWindow, now), [scheduled, now]);
-  const unassigned = useMemo(
-    () => (rows ?? []).filter((r) => r.status === 'AWARDED' && !r.driver).length,
-    [rows],
+  // Past-due work is excluded everywhere it would be counted or listed, so
+  // the tiles, the sections and the header all describe the same population.
+  const scheduled = useMemo(
+    () => (rows ?? []).filter((r) => isUnassigned(r) && isActionable(nextWindow(r), now)),
+    [rows, now],
   );
+  const counts = useMemo(() => countByHorizon(scheduled, nextWindow, now), [scheduled, now]);
 
   // Picking a tile replaces the bucketed view with that one horizon, rather
   // than filtering inside it — otherwise "Next 4h" would still render a
@@ -449,14 +456,14 @@ export default function BoardScreen() {
                     label={hz.label}
                     sub={hz.sub}
                     count={counts[hz.k]}
-                    tone={hz.k === 'overdue' ? 'danger' : hz.k === 'now' ? 'warn' : 'plain'}
+                    tone={hz.k === 'now' ? 'warn' : 'plain'}
                     selected={horizon === hz.k}
                     onPress={() => setHorizon((cur) => (cur === hz.k ? null : hz.k))}
                   />
                 ))}
               </View>
-              {unassigned > 0 && (
-                <AutoPlanCard unassigned={unassigned} onPress={() => router.push('/plan')} />
+              {scheduled.length > 0 && (
+                <AutoPlanCard unassigned={scheduled.length} onPress={() => router.push('/plan')} />
               )}
 
               {/* Bounded by fleet size, not backlog size — and it empties out
@@ -474,7 +481,7 @@ export default function BoardScreen() {
                       />
                     ))
                   ) : (
-                    <AllTrucksLoadedCard backlog={capacity.unassignedCount} />
+                    <AllTrucksLoadedCard backlog={scheduled.length} />
                   )}
                 </View>
               )}

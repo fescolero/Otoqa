@@ -32,15 +32,13 @@ const calendar = (ms: number) =>
  * sub-label has to say so, exactly as the design's does ("by 1:40 PM", "to
  * 8:00 PM").
  *
- * Overdue is its own tile for the same reason. Folding past-due work into
- * "Next 4h" both inflated that count and buried the most urgent thing on the
- * board inside a label that says the opposite.
+ * Past-due work has no tile because it does not belong on this board at all
+ * — see `isActionable`.
  */
 export function horizonTiles(now: number): { k: Horizon; label: string; sub: string }[] {
   const windowEnd = now + FOUR_HOURS;
   const todayEnd = endOfDay(now);
   return [
-    { k: 'overdue', label: 'Overdue', sub: 'Window already passed' },
     { k: 'now', label: 'Next 4h', sub: `by ${clock(windowEnd)}` },
     {
       k: 'today',
@@ -54,7 +52,26 @@ export function horizonTiles(now: number): { k: Horizon; label: string; sub: str
 }
 
 /** Stable ordering for section headings, independent of the clock. */
-export const HORIZON_ORDER: Horizon[] = ['overdue', 'now', 'today', 'tomorrow', 'later'];
+export const HORIZON_ORDER: Horizon[] = ['now', 'today', 'tomorrow', 'later'];
+
+/**
+ * Whether a load still belongs on the board.
+ *
+ * A pickup window that has already closed is not work a dispatcher can act
+ * on from a phone — assigning a driver won't un-miss it. Product decision
+ * (2026-08-21): if we missed it, we missed it. Such loads are excluded from
+ * the tiles, the sections and the header count alike, so every number on the
+ * screen describes the same population.
+ *
+ * `horizonOf` still classifies them as 'overdue' — the fact is true and
+ * worth naming; this is the one place that decides to act on it, and the
+ * loads remain visible in the web TMS.
+ *
+ * Unscheduled work is actionable: no window means nothing was missed.
+ */
+export function isActionable(nextWindowMs: number | null, now: number): boolean {
+  return horizonOf(nextWindowMs, now) !== 'overdue';
+}
 
 /**
  * Which bucket a load's next action falls in.

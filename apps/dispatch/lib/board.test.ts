@@ -4,9 +4,9 @@ import {
   horizonOf,
   horizonTiles,
   HORIZON_ORDER,
+  isActionable,
   planIsEmpty,
   planSummary,
-  type Horizon,
   type PlanLike,
 } from './board';
 
@@ -24,9 +24,7 @@ describe('horizonOf', () => {
     expect(horizonOf(null, NOW)).toBe('unscheduled');
   });
 
-  it('separates overdue from Next 4h', () => {
-    // Folding past-due work forward both inflated "Next 4h" and hid the most
-    // urgent thing on the board behind a label claiming it was upcoming.
+  it('names past-due work rather than folding it into Next 4h', () => {
     expect(horizonOf(h(-1), NOW)).toBe('overdue');
     expect(horizonOf(h(-48), NOW)).toBe('overdue');
     expect(horizonOf(h(0.5), NOW)).toBe('now');
@@ -117,9 +115,32 @@ describe('planIsEmpty', () => {
   });
 });
 
+describe('isActionable', () => {
+  it('drops work whose window has already closed', () => {
+    // Product decision: assigning a driver can't un-miss a window, so the
+    // board doesn't carry it. If we missed it, we missed it.
+    expect(isActionable(h(-1), NOW)).toBe(false);
+    expect(isActionable(h(-48), NOW)).toBe(false);
+  });
+
+  it('keeps everything still ahead', () => {
+    expect(isActionable(h(1), NOW)).toBe(true);
+    expect(isActionable(h(200), NOW)).toBe(true);
+  });
+
+  it('keeps unscheduled work — no window means nothing was missed', () => {
+    expect(isActionable(null, NOW)).toBe(true);
+  });
+});
+
 describe('horizon tiles', () => {
   it('covers every scheduled bucket, in the order sections render', () => {
     expect(horizonTiles(NOW).map((t) => t.k)).toEqual(HORIZON_ORDER);
+  });
+
+  it('gives past-due work no tile', () => {
+    expect(horizonTiles(NOW).some((t) => t.k === 'overdue')).toBe(false);
+    expect(HORIZON_ORDER).not.toContain('overdue');
   });
 
   it('leaves unscheduled out of the tiles — it is not a point in time', () => {
