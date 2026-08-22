@@ -84,3 +84,26 @@ export function runIdentity(run: RunFacets): RunIdentity {
 
   return { primary: formatRoute(run), secondary: null, fromContract: false };
 }
+
+
+/**
+ * A single load's heading, on the same principle as a run's.
+ *
+ * `HCR 945L4 · Trip 27` says which of today's identical-looking runs this
+ * is; the load number does not. It stays available in the meta line beneath,
+ * where operations can still read it off, rather than being dropped.
+ *
+ * Falls back to the load number for work with no contract facets — that's
+ * the only identity such a load has.
+ */
+export function loadIdentity(load: {
+  hcr?: string | null;
+  tripNumber?: string | null;
+  internalId?: string | null;
+}): string {
+  const parts: string[] = [];
+  if (load.hcr) parts.push(`HCR ${load.hcr}`);
+  if (load.tripNumber) parts.push(`Trip ${load.tripNumber}`);
+  if (parts.length > 0) return parts.join(' · ');
+  return load.internalId ? load.internalId.replace(/^fk[-_]?/i, '') : '—';
+}

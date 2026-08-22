@@ -16,6 +16,7 @@ import { useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '../../lib/theme';
 import { displayLoadId } from '../../lib/format';
+import { loadIdentity } from '../../lib/run-identity';
 import {
   countByHorizon,
   horizonOf,
@@ -96,26 +97,6 @@ function fmtTime(t: number | null): string {
   return t ? new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : '';
 }
 
-/** Small facet pill (HCR / Trip). */
-function Tag({ label }: { label: string }) {
-  return (
-    <View style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2 }}>
-      <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>{label}</Text>
-    </View>
-  );
-}
-
-/** HCR + Trip chips row; renders nothing when the load has neither. */
-function FacetTags({ load }: { load?: { hcr?: string | null; tripNumber?: string | null } | null }) {
-  if (!load?.hcr && !load?.tripNumber) return null;
-  return (
-    <View style={{ flexDirection: 'row', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
-      {load?.hcr ? <Tag label={`HCR ${load.hcr}`} /> : null}
-      {load?.tripNumber ? <Tag label={`Trip ${load.tripNumber}`} /> : null}
-    </View>
-  );
-}
-
 /** Offer card — Accept / Decline while OFFERED; "awaiting award" after. */
 function OfferCard({ offer }: { offer: OfferRow }) {
   const acceptOffer = useMutation(api.dispatchMobile.acceptOffer);
@@ -137,7 +118,9 @@ function OfferCard({ offer }: { offer: OfferRow }) {
   const confirmDecline = () =>
     Alert.alert(
       'Decline this offer?',
-      `Load ${displayLoadId(offer.load?.internalId)} goes back to the broker. This can't be undone.`,
+      `${loadIdentity(offer.load ?? {})}${
+        offer.load?.internalId ? ` (${displayLoadId(offer.load.internalId)})` : ''
+      } goes back to the broker. This can't be undone.`,
       [
         { text: 'Keep offer', style: 'cancel' },
         {
@@ -154,8 +137,11 @@ function OfferCard({ offer }: { offer: OfferRow }) {
       style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.primary, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}
     >
       <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-        <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
-          {displayLoadId(offer.load?.internalId)}
+        <Text
+          numberOfLines={1}
+          style={{ flex: 1, color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}
+        >
+          {loadIdentity(offer.load ?? {})}
         </Text>
         {offer.status === 'ACCEPTED' ? (
           <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs, fontWeight: typography.bold }}>
@@ -171,8 +157,8 @@ function OfferCard({ offer }: { offer: OfferRow }) {
         {offer.load?.customerName ?? 'Customer'} · {offer.stops.length} stop{offer.stops.length === 1 ? '' : 's'}
         {t ? ` · ${fmtTime(t)}` : ''}
         {offer.load?.effectiveMiles ? ` · ${Math.round(offer.load.effectiveMiles)} mi` : ''}
+        {offer.load?.internalId ? ` · ${displayLoadId(offer.load.internalId)}` : ''}
       </Text>
-      <FacetTags load={offer.load} />
       {offer.carrierTotalAmount != null && (
         <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold, marginTop: 2 }}>
           ${offer.carrierTotalAmount.toLocaleString()}
@@ -590,8 +576,14 @@ export default function BoardScreen() {
                 style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}
               >
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                  <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
-                    {displayLoadId(row.load?.internalId)}
+                  {/* Same principle as the run cards: on HCR work the contract
+                      and trip say which of today's identical runs this is. The
+                      load number keeps its place in the meta line below. */}
+                  <Text
+                    numberOfLines={1}
+                    style={{ flex: 1, color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}
+                  >
+                    {loadIdentity(row.load ?? {})}
                   </Text>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
                     {row.source !== 'leg' && (
@@ -607,6 +599,7 @@ export default function BoardScreen() {
                 <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 3 }}>
                   {row.load?.customerName ?? 'Customer'} · {row.stops.length} stop{row.stops.length === 1 ? '' : 's'}
                   {t ? ` · ${fmtTime(t)}` : ''}
+                  {row.load?.internalId ? ` · ${displayLoadId(row.load.internalId)}` : ''}
                 </Text>
                 <Text
                   style={{
@@ -618,7 +611,6 @@ export default function BoardScreen() {
                 >
                   {row.driver ? `${row.driver.firstName} ${row.driver.lastName}` : 'Needs a driver'}
                 </Text>
-                <FacetTags load={row.load} />
                 {/* The whole card already opens the assign sheet, but a load
                     waiting on a driver deserves a visible verb — this is the
                     one action the board exists for. */}

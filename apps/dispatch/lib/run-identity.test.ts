@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatHcrs, formatRoute, formatTrips, runIdentity } from './run-identity';
+import { formatHcrs, formatRoute, formatTrips, loadIdentity, runIdentity } from './run-identity';
 
 describe('formatTrips', () => {
   it('collapses a contiguous block to a range', () => {
@@ -88,5 +88,27 @@ describe('runIdentity', () => {
     expect(id.primary).toBe('HCR 925L0');
     expect(id.secondary).toBe('Trips 211–218');
     expect(`${id.primary}${id.secondary}`).not.toContain('Ontario');
+  });
+});
+
+describe('loadIdentity', () => {
+  it('leads with the contract and trip, the way run cards do', () => {
+    expect(loadIdentity({ hcr: '945L4', tripNumber: '27', internalId: 'FK-120065381' })).toBe(
+      'HCR 945L4 · Trip 27',
+    );
+  });
+
+  it('uses whichever facet exists', () => {
+    expect(loadIdentity({ hcr: '945L4', internalId: '120065381' })).toBe('HCR 945L4');
+    expect(loadIdentity({ tripNumber: '27', internalId: '120065381' })).toBe('Trip 27');
+  });
+
+  it('falls back to the load number — the only identity such a load has', () => {
+    expect(loadIdentity({ internalId: 'FK-120065381' })).toBe('120065381');
+    expect(loadIdentity({})).toBe('—');
+  });
+
+  it('strips the FK- import prefix, as the load-id display always has', () => {
+    expect(loadIdentity({ internalId: 'FK-109589035' })).toBe('109589035');
   });
 });
