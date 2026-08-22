@@ -36,7 +36,11 @@ export const consoleSelfCheck = query({
     const snapshots = await jobByName(SNAPSHOT_JOB);
     const allJobs = await ctx.db.query('cronHealth').collect();
 
-    const staffAllowlistSize = (process.env.STAFF_EMAIL_ALLOWLIST ?? '')
+    // Annotated for the same reason as in convex/lib/auth.ts: the Expo app
+    // tsconfigs compile convex/ without @types/node, so `process.env.X`
+    // widens to `any` and the `.map` callback trips implicit-any under strict.
+    const staffAllowlistRaw: string = process.env.STAFF_EMAIL_ALLOWLIST ?? '';
+    const staffAllowlistSize = staffAllowlistRaw
       .split(',')
       .map((e) => e.trim())
       .filter(Boolean).length;

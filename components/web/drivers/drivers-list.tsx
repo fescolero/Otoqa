@@ -14,8 +14,7 @@
 'use client';
 
 import * as React from 'react';
-// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
-import { useQuery } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import {
   BulkAction,
   BulkBar,
@@ -190,7 +189,16 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
   );
 
   // Persisted (user + org) views — system defaults stay in code.
-  const persisted = useQuery(api.savedViews.listForEntity, { entity: 'drivers' });
+  //
+  // `savedViews.listForEntity` calls requireCallerIdentity, so it throws
+  // ConvexError('Unauthenticated') for any caller without a token. A raw
+  // useQuery subscribes on this component's first render, which happens
+  // before the Convex auth handshake has installed one — the server rejects
+  // that first subscription and Convex rethrows the error out of useQuery
+  // during render, taking the drivers page down instead of showing an empty
+  // saved-views bar. useAuthQuery holds the subscription at 'skip' until
+  // isAuthenticated flips, so the query only ever runs with a token.
+  const persisted = useAuthQuery(api.savedViews.listForEntity, { entity: 'drivers' });
   const allUserOrgViews = React.useMemo(() => {
     if (!persisted) return [];
     return [...persisted.user, ...persisted.org];
