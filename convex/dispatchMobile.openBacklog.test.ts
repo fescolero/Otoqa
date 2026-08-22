@@ -86,8 +86,29 @@ async function insertFixtures(ctx: MutationCtx) {
       address: '1 Dock St',
       city: 'Moreno',
       state: 'CA',
+      latitude: 33.9425,
+      longitude: -117.2297,
       windowBeginTime: new Date(startMs).toISOString(),
       windowEndTime: new Date(startMs + 3600_000).toISOString(),
+      workosOrgId: WORKOS_ORG,
+      createdAt: now,
+      updatedAt: now,
+    });
+    // A real load has somewhere to go, and the leg model requires both
+    // endpoints — assignDriverInternal refuses a single-stop load.
+    await ctx.db.insert('loadStops', {
+      loadId,
+      internalId,
+      sequenceNumber: 2,
+      stopType: 'DELIVERY',
+      loadingType: 'APPT',
+      address: '2 Dock St',
+      city: 'Riverside',
+      state: 'CA',
+      latitude: 33.9806,
+      longitude: -117.3755,
+      windowBeginTime: new Date(startMs + 3 * 3600_000).toISOString(),
+      windowEndTime: new Date(startMs + 4 * 3600_000).toISOString(),
       workosOrgId: WORKOS_ORG,
       createdAt: now,
       updatedAt: now,
@@ -103,12 +124,10 @@ async function insertFixtures(ctx: MutationCtx) {
 
   // Open by status, but already dispatched via a leg: must not double up.
   const dispatched = await mkOpenLoad('L-OPEN-LEGGED', day(1), now + 86_400_000);
-  const stop = (
-    await ctx.db
-      .query('loadStops')
-      .withIndex('by_load', (q) => q.eq('loadId', dispatched))
-      .collect()
-  )[0];
+  const dispatchedStops = await ctx.db
+    .query('loadStops')
+    .withIndex('by_load', (q) => q.eq('loadId', dispatched))
+    .collect();
   const driverId = await ctx.db.insert('drivers', {
     firstName: 'Manlio',
     lastName: 'D',
@@ -129,8 +148,8 @@ async function insertFixtures(ctx: MutationCtx) {
     loadId: dispatched,
     driverId,
     sequence: 1,
-    startStopId: stop._id,
-    endStopId: stop._id,
+    startStopId: dispatchedStops[0]._id,
+    endStopId: dispatchedStops[1]._id,
     legLoadedMiles: 10,
     legEmptyMiles: 0,
     status: 'PENDING',
@@ -239,5 +258,102 @@ describe('suggestDriversForOpenLoad', () => {
         .withIdentity({ ...staff, org_id: 'org_someone_else' } as never)
         .query(api.dispatchMobile.suggestDriversForOpenLoad, { loadId: soon }),
     ).rejects.toThrow();
+  });
+});
+
+describe('open loads reach the planner', () => {
+  it('chains into runs and gets truck suggestions, not just board rows', async () => {
+    const { t, ready } = setup();
+    await ready;
+    const res = await t
+      .withIdentity(staff as never)
+      .query(api.dispatchMobile.boardCapacity, {});
+
+    // Previously the planner read only carrier assignments, so an all-open
+    // backlog produced zero runs and every truck suggestion was empty.
+    expect(res.runs.length).toBeGreaterThan(0);
+    const loadIds = res.runs.flatMap((r) => r.loadIds);
+    expect(loadIds.length).toBeGreaterThan(0);
+    expect(res.runs.every((r) => r.assignmentIds.length === 0)).toBe(true);
+  });
+
+  it('suggestPlan proposes them with a loadId to commit against', async () => {
+    const { t, ready } = setup();
+    await ready;
+    const plan = await t.withIdentity(staff as never).query(api.dispatchMobile.suggestPlan, {});
+
+    const all = plan.runs.flatMap((r) => r.loads);
+    expect(all.length).toBeGreaterThan(0);
+    for (const l of all) {
+      // Open work carries loadId and no assignmentId — the commit path
+      // differs, so the reference has to say which it is.
+      expect(l.ref.kind).toBe('load');
+      expect(l.loadId).not.toBeNull();
+      expect(l.assignmentId).toBeNull();
+    }
+  });
+
+  it('applyPlan commits an open load by creating its leg', async () => {
+    const { t, ready } = setup();
+    const { soon, driverId } = await ready;
+
+    const res = await t
+      .withIdentity(staff as never)
+      .mutation(api.dispatchMobile.applyPlan, {
+        picks: [{ driverId, assignmentIds: [], loadIds: [soon] }],
+      });
+
+    expect(res.results).toHaveLength(1);
+    expect(res.results[0].success).toBe(true);
+    expect(res.results[0].loadId).toBe(soon);
+
+    // A leg is what dispatching means — and the board must now show it as
+    // dispatched rather than still open.
+    const legs = await t.run(async (ctx) =>
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_load', (q) => q.eq('loadId', soon))
+        .collect(),
+    );
+    expect(legs.length).toBeGreaterThan(0);
+    expect(legs[0].driverId).toBe(driverId);
+  });
+});
+
+describe('the planner refuses past-due work', () => {
+  it('leaves a closed pickup window out of the runs', async () => {
+    const { t, ready } = setup();
+    await ready;
+    // Push one open load's window into the past.
+    await t.run(async (ctx) => {
+      const load = await ctx.db
+        .query('loadInformation')
+        .withIndex('by_org_status_first_stop', (q) =>
+          q.eq('workosOrgId', WORKOS_ORG).eq('status', 'Open'),
+        )
+        .collect()
+        .then((ls) => ls.find((l) => l.internalId === 'L-OPEN-SOON')!);
+      const stops = await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', load._id))
+        .collect();
+      const past = Date.now() - 6 * 3600_000;
+      await ctx.db.patch(stops[0]._id, {
+        windowBeginTime: new Date(past).toISOString(),
+        windowEndTime: new Date(past + 3600_000).toISOString(),
+      });
+    });
+
+    const res = await t
+      .withIdentity(staff as never)
+      .query(api.dispatchMobile.boardCapacity, {});
+
+    // The board drops past-due entirely, so proposing a truck take it would
+    // contradict the screen it's rendered on.
+    const proposed = res.runs.flatMap((r) => r.loadIds);
+    const stillOffered = res.openTrucks.flatMap((tr) => tr.suggestions.flatMap((sg) => sg.loadIds));
+    expect(res.unassignedCount).toBe(1);
+    expect(proposed).toHaveLength(1);
+    expect(stillOffered.every((id) => proposed.includes(id))).toBe(true);
   });
 });

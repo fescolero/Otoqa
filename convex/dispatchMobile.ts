@@ -1203,8 +1203,22 @@ const PLAN_MAX_DEADHEAD_MI = 150;
 /** Slack added between a drop and the next pickup (unload + check-out). */
 const PLAN_CHAIN_BUFFER_MS = 45 * 60 * 1000;
 
+/**
+ * What committing a piece of planned work actually touches.
+ *
+ * The two backlogs commit differently: a brokered load patches its carrier
+ * assignment, an open TMS load gets a dispatch leg created. Carrying the
+ * reference on the item lets one planner chain both without the commit path
+ * having to guess which it's holding.
+ */
+export type WorkRef =
+  | { kind: 'assignment'; assignmentId: Id<'loadCarrierAssignments'> }
+  | { kind: 'load'; loadId: Id<'loadInformation'> };
+
 interface PlanItem {
-  assignment: Doc<'loadCarrierAssignments'>;
+  ref: WorkRef;
+  /** Null for open TMS loads — they have no carrier assignment. */
+  assignment: Doc<'loadCarrierAssignments'> | null;
   load: Doc<'loadInformation'> | null;
   facets: { trip?: string; hcr?: string };
   stopCount: number;
@@ -1258,74 +1272,93 @@ const lightLoad = (
  * about what is plannable or where a load starts and ends.
  */
 async function shapeBacklog(ctx: QueryCtx, resolved: ResolvedOrg) {
-  const backlog = (await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')).filter(
+  const now = Date.now();
+
+  /** Windows, endpoints and cities — identical whichever backlog it came from. */
+  const shapeOne = async (
+    ref: WorkRef,
+    loadId: Id<'loadInformation'>,
+    assignment: Doc<'loadCarrierAssignments'> | null,
+  ) => {
+    const load = await ctx.db.get(loadId);
+    const facets = load ? await getLoadFacets(ctx, load._id) : {};
+    const stops = (
+      await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', loadId))
+        .collect()
+    ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+    const pickup = stops.filter((st) => st.stopType === 'PICKUP')[0] ?? stops[0];
+    const lastStop = stops[stops.length - 1];
+    const startT = pickup?.windowBeginTime ? Date.parse(pickup.windowBeginTime) : NaN;
+    const startCloseT = pickup?.windowEndTime ? Date.parse(pickup.windowEndTime) : startT;
+    const endT = lastStop?.windowEndTime
+      ? Date.parse(lastStop.windowEndTime)
+      : lastStop?.windowBeginTime
+        ? Date.parse(lastStop.windowBeginTime)
+        : NaN;
+    if (!Number.isFinite(startT) || !Number.isFinite(endT)) {
+      return { ref, assignment, load, facets, reason: 'Missing appointment windows' };
+    }
+    return {
+      ref,
+      assignment,
+      load,
+      facets,
+      stopCount: stops.length,
+      startT,
+      startCloseT: Number.isFinite(startCloseT) ? startCloseT : startT,
+      endT,
+      origin:
+        pickup?.latitude != null && pickup?.longitude != null
+          ? { lat: pickup.latitude, lng: pickup.longitude }
+          : null,
+      dest:
+        lastStop?.latitude != null && lastStop?.longitude != null
+          ? { lat: lastStop.latitude, lng: lastStop.longitude }
+          : null,
+      originCity: pickup?.city ?? pickup?.state ?? null,
+      destCity: lastStop?.city ?? lastStop?.state ?? null,
+    };
+  };
+
+  const brokered = (await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')).filter(
     (a) => !a.assignedDriverId,
   );
+  const { loads: openLoads, truncated } = await openBacklog(ctx, resolved, now);
 
-  const shaped: (
-    | PlanItem
-    | {
-        assignment: Doc<'loadCarrierAssignments'>;
-        load: Doc<'loadInformation'> | null;
-        facets: { trip?: string; hcr?: string };
-        reason: string;
-      }
-  )[] = await Promise.all(
-    backlog.map(async (assignment) => {
-      const load = await ctx.db.get(assignment.loadId);
-      const facets = load ? await getLoadFacets(ctx, load._id) : {};
-      const stops = (
-        await ctx.db
-          .query('loadStops')
-          .withIndex('by_load', (q) => q.eq('loadId', assignment.loadId))
-          .collect()
-      ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-      const pickup = stops.filter((s) => s.stopType === 'PICKUP')[0] ?? stops[0];
-      const lastStop = stops[stops.length - 1];
-      const startT = pickup?.windowBeginTime ? Date.parse(pickup.windowBeginTime) : NaN;
-      const startCloseT = pickup?.windowEndTime ? Date.parse(pickup.windowEndTime) : startT;
-      const endT = lastStop?.windowEndTime
-        ? Date.parse(lastStop.windowEndTime)
-        : lastStop?.windowBeginTime
-          ? Date.parse(lastStop.windowBeginTime)
-          : NaN;
-      if (!Number.isFinite(startT) || !Number.isFinite(endT)) {
-        return { assignment, load, facets, reason: 'Missing appointment windows' };
-      }
-      return {
-        assignment,
-        load,
-        facets,
-        stopCount: stops.length,
-        startT,
-        startCloseT: Number.isFinite(startCloseT) ? startCloseT : startT,
-        endT,
-        origin:
-          pickup?.latitude != null && pickup?.longitude != null
-            ? { lat: pickup.latitude, lng: pickup.longitude }
-            : null,
-        dest:
-          lastStop?.latitude != null && lastStop?.longitude != null
-            ? { lat: lastStop.latitude, lng: lastStop.longitude }
-            : null,
-        originCity: pickup?.city ?? pickup?.state ?? null,
-        destCity: lastStop?.city ?? lastStop?.state ?? null,
-      };
-    }),
-  );
+  const shaped = await Promise.all([
+    ...brokered.map((a) =>
+      shapeOne({ kind: 'assignment', assignmentId: a._id }, a.loadId, a),
+    ),
+    ...openLoads.map((l) => shapeOne({ kind: 'load', loadId: l._id }, l._id, null)),
+  ]);
 
   const unplannable = shaped
     .filter((x): x is Extract<typeof x, { reason: string }> => 'reason' in x)
     .map((x) => ({
-      assignmentId: x.assignment._id,
+      ref: x.ref,
+      assignmentId: x.ref.kind === 'assignment' ? x.ref.assignmentId : null,
+      loadId: x.ref.kind === 'load' ? x.ref.loadId : null,
       load: lightLoad(x.load, x.facets),
       reason: x.reason,
     }));
-  const plannable = shaped
-    .filter((x): x is PlanItem => !('reason' in x))
-    .sort((a, b) => a.startT - b.startT || (a.assignment._id < b.assignment._id ? -1 : 1));
 
-  return { plannable, unplannable };
+  const plannable = (shaped.filter((x) => !('reason' in x)) as PlanItem[])
+    // Past-due work is off the board entirely (see lib/board isActionable), so
+    // the planner must not propose it either — suggesting a truck take a
+    // pickup whose window closed is worse than staying silent.
+    .filter((x) => x.startT >= now)
+    .sort((a, b) => a.startT - b.startT || (refKey(a.ref) < refKey(b.ref) ? -1 : 1));
+
+  // The open backlog is capped, so every count derived from it is a floor.
+  // Saying so is the difference between "200" and "at least 200".
+  return { plannable, unplannable, truncated };
+}
+
+/** Stable string for deterministic ordering across both backlogs. */
+function refKey(ref: WorkRef): string {
+  return ref.kind === 'assignment' ? `a:${ref.assignmentId}` : `l:${ref.loadId}`;
 }
 
 /**
@@ -1373,7 +1406,10 @@ export const suggestPlan = query({
       if (top[0]) taken.add(top[0]._id);
       proposed.push({
         loads: run.items.map((it) => ({
-          assignmentId: it.assignment._id,
+          ref: it.ref,
+          // Present only for brokered work; open TMS loads carry loadId.
+          assignmentId: it.ref.kind === 'assignment' ? it.ref.assignmentId : null,
+          loadId: it.ref.kind === 'load' ? it.ref.loadId : null,
           load: lightLoad(it.load, it.facets),
           stopCount: it.stopCount,
           start: it.startT,
@@ -1401,14 +1437,18 @@ export const applyPlan = mutation({
     picks: v.array(
       v.object({
         driverId: v.id('drivers'),
-        assignmentIds: v.array(v.id('loadCarrierAssignments')),
+        assignmentIds: v.optional(v.array(v.id('loadCarrierAssignments'))),
+        /** Open TMS loads in the same run — committed by creating a leg. */
+        loadIds: v.optional(v.array(v.id('loadInformation'))),
       }),
     ),
   },
   handler: async (ctx, args) => {
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const identity = await ctx.auth.getUserIdentity();
     const results: {
-      assignmentId: Id<'loadCarrierAssignments'>;
+      assignmentId?: Id<'loadCarrierAssignments'>;
+      loadId?: Id<'loadInformation'>;
       success: boolean;
       reason?: string;
     }[] = [];
@@ -1417,7 +1457,7 @@ export const applyPlan = mutation({
       if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
         throw new ConvexError('Driver not found in your organization');
       }
-      for (const assignmentId of pick.assignmentIds) {
+      for (const assignmentId of pick.assignmentIds ?? []) {
         const assignment = await ctx.db.get(assignmentId);
         if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
           throw new ConvexError('Assignment not found');
@@ -1448,6 +1488,32 @@ export const applyPlan = mutation({
         });
         results.push({ assignmentId, success: true });
       }
+
+      // Open TMS loads commit through the leg model, not by patching an
+      // assignment that doesn't exist. Same guarded internal the web uses, so
+      // conflicts are reported rather than clobbered.
+      for (const loadId of pick.loadIds ?? []) {
+        const load = await ctx.db.get(loadId);
+        const orgScopes = new Set([...resolved.driverOrgIds, resolved.externalId]);
+        if (!load || !orgScopes.has(load.workosOrgId)) {
+          results.push({ loadId, success: false, reason: 'Load not found' });
+          continue;
+        }
+        const res: { status: 'SUCCESS' | 'ERROR'; message?: string } = await ctx.runMutation(
+          internal.dispatchLegs.assignDriverInternal,
+          {
+            loadId,
+            driverId: pick.driverId,
+            assignedBy: identity?.subject ?? 'dispatch-app',
+            assignedByName: `${driver.firstName} ${driver.lastName}`,
+          },
+        );
+        results.push({
+          loadId,
+          success: res.status === 'SUCCESS',
+          reason: res.status === 'SUCCESS' ? undefined : (res.message ?? 'Could not assign'),
+        });
+      }
     }
     return { results };
   },
@@ -1473,7 +1539,7 @@ export const boardCapacity = query({
   args: {},
   handler: async (ctx) => {
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');
-    const { plannable } = await shapeBacklog(ctx, resolved);
+    const { plannable, unplannable, truncated } = await shapeBacklog(ctx, resolved);
     const chained = chainIntoRuns(plannable);
 
     // ── Bundled runs ────────────────────────────────────────────────────
@@ -1487,8 +1553,14 @@ export const boardCapacity = query({
       const named = points.filter((c): c is string => !!c);
       const squashed = named.filter((c, i) => i === 0 || c !== named[i - 1]);
       return {
-        key: head.assignment._id,
-        assignmentIds: run.items.map((it) => it.assignment._id),
+        key: refKey(head.ref),
+        work: run.items.map((it) => it.ref),
+        assignmentIds: run.items
+          .map((it) => (it.ref.kind === 'assignment' ? it.ref.assignmentId : null))
+          .filter((x): x is Id<'loadCarrierAssignments'> => x !== null),
+        loadIds: run.items
+          .map((it) => (it.ref.kind === 'load' ? it.ref.loadId : null))
+          .filter((x): x is Id<'loadInformation'> => x !== null),
         loadCount: run.items.length,
         from: squashed[0] ?? null,
         to: squashed.length > 1 ? squashed[squashed.length - 1] : null,
@@ -1573,6 +1645,7 @@ export const boardCapacity = query({
           suggestions: scored.map((sc) => ({
             key: sc.run.key,
             assignmentIds: sc.run.assignmentIds,
+            loadIds: sc.run.loadIds,
             loadCount: sc.run.loadCount,
             from: sc.run.from,
             to: sc.run.to,
@@ -1586,16 +1659,17 @@ export const boardCapacity = query({
       }),
     );
 
-    // Open loads count toward the backlog even though they don't chain into
-    // runs yet (they carry no carrier assignment, which is what applyPlan
-    // commits). Counting them keeps the "Every truck is loaded" card from
-    // claiming an empty backlog while work sits unassigned in the TMS.
-    const { loads: openLoads } = await openBacklog(ctx, resolved, Date.now());
     return {
       runs,
       openTrucks,
-      /** Loads with no driver at all — brokered backlog plus open TMS loads. */
-      unassignedCount: plannable.length + openLoads.length,
+      /**
+       * Everything waiting on a driver: both backlogs, chainable or not.
+       * shapeBacklog already spans them and drops past-due, so this agrees
+       * with what the board shows rather than being a second opinion.
+       */
+      unassignedCount: plannable.length + unplannable.length,
+      /** True when the open backlog hit its cap — the count is a floor. */
+      unassignedTruncated: truncated,
     };
   },
 });

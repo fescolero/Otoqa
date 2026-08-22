@@ -291,7 +291,15 @@ function HorizonTile({
  * subscription on the landing screen. The full summary renders on /plan,
  * where the plan is already loaded and the cost is paid once, on purpose.
  */
-function AutoPlanCard({ unassigned, onPress }: { unassigned: number; onPress: () => void }) {
+function AutoPlanCard({
+  unassigned,
+  capped,
+  onPress,
+}: {
+  unassigned: number;
+  capped: boolean;
+  onPress: () => void;
+}) {
   return (
     <Pressable
       onPress={onPress}
@@ -326,7 +334,8 @@ function AutoPlanCard({ unassigned, onPress }: { unassigned: number; onPress: ()
           Plan the backlog
         </Text>
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 2 }}>
-          {unassigned} load{unassigned === 1 ? '' : 's'} waiting on a driver
+          {unassigned}
+          {capped ? '+' : ''} load{unassigned === 1 && !capped ? '' : 's'} waiting on a driver
         </Text>
       </View>
       <Ionicons name="chevron-forward" size={18} color={colors.primary} />
@@ -342,6 +351,7 @@ export default function BoardScreen() {
   const capacity = useQuery(api.dispatchMobile.boardCapacity, {});
   const applyPlan = useMutation(api.dispatchMobile.applyPlan);
   const [assigning, setAssigning] = useState(false);
+  const capped = capacity?.unassignedTruncated ?? false;
   const loading = rows === undefined || offers === undefined;
   const [horizon, setHorizon] = useState<Horizon | null>(null);
 
@@ -386,12 +396,22 @@ export default function BoardScreen() {
 
   // One driver, one run, committed through the same guarded path the plan
   // sheet uses — conflicts are skipped and reported, never clobbered.
-  const giveWork = async (driverId: string, assignmentIds: string[]) => {
-    if (assignmentIds.length === 0) return;
+  const giveWork = async (
+    driverId: string,
+    assignmentIds: string[],
+    loadIds: string[],
+  ) => {
+    if (assignmentIds.length === 0 && loadIds.length === 0) return;
     setAssigning(true);
     try {
       const res = await applyPlan({
-        picks: [{ driverId: driverId as never, assignmentIds: assignmentIds as never }],
+        picks: [
+          {
+            driverId: driverId as never,
+            assignmentIds: assignmentIds as never,
+            loadIds: loadIds as never,
+          },
+        ],
       });
       const failed = res.results.filter((r) => !r.success);
       if (failed.length > 0) {
@@ -420,12 +440,16 @@ export default function BoardScreen() {
             </Pressable>
           </View>
         </View>
-        {/* Leads with the number this screen exists to drive to zero. */}
+        {/* Leads with the number this screen exists to drive to zero. The
+            open backlog is capped, so a capped count reads "200+" rather than
+            claiming a precision it doesn't have. */}
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 4 }}>
           {session?.orgName ?? ''}
           {rows
             ? scheduled.length > 0
-              ? ` · ${scheduled.length} need${scheduled.length === 1 ? 's' : ''} a driver`
+              ? ` · ${scheduled.length}${capped ? '+' : ''} need${
+                  scheduled.length === 1 && !capped ? 's' : ''
+                } a driver`
               : ' · all assigned'
             : ''}
           {offers && offers.length > 0 ? ` · ${offers.length} offer${offers.length === 1 ? '' : 's'}` : ''}
@@ -463,7 +487,11 @@ export default function BoardScreen() {
                 ))}
               </View>
               {scheduled.length > 0 && (
-                <AutoPlanCard unassigned={scheduled.length} onPress={() => router.push('/plan')} />
+                <AutoPlanCard
+                  unassigned={scheduled.length}
+                  capped={capped}
+                  onPress={() => router.push('/plan')}
+                />
               )}
 
               {/* Bounded by fleet size, not backlog size — and it empties out
@@ -477,11 +505,13 @@ export default function BoardScreen() {
                         key={truck._id}
                         truck={truck}
                         busy={assigning}
-                        onAssign={(run) => void giveWork(truck._id, run.assignmentIds ?? [])}
+                        onAssign={(run) =>
+                          void giveWork(truck._id, run.assignmentIds ?? [], run.loadIds ?? [])
+                        }
                       />
                     ))
                   ) : (
-                    <AllTrucksLoadedCard backlog={scheduled.length} />
+                    <AllTrucksLoadedCard backlog={scheduled.length} capped={capped} />
                   )}
                 </View>
               )}

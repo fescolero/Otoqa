@@ -17,8 +17,10 @@ const time = (ms: number) =>
 
 export interface RunLike {
   key: string;
-  /** Present on truck suggestions — what `applyPlan` commits. */
+  /** Present on truck suggestions — what `applyPlan` commits. A run can mix
+   *  brokered assignments and open TMS loads, so both lists travel. */
   assignmentIds?: string[];
+  loadIds?: string[];
   loadCount: number;
   from: string | null;
   to: string | null;
@@ -335,7 +337,13 @@ export function TruckNeedCard({
 }
 
 /** Every truck has work — the section's success state, not an empty list. */
-export function AllTrucksLoadedCard({ backlog }: { backlog: number }) {
+export function AllTrucksLoadedCard({
+  backlog,
+  capped,
+}: {
+  backlog: number;
+  capped?: boolean;
+}) {
   return (
     <View
       style={{
@@ -367,7 +375,9 @@ export function AllTrucksLoadedCard({ backlog }: { backlog: number }) {
         </Text>
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 2, lineHeight: 17 }}>
           {backlog > 0
-            ? `${backlog} load${backlog === 1 ? '' : 's'} stay in the backlog until capacity frees up.`
+            ? `${backlog}${capped ? '+' : ''} load${
+                backlog === 1 && !capped ? '' : 's'
+              } stay in the backlog until capacity frees up.`
             : 'Nothing waiting in the backlog either.'}
         </Text>
       </View>

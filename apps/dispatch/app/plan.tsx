@@ -98,10 +98,17 @@ export default function PlanScreen() {
     setBusy(true);
     try {
       const res = await applyPlan({
+        // A run can mix both backlogs, so each pick carries whichever ids it
+        // actually holds; the mutation commits each kind its own way.
         picks: includedPicks.map(({ run, i }) => ({
           driverId: (override[i]?._id ??
             run.candidates[(choice[i] ?? 0) % run.candidates.length]._id) as never,
-          assignmentIds: run.loads.map((l) => l.assignmentId),
+          assignmentIds: run.loads
+            .map((l) => l.assignmentId)
+            .filter((x): x is NonNullable<typeof x> => x != null),
+          loadIds: run.loads
+            .map((l) => l.loadId)
+            .filter((x): x is NonNullable<typeof x> => x != null),
         })),
       });
       const failed = res.results.filter((r) => !r.success);
@@ -259,7 +266,7 @@ export default function PlanScreen() {
                 : null;
               return (
                 <View
-                  key={run.loads[0].assignmentId}
+                  key={run.loads[0].assignmentId ?? run.loads[0].loadId}
                   style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: off ? colors.border : colors.primary, borderRadius: borderRadius.lg, padding: 14, marginBottom: 12, opacity: off ? 0.55 : 1 }}
                 >
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -278,7 +285,7 @@ export default function PlanScreen() {
                     {fmt(run.start)} – {fmt(run.end)}
                   </Text>
                   {run.loads.map((l, j) => (
-                    <View key={l.assignmentId} style={{ marginTop: 8 }}>
+                    <View key={l.assignmentId ?? l.loadId} style={{ marginTop: 8 }}>
                       {j > 0 && (
                         <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs, marginBottom: 4 }}>
                           ↓ {run.deadheadMiles[j - 1]} mi deadhead
