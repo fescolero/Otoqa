@@ -3,8 +3,8 @@
 import * as React from 'react';
 import { useMemo, useState } from 'react';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
-// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
-import { useMutation, useQuery } from 'convex/react';
+import { useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { useOrganizationId } from '@/contexts/organization-context';
@@ -256,7 +256,22 @@ export default function RouteAssignmentsPage() {
   const [deleting, setDeleting] = useState<CombinedAssignment | null>(null);
 
   // ── data ─────────────────────────────────────────────────────────────
-  const routeAssignments = useQuery(
+  //
+  // Both queries call `assertCallerOwnsOrg`, so they throw
+  // ConvexError('Unauthenticated') for any caller without a token, and Convex
+  // rethrows that out of the hook during render — taking the whole page down.
+  //
+  // The `organizationId ? … : 'skip'` guard below does NOT prevent that.
+  // `organizationId` comes from OrganizationProvider, which is handed the id
+  // by the server, so it is already non-empty on the very first client render
+  // — well before the Convex auth handshake has installed a token. The guard
+  // therefore passes immediately and both queries subscribe unauthenticated.
+  //
+  // useAuthQuery additionally holds the subscription at 'skip' until
+  // `useConvexAuth().isAuthenticated` flips, so they only ever run with a
+  // token. The org guard is kept because it is still the right check for a
+  // missing org id.
+  const routeAssignments = useAuthQuery(
     api.routeAssignments.list,
     organizationId
       ? {
@@ -266,7 +281,7 @@ export default function RouteAssignmentsPage() {
       : 'skip',
   );
 
-  const recurringTemplates = useQuery(
+  const recurringTemplates = useAuthQuery(
     api.recurringLoads.list,
     organizationId ? { workosOrgId: organizationId } : 'skip',
   );
