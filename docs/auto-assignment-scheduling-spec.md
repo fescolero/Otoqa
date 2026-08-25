@@ -4,10 +4,14 @@ Status: in progress. Covers two independent features that both answer "which
 days does auto-assignment run?" — they mean different things and only one of
 them is safe to ship alone.
 
-**Done:** R11, the matcher extraction, feature A, and R9 — the whole order
-below. Remaining loose ends: R3/R4 (settings-form mechanics), R5 (delete the
-dead `fourKitesSyncHelpers.createLoad`), R12/R13 (driver availability,
+**Done:** R11, the matcher extraction, feature A, R9, and R5. Remaining loose
+ends: R3/R4 (settings-form mechanics), R12/R13 (driver availability,
 `employmentStatus` union).
+
+Also shipped, not in the original review: two rules may share an HCR + Trip
+when their service days are disjoint. The pre-calendar "one rule per
+HCR + Trip" guard rejected exactly the configuration feature A exists to
+express.
 
 Today neither exists. `autoAssignmentSettings` has `enabled`,
 `triggerOnCreate`, `scheduledEnabled`, `scheduleIntervalMinutes`

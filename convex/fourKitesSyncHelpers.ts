@@ -156,44 +156,6 @@ export const updateLoad = internalMutation({
   },
 });
 
-// Create new load
-export const createLoad = internalMutation({
-  args: {
-    data: v.any(),
-  },
-  handler: async (ctx, args) => {
-    const loadId = await ctx.db.insert("loadInformation", args.data);
-    
-    // ✅ Update organization stats (aggregate table pattern)
-    await updateLoadCount(ctx, args.data.workosOrgId, undefined, args.data.status);
-
-    // ✅ Platform billing: every load written into the system is billable.
-    // args.data is v.any() — only trust createdAt when it's a real number.
-    await recordLoadWritten(
-      ctx,
-      args.data.workosOrgId,
-      typeof args.data.createdAt === "number" ? args.data.createdAt : Date.now(),
-    );
-    
-    // ✅ Trigger auto-assignment for FourKites loads
-    // FourKites loads come in with parsedHcr already set
-    if (args.data.parsedHcr) {
-      try {
-        await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
-          loadId: loadId as Id<"loadInformation">,
-          workosOrgId: args.data.workosOrgId,
-          userId: "fourkites-sync",
-          userName: "FourKites Sync",
-        });
-      } catch (error) {
-        // Log but don't fail load creation
-        console.error("Auto-assignment failed for FourKites load:", error);
-      }
-    }
-    
-    return loadId;
-  },
-});
 
 // Read-only stop lookup for a load
 export const getLoadStops = internalQuery({
