@@ -538,10 +538,27 @@ Two things this exposes about the earlier work:
   right and the engine was wrong.
 
 Cleanup ran via `_devTools/tier3Cleanup`, which deliberately separates two
-causes: a trip with **no rule at all** (the artifact — 27 loads, unassigned)
-from a trip whose rule simply does not cover that weekday (11 loads,
-assigned before service days existed — left for a dispatcher, since
-retroactively undoing those is a judgment call, not a backfill).
+causes: a trip with **no rule at all** (the artifact — 27 loads) from a trip
+whose rule simply does not cover that weekday (11 loads, assigned before
+service days existed). The second group needed a human verdict rather than a
+backfill; the operator confirmed the day sets are correct and those loads
+were released too. 38 total, 0 in motion touched.
+
+**`autoAssignOptOut` should not have been set by that cleanup.** The flag
+exists so the sweep cannot undo a *dispatcher's* decision (R11);
+`unassignLoadResources` sets it for that caller, and the backfill inherited
+it. But a backfill correcting the system's own bad assignment wants the
+opposite — the load must stay freely assignable, including by a rule added
+later. Left as-is, all 38 would have been invisible to the sweep once the
+right rules existed. The flag is now a parameter defaulting to `true` (the
+dispatcher path is unchanged), the cleanup passes `false`, and the 38
+already-flagged loads were cleared — scoped by the cleanup's own audit row
+so a genuine dispatcher unassignment is never touched.
+
+A coverage "gap" the data appeared to show — trips 15/16 configured for
+Sunday only while loads arrive all week — is not a misconfiguration. Those
+days are run by other drivers who simply have no rules yet. Uncovered days
+are expected to surface as `DAY_RESTRICTED` and be dispatched by hand.
 
 ## R15 — tests
 

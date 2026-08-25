@@ -29,6 +29,13 @@ export const unassignTier3Matches = internalMutation({
     workosOrgId: v.string(),
     /** Only consider loads on or after this service date (YYYY-MM-DD). */
     fromServiceDate: v.optional(v.string()),
+    /**
+     * Also unassign loads whose trip HAS rules that simply do not cover the
+     * load's weekday. Off by default: those predate service days, so
+     * releasing them is only correct once someone confirms the day sets are
+     * complete rather than merely unfinished.
+     */
+    includeDayMismatch: v.optional(v.boolean()),
     dryRun: v.optional(v.boolean()),
   },
   returns: v.object({
@@ -37,6 +44,18 @@ export const unassignTier3Matches = internalMutation({
     affected: v.number(),
     skippedInMotion: v.number(),
     dayMismatch: v.number(),
+    dayMismatchLoads: v.array(
+      v.object({
+        internalId: v.string(),
+        orderNumber: v.optional(v.string()),
+        trip: v.optional(v.string()),
+        serviceDate: v.optional(v.string()),
+        weekday: v.string(),
+        driverName: v.string(),
+        // The rules that DO exist for this trip, and the days they cover.
+        coverage: v.array(v.object({ name: v.string(), days: v.string() })),
+      }),
+    ),
     loads: v.array(
       v.object({
         internalId: v.string(),
@@ -68,6 +87,18 @@ export const unassignTier3Matches = internalMutation({
     let affected = 0;
     let skippedInMotion = 0;
     let dayMismatch = 0;
+    const dayMismatchLoads: Array<{
+      internalId: string;
+      orderNumber?: string;
+      trip?: string;
+      serviceDate?: string;
+      weekday: string;
+      driverName: string;
+      coverage: Array<{ name: string; days: string }>;
+    }> = [];
+    const DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const showDays = (d?: number[]) =>
+      d && d.length > 0 ? d.map((x) => DAY[x]).join('/') : 'every day';
 
     for (const load of assigned) {
       if (args.fromServiceDate && (load.firstStopDate ?? '') < args.fromServiceDate) continue;
@@ -107,6 +138,35 @@ export const unassignTier3Matches = internalMutation({
       // not a tier-3 artifact. A dispatcher decides, not a backfill.
       if (rulesForTrip.length > 0) {
         dayMismatch++;
+
+        const driver = load.primaryDriverId ? await ctx.db.get(load.primaryDriverId) : null;
+        dayMismatchLoads.push({
+          internalId: load.internalId,
+          orderNumber: load.orderNumber,
+          trip: facets.trip,
+          serviceDate: load.firstStopDate,
+          weekday: load.firstStopDate
+            ? DAY[new Date(`${load.firstStopDate}T00:00:00.000Z`).getUTCDay()]
+            : '—',
+          driverName: driver ? `${driver.firstName} ${driver.lastName}` : 'unknown',
+          coverage: rulesForTrip.map((r) => ({
+            name: r.name ?? `${r.hcr}${r.tripNumber ? `-${r.tripNumber}` : ''}`,
+            days: showDays(r.activeDays),
+          })),
+        });
+
+        if (args.includeDayMismatch) {
+          affected++;
+          if (!dryRun) {
+            await unassignLoadResources(
+              ctx,
+              load._id,
+              { userId: 'system', userName: 'Tier-3 cleanup' },
+              `no rule for HCR ${facets.hcr} / trip ${facets.trip} covers ${load.firstStopDate}; returned for manual dispatch`,
+              false, // correcting our own bad assignment — keep it assignable
+            );
+          }
+        }
         continue;
       }
 
@@ -143,6 +203,57 @@ export const unassignTier3Matches = internalMutation({
       }
     }
 
-    return { dryRun, examined, affected, skippedInMotion, dayMismatch, loads };
+    return { dryRun, examined, affected, skippedInMotion, dayMismatch, dayMismatchLoads, loads };
+  },
+});
+
+/**
+ * Undo the autoAssignOptOut that the first run of this cleanup set.
+ *
+ * unassignLoadResources sets that flag for the dispatcher path, and the
+ * cleanup inherited it — which would make these loads invisible to the
+ * sweep even after the right rules exist. Scoped by the cleanup's own audit
+ * row so a genuine dispatcher unassignment is never cleared.
+ */
+export const clearCleanupOptOut = internalMutation({
+  args: { workosOrgId: v.string(), dryRun: v.optional(v.boolean()) },
+  returns: v.object({ dryRun: v.boolean(), cleared: v.number(), leftAlone: v.number() }),
+  handler: async (ctx, args) => {
+    const dryRun = args.dryRun ?? true;
+    let cleared = 0;
+    let leftAlone = 0;
+
+    const open = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', 'Open'))
+      .collect();
+
+    for (const load of open) {
+      if (!load.autoAssignOptOut) continue;
+
+      const rows = await ctx.db
+        .query('auditLog')
+        .withIndex('by_org_entity', (q) =>
+          q
+            .eq('organizationId', args.workosOrgId)
+            .eq('entityType', 'load')
+            .eq('entityId', load._id),
+        )
+        .collect();
+      const fromCleanup = rows.some(
+        (r) => r.action === 'resource_unassigned' && r.performedByName === 'Tier-3 cleanup',
+      );
+
+      if (!fromCleanup) {
+        leftAlone++;
+        continue;
+      }
+      cleared++;
+      if (!dryRun) {
+        await ctx.db.patch(load._id, { autoAssignOptOut: undefined, updatedAt: Date.now() });
+      }
+    }
+
+    return { dryRun, cleared, leftAlone };
   },
 });

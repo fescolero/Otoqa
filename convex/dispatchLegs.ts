@@ -989,6 +989,14 @@ export async function unassignLoadResources(
   loadId: Id<'loadInformation'>,
   performer: { userId: string; userName?: string; userEmail?: string },
   reason?: string,
+  /**
+   * Set autoAssignOptOut so the sweep can't hand the load straight back.
+   * Correct for a dispatcher pulling a resource off — that is a decision to
+   * respect. A backfill correcting the system's own bad assignment is the
+   * opposite: the load should become freely assignable again, including by
+   * a rule added later. Defaults true so the dispatcher path is unchanged.
+   */
+  optOut = true,
 ): Promise<{ status: 'SUCCESS' } | { status: 'ERROR'; message: string }> {
   const load = await ctx.db.get(loadId);
   if (!load) {
@@ -1025,7 +1033,7 @@ export async function unassignLoadResources(
     primaryDriverId: undefined,
     primaryCarrierPartnershipId: undefined,
     status: 'Open',
-    autoAssignOptOut: true,
+    autoAssignOptOut: optOut ? true : undefined,
     updatedAt: now,
   });
 
