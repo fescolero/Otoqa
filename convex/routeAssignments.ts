@@ -2,6 +2,7 @@ import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
+import { matchRouteAssignment } from './lib/routeMatch';
 
 /**
  * Route Assignments - Maps recurring routes (HCR+Trip) to drivers/carriers
@@ -180,32 +181,14 @@ export const getByRoute = query({
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
-    // First try exact match (HCR + Trip)
-    if (args.tripNumber) {
-      const exactMatch = await ctx.db
-        .query('routeAssignments')
-        .withIndex('by_org_hcr_trip', (q) =>
-          q
-            .eq('workosOrgId', args.workosOrgId)
-            .eq('hcr', args.hcr)
-            .eq('tripNumber', args.tripNumber)
-        )
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .first();
-
-      if (exactMatch) return exactMatch;
-    }
-
-    // Fall back to HCR-only match
-    const hcrMatch = await ctx.db
-      .query('routeAssignments')
-      .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', args.workosOrgId).eq('hcr', args.hcr))
-      .filter((q) =>
-        q.and(q.eq(q.field('isActive'), true), q.eq(q.field('tripNumber'), undefined))
-      )
-      .first();
-
-    return hcrMatch;
+    // Shared matcher (lib/routeMatch.ts). This query previously implemented
+    // only the first two tiers, so the UI's preview disagreed with what the
+    // assignment engine would actually pick.
+    return await matchRouteAssignment(ctx, {
+      workosOrgId: args.workosOrgId,
+      hcr: args.hcr,
+      trip: args.tripNumber,
+    });
   },
 });
 

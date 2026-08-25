@@ -1,8 +1,9 @@
 import { v } from 'convex/values';
 import { internalMutation, internalAction, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
-import { Id, Doc } from './_generated/dataModel';
+import { Id } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
+import { matchRouteAssignment } from './lib/routeMatch';
 import type { OverlapInfo } from './_helpers/timeUtils';
 
 /**
@@ -58,52 +59,6 @@ export const getAutoAssignmentSettings = internalQuery({
       .query('autoAssignmentSettings')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
       .first();
-  },
-});
-
-// Internal query to find matching route assignment
-export const findRouteAssignment = internalQuery({
-  args: {
-    workosOrgId: v.string(),
-    hcr: v.string(),
-    tripNumber: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    // First try exact match (HCR + Trip)
-    if (args.tripNumber) {
-      const exactMatch = await ctx.db
-        .query('routeAssignments')
-        .withIndex('by_org_hcr_trip', (q) =>
-          q
-            .eq('workosOrgId', args.workosOrgId)
-            .eq('hcr', args.hcr)
-            .eq('tripNumber', args.tripNumber)
-        )
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .first();
-
-      if (exactMatch) return exactMatch;
-    }
-
-    // Fall back to HCR-only match (route with no trip specified)
-    const hcrOnlyMatch = await ctx.db
-      .query('routeAssignments')
-      .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', args.workosOrgId).eq('hcr', args.hcr))
-      .filter((q) =>
-        q.and(q.eq(q.field('isActive'), true), q.eq(q.field('tripNumber'), undefined))
-      )
-      .first();
-
-    if (hcrOnlyMatch) return hcrOnlyMatch;
-
-    // Fall back to any active route for this HCR (highest priority first)
-    const anyHcrMatch = await ctx.db
-      .query('routeAssignments')
-      .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', args.workosOrgId).eq('hcr', args.hcr))
-      .filter((q) => q.eq(q.field('isActive'), true))
-      .first();
-
-    return anyHcrMatch;
   },
 });
 
@@ -179,40 +134,12 @@ export const autoAssignLoad = internalMutation({
       };
     }
 
-    // 5. Find matching route assignment
-    // Priority: exact HCR+Trip > HCR-only rule > any route for this HCR
-    let routeAssignment: Doc<'routeAssignments'> | null = null;
-
-    if (loadFacets.trip) {
-      routeAssignment = await ctx.db
-        .query('routeAssignments')
-        .withIndex('by_org_hcr_trip', (q) =>
-          q
-            .eq('workosOrgId', load.workosOrgId)
-            .eq('hcr', loadFacets.hcr!)
-            .eq('tripNumber', loadFacets.trip)
-        )
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .first();
-    }
-
-    if (!routeAssignment) {
-      routeAssignment = await ctx.db
-        .query('routeAssignments')
-        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', loadFacets.hcr!))
-        .filter((q) =>
-          q.and(q.eq(q.field('isActive'), true), q.eq(q.field('tripNumber'), undefined))
-        )
-        .first();
-    }
-
-    if (!routeAssignment) {
-      routeAssignment = await ctx.db
-        .query('routeAssignments')
-        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', loadFacets.hcr!))
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .first();
-    }
+    // 5. Find the route rule — shared matcher, see lib/routeMatch.ts
+    const routeAssignment = await matchRouteAssignment(ctx, {
+      workosOrgId: load.workosOrgId,
+      hcr: loadFacets.hcr,
+      trip: loadFacets.trip,
+    });
 
     if (!routeAssignment) {
       return {
@@ -538,40 +465,12 @@ export const triggerAutoAssignmentForLoad = internalMutation({
       };
     }
 
-    // Find matching route assignment
-    // Priority: exact HCR+Trip > HCR-only rule > any route for this HCR
-    let routeAssignment: Doc<'routeAssignments'> | null = null;
-
-    if (loadFacets.trip) {
-      routeAssignment = await ctx.db
-        .query('routeAssignments')
-        .withIndex('by_org_hcr_trip', (q) =>
-          q
-            .eq('workosOrgId', load.workosOrgId)
-            .eq('hcr', loadFacets.hcr!)
-            .eq('tripNumber', loadFacets.trip)
-        )
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .first();
-    }
-
-    if (!routeAssignment) {
-      routeAssignment = await ctx.db
-        .query('routeAssignments')
-        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', loadFacets.hcr!))
-        .filter((q) =>
-          q.and(q.eq(q.field('isActive'), true), q.eq(q.field('tripNumber'), undefined))
-        )
-        .first();
-    }
-
-    if (!routeAssignment) {
-      routeAssignment = await ctx.db
-        .query('routeAssignments')
-        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', loadFacets.hcr!))
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .first();
-    }
+    // Find the route rule — shared matcher, see lib/routeMatch.ts
+    const routeAssignment = await matchRouteAssignment(ctx, {
+      workosOrgId: load.workosOrgId,
+      hcr: loadFacets.hcr,
+      trip: loadFacets.trip,
+    });
 
     if (!routeAssignment) {
       return {
