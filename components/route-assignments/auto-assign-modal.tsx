@@ -11,9 +11,9 @@
  *   • Accent primary CTA in the footer
  *
  * Only wires fields the routeAssignments schema currently supports
- * (name, hcr, tripNumber, driverId/carrierPartnershipId, notes). The
- * design's window/conflict/notification fields are intentionally omitted
- * until the schema grows to support them.
+ * (name, hcr, tripNumber, driverId/carrierPartnershipId, service days,
+ * notes). The design's window/conflict/notification fields are
+ * intentionally omitted until the schema grows to support them.
  */
 
 import * as React from 'react';
@@ -22,6 +22,8 @@ import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { Avatar, WBtn, WIcon, type IconName } from '@/components/web';
+import { DaysControl } from '@/components/web/create-form/controls/days';
+import { ToggleControl } from '@/components/web/create-form/controls/toggle';
 import { Loader2 } from 'lucide-react';
 
 type AssigneeKind = 'driver' | 'carrier';
@@ -34,6 +36,8 @@ interface RouteAssignmentDoc {
   carrierPartnershipId?: Id<'carrierPartnerships'>;
   name?: string;
   notes?: string;
+  activeDays?: number[];
+  excludeFederalHolidays?: boolean;
   driverName?: string;
   carrierName?: string;
 }
@@ -48,6 +52,8 @@ interface AutoAssignModalProps {
 }
 
 // ─── primitives ─────────────────────────────────────────────────────────
+
+const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
 
 function AASection({
   icon,
@@ -252,6 +258,11 @@ export function AutoAssignModal({
   const [driverId, setDriverId] = React.useState<string>(rule?.driverId ?? '');
   const [carrierId, setCarrierId] = React.useState<string>(rule?.carrierPartnershipId ?? '');
   const [notes, setNotes] = React.useState(rule?.notes ?? '');
+  // All seven days IS "runs every day" — the mutation normalizes a full
+  // week back to an absent field, so the picker needs no separate on/off
+  // switch and the two states can't disagree.
+  const [activeDays, setActiveDays] = React.useState<number[]>(rule?.activeDays ?? ALL_DAYS);
+  const [skipHolidays, setSkipHolidays] = React.useState(rule?.excludeFederalHolidays ?? false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -265,6 +276,8 @@ export function AutoAssignModal({
       setDriverId(rule?.driverId ?? '');
       setCarrierId(rule?.carrierPartnershipId ?? '');
       setNotes(rule?.notes ?? '');
+      setActiveDays(rule?.activeDays ?? ALL_DAYS);
+      setSkipHolidays(rule?.excludeFederalHolidays ?? false);
       setError(null);
     }
   }, [open, rule]);
@@ -344,6 +357,8 @@ export function AutoAssignModal({
           driverId: assigneeKind === 'driver' ? (driverId as Id<'drivers'>) : undefined,
           carrierPartnershipId:
             assigneeKind === 'carrier' ? (carrierId as Id<'carrierPartnerships'>) : undefined,
+          activeDays,
+          excludeFederalHolidays: skipHolidays,
           name: name || undefined,
           notes: notes || undefined,
         });
@@ -355,6 +370,8 @@ export function AutoAssignModal({
           driverId: assigneeKind === 'driver' ? (driverId as Id<'drivers'>) : undefined,
           carrierPartnershipId:
             assigneeKind === 'carrier' ? (carrierId as Id<'carrierPartnerships'>) : undefined,
+          activeDays,
+          excludeFederalHolidays: skipHolidays,
           name: name || undefined,
           notes: notes || undefined,
           createdBy: userId,
@@ -578,6 +595,37 @@ export function AutoAssignModal({
                     </AAField>
                   )}
                 </div>
+              </AASection>
+
+              {/* Service days */}
+              <AASection
+                icon="calendar"
+                title="Runs on"
+                note="Checked against the load's pickup date, not today's. Loads on other days stay unassigned for a dispatcher."
+              >
+                <AAField label="Days">
+                  <DaysControl
+                    id="service-days"
+                    value={activeDays}
+                    onChange={(next) => {
+                      // Zero days means "never", and the mutation rejects it.
+                      // Don't offer the state at all.
+                      if (next.length > 0) setActiveDays(next);
+                    }}
+                    disabled={isSubmitting}
+                  />
+                </AAField>
+                {activeDays.length < 7 && (
+                  <div className="mt-2.5">
+                    <ToggleControl
+                      id="skip-holidays"
+                      value={skipHolidays}
+                      onChange={setSkipHolidays}
+                      toggleLabel="Skip federal holidays"
+                      disabled={isSubmitting}
+                    />
+                  </div>
+                )}
               </AASection>
 
               {/* Notes */}
