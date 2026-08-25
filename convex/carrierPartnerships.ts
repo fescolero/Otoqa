@@ -1559,6 +1559,10 @@ async function releasePartnershipAssignments(
           await ctx.db.patch(assignment.loadId, {
             status: 'Open',
             trackingStatus: 'Pending',
+            // The terminated carrier is already blocked by the CARRIER_INACTIVE
+            // guard, but the reopened load can still match a *driver* route
+            // rule. A bulk termination should not silently redispatch.
+            autoAssignOptOut: true,
             updatedAt: now,
           });
           loadsReopened++;

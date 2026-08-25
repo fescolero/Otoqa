@@ -1779,6 +1779,57 @@ export const createLoad = mutation({
 // ✅ 4. UPDATE STATUS (Write)
 // When moving to "Open", clears assignment data and cancels pending legs
 // When moving to "Canceled" for assigned loads, requires cancellation reason
+/**
+ * Turn auto-assignment back on for a single load (R11).
+ *
+ * `unassignResource` and the carrier-assignment cancel paths set
+ * `autoAssignOptOut` so the scheduled sweep can't hand a load straight back
+ * to the resource a dispatcher just removed. This is the reversal: an
+ * explicit, visible "yes, auto-assign may take this again".
+ */
+export const setAutoAssignOptOut = mutation({
+  args: {
+    loadId: v.id('loadInformation'),
+    optOut: v.boolean(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load) throw new ConvexError('Load not found');
+    if (load.workosOrgId !== callerOrgId) {
+      throw new ConvexError('Not authorized for this organization');
+    }
+
+    const previous = load.autoAssignOptOut ?? false;
+    if (previous === args.optOut) return null;
+
+    await ctx.db.patch(args.loadId, {
+      autoAssignOptOut: args.optOut,
+      updatedAt: Date.now(),
+    });
+
+    await logAudit(ctx, {
+      organizationId: callerOrgId,
+      entityType: 'load',
+      entityId: args.loadId,
+      entityName: load.internalId,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: args.optOut
+        ? `Excluded load ${load.internalId} from auto-assignment`
+        : `Re-enabled auto-assignment for load ${load.internalId}`,
+      changedFields: ['autoAssignOptOut'],
+      changesBefore: JSON.stringify({ autoAssignOptOut: previous }),
+      changesAfter: JSON.stringify({ autoAssignOptOut: args.optOut }),
+    });
+
+    return null;
+  },
+});
+
 export const updateLoadStatus = mutation({
   args: {
     loadId: v.id('loadInformation'),

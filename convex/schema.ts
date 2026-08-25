@@ -1575,6 +1575,15 @@ export default defineSchema({
       portionBps: v.number(),  // basis points; entries sum to 10000
     }))),
 
+    // Auto-assignment opt-out (R11). Set when a human deliberately returns
+    // this load to Open — unassigning a driver, or canceling a carrier
+    // assignment. Without it the scheduled sweep re-matches the same route
+    // rule and hands the load straight back to the resource that was just
+    // removed, undoing the dispatcher within scheduleIntervalMinutes.
+    // Absent/false = eligible for auto-assignment (every legacy row).
+    // Cleared via loads.setAutoAssignOptOut.
+    autoAssignOptOut: v.optional(v.boolean()),
+
     // Denormalized First Stop Date (for efficient date range filtering)
     // Source of truth: loadStops where sequenceNumber = 1, windowBeginDate
     // Format: YYYY-MM-DD string (undefined if no stops or TBD)

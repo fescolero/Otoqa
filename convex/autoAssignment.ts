@@ -19,6 +19,7 @@ type AutoAssignResult = {
     | 'ASSIGNED_CARRIER'
     | 'NO_MATCH'
     | 'ALREADY_ASSIGNED'
+    | 'OPTED_OUT'
     | 'DRIVER_INACTIVE'
     | 'CARRIER_INACTIVE'
     | 'ERROR';
@@ -36,6 +37,7 @@ const autoAssignResultValidator = v.object({
     v.literal('ASSIGNED_CARRIER'),
     v.literal('NO_MATCH'),
     v.literal('ALREADY_ASSIGNED'),
+    v.literal('OPTED_OUT'),
     v.literal('DRIVER_INACTIVE'),
     v.literal('CARRIER_INACTIVE'),
     v.literal('ERROR')
@@ -134,6 +136,18 @@ export const autoAssignLoad = internalMutation({
         loadId: args.loadId,
         action: 'ALREADY_ASSIGNED',
         message: 'Load is already assigned',
+      };
+    }
+
+    // 2b. Skip if a human deliberately returned this load to Open (R11).
+    // getOpenLoadsWithHcr already filters these out; this is the guard for
+    // anything that reaches the mutation directly.
+    if (load.autoAssignOptOut) {
+      return {
+        success: false,
+        loadId: args.loadId,
+        action: 'OPTED_OUT',
+        message: 'Auto-assignment was turned off for this load after a manual unassignment',
       };
     }
 
@@ -368,7 +382,11 @@ export const autoAssignPendingLoads = internalAction({
 
           if (result.success) {
             assigned++;
-          } else if (result.action === 'NO_MATCH' || result.action === 'ALREADY_ASSIGNED') {
+          } else if (
+            result.action === 'NO_MATCH' ||
+            result.action === 'ALREADY_ASSIGNED' ||
+            result.action === 'OPTED_OUT'
+          ) {
             skipped++;
           } else {
             errors++;
@@ -431,11 +449,15 @@ export const getOpenLoadsWithHcr = internalQuery({
       .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', 'Open'))
       .collect();
 
+    // Drop loads a human opted out of (R11) BEFORE the facet fan-out —
+    // they can never be assigned, so paying a tag read for each is waste.
+    const eligible = loads.filter((load) => !load.autoAssignOptOut);
+
     // Enrich with facet values from tags. Filter to loads that have HCR.
     // O(N) tag lookups across the org's open loads — acceptable here
     // because Open-status loads are typically a small slice.
     const enriched = await Promise.all(
-      loads.map(async (load) => {
+      eligible.map(async (load) => {
         const facets = await getLoadFacets(ctx, load._id);
         return { load, facets };
       }),
@@ -492,6 +514,16 @@ export const triggerAutoAssignmentForLoad = internalMutation({
         loadId: args.loadId,
         action: 'ALREADY_ASSIGNED',
         message: 'Load is already assigned',
+      };
+    }
+
+    // Skip if a human deliberately returned this load to Open (R11).
+    if (load.autoAssignOptOut) {
+      return {
+        success: false,
+        loadId: args.loadId,
+        action: 'OPTED_OUT',
+        message: 'Auto-assignment was turned off for this load after a manual unassignment',
       };
     }
 

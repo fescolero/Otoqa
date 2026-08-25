@@ -943,10 +943,15 @@ export const unassignResource = mutation({
     }
 
     // 4. Update load
+    // autoAssignOptOut: a dispatcher pulling a resource off a load must not
+    // have the scheduled sweep hand it straight back — the load returns to
+    // Open, which is exactly what getOpenLoadsWithHcr selects for, and the
+    // same route rule still matches. Cleared via loads.setAutoAssignOptOut.
     await ctx.db.patch(args.loadId, {
       primaryDriverId: undefined,
       primaryCarrierPartnershipId: undefined,
       status: 'Open',
+      autoAssignOptOut: true,
       updatedAt: now,
     });
 
