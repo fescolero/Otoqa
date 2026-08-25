@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/select';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { useMutation } from 'convex/react';
+import { ServiceDaysField, type ServiceDaysValue } from './service-days-field';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
@@ -48,6 +49,10 @@ export function CreateRouteAssignmentModal({
   const [tripNumber, setTripNumber] = React.useState('');
   const [name, setName] = React.useState('');
   const [notes, setNotes] = React.useState('');
+  const [serviceDays, setServiceDays] = React.useState<ServiceDaysValue>({
+    activeDays: undefined,
+    excludeFederalHolidays: false,
+  });
   const [driverId, setDriverId] = React.useState<string>('');
   const [carrierId, setCarrierId] = React.useState<string>('');
 
@@ -103,6 +108,8 @@ export function CreateRouteAssignmentModal({
         driverId: assigneeType === 'driver' ? (driverId as Id<'drivers'>) : undefined,
         carrierPartnershipId:
           assigneeType === 'carrier' ? (carrierId as Id<'carrierPartnerships'>) : undefined,
+        activeDays: serviceDays.activeDays,
+        excludeFederalHolidays: serviceDays.excludeFederalHolidays || undefined,
         name: name || undefined,
         notes: notes || undefined,
         createdBy: userId,
@@ -124,6 +131,7 @@ export function CreateRouteAssignmentModal({
     setTripNumber('');
     setName('');
     setNotes('');
+    setServiceDays({ activeDays: undefined, excludeFederalHolidays: false });
     setDriverId('');
     setCarrierId('');
     setAssigneeType('driver');
@@ -250,6 +258,13 @@ export function CreateRouteAssignmentModal({
                 </Select>
               </div>
             )}
+
+            {/* Service calendar */}
+            <ServiceDaysField
+              value={serviceDays}
+              onChange={setServiceDays}
+              disabled={isSubmitting}
+            />
 
             {/* Notes */}
             <div className="space-y-2">

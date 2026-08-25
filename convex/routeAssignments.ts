@@ -9,6 +9,40 @@ import { matchRouteAssignment } from './lib/routeMatch';
  * Used by the auto-assignment system to automatically assign loads
  */
 
+/**
+ * Normalize a route's service calendar before it is stored.
+ *
+ * "Absent = runs every day" is the ONE representation of unrestricted, so
+ * a full seven-day selection is stored as absent rather than as
+ * [0,1,2,3,4,5,6]. Otherwise the two would behave differently for a load
+ * with no service date, which routeMatch declines for any restricted route.
+ *
+ * An empty array is rejected rather than silently treated as "every day" —
+ * a dispatcher who deselects every day means "never", and reading that as
+ * "always" is the worst possible guess.
+ */
+function normalizeActiveDays(activeDays: number[] | undefined): number[] | undefined {
+  if (activeDays === undefined) return undefined;
+  if (activeDays.length === 0) {
+    throw new ConvexError('Select at least one day, or turn off the day restriction');
+  }
+  const unique = [...new Set(activeDays)].sort((a, b) => a - b);
+  if (unique.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) {
+    throw new ConvexError('Days must be integers 0 (Sunday) through 6 (Saturday)');
+  }
+  return unique.length === 7 ? undefined : unique;
+}
+
+function validateExclusions(dates: string[] | undefined): string[] | undefined {
+  if (dates === undefined) return undefined;
+  for (const d of dates) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      throw new ConvexError(`Exclusion dates must be YYYY-MM-DD (got "${d}")`);
+    }
+  }
+  return [...new Set(dates)].sort();
+}
+
 // List all route assignments for an organization
 export const list = query({
   args: {
@@ -27,6 +61,9 @@ export const list = query({
       carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
       priority: v.number(),
       isActive: v.boolean(),
+      activeDays: v.optional(v.array(v.number())),
+      excludeFederalHolidays: v.optional(v.boolean()),
+      customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -110,6 +147,9 @@ export const get = query({
       carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
       priority: v.number(),
       isActive: v.boolean(),
+      activeDays: v.optional(v.array(v.number())),
+      excludeFederalHolidays: v.optional(v.boolean()),
+      customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -158,6 +198,8 @@ export const getByRoute = query({
     workosOrgId: v.string(),
     hcr: v.string(),
     tripNumber: v.optional(v.string()),
+    // Business-local YYYY-MM-DD. Omit to ignore route service calendars.
+    serviceDate: v.optional(v.string()),
   },
   returns: v.union(
     v.object({
@@ -170,6 +212,9 @@ export const getByRoute = query({
       carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
       priority: v.number(),
       isActive: v.boolean(),
+      activeDays: v.optional(v.array(v.number())),
+      excludeFederalHolidays: v.optional(v.boolean()),
+      customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -184,11 +229,13 @@ export const getByRoute = query({
     // Shared matcher (lib/routeMatch.ts). This query previously implemented
     // only the first two tiers, so the UI's preview disagreed with what the
     // assignment engine would actually pick.
-    return await matchRouteAssignment(ctx, {
+    const match = await matchRouteAssignment(ctx, {
       workosOrgId: args.workosOrgId,
       hcr: args.hcr,
       trip: args.tripNumber,
+      serviceDate: args.serviceDate,
     });
+    return match.route;
   },
 });
 
@@ -208,6 +255,9 @@ export const getByDriver = query({
       carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
       priority: v.number(),
       isActive: v.boolean(),
+      activeDays: v.optional(v.array(v.number())),
+      excludeFederalHolidays: v.optional(v.boolean()),
+      customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -243,6 +293,9 @@ export const getByCarrier = query({
       carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
       priority: v.number(),
       isActive: v.boolean(),
+      activeDays: v.optional(v.array(v.number())),
+      excludeFederalHolidays: v.optional(v.boolean()),
+      customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -271,6 +324,10 @@ export const create = mutation({
     driverId: v.optional(v.id('drivers')),
     carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
     priority: v.optional(v.number()),
+    // Service calendar — see lib/routeMatch.ts. Omit for "runs every day".
+    activeDays: v.optional(v.array(v.number())),
+    excludeFederalHolidays: v.optional(v.boolean()),
+    customExclusions: v.optional(v.array(v.string())),
     name: v.optional(v.string()),
     notes: v.optional(v.string()),
     createdBy: v.string(),
@@ -339,6 +396,11 @@ export const create = mutation({
       carrierPartnershipId: args.carrierPartnershipId,
       priority: args.priority ?? 100, // Default priority
       isActive: true,
+      activeDays: normalizeActiveDays(args.activeDays),
+      excludeFederalHolidays: args.excludeFederalHolidays || undefined,
+      customExclusions: validateExclusions(args.customExclusions)?.length
+        ? validateExclusions(args.customExclusions)
+        : undefined,
       name: args.name,
       notes: args.notes,
       createdBy: userId,
@@ -371,6 +433,11 @@ export const update = mutation({
     driverId: v.optional(v.id('drivers')),
     carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
     priority: v.optional(v.number()),
+    // Service calendar. Send all seven days (or an empty exclusion list) to
+    // clear a restriction; normalizeActiveDays stores that as absent.
+    activeDays: v.optional(v.array(v.number())),
+    excludeFederalHolidays: v.optional(v.boolean()),
+    customExclusions: v.optional(v.array(v.string())),
     name: v.optional(v.string()),
     notes: v.optional(v.string()),
     isActive: v.optional(v.boolean()),
@@ -427,6 +494,20 @@ export const update = mutation({
     if (updates.name !== undefined) updateData.name = updates.name;
     if (updates.notes !== undefined) updateData.notes = updates.notes;
     if (updates.isActive !== undefined) updateData.isActive = updates.isActive;
+
+    // Calendar fields normalize to `undefined` when unrestricted, and
+    // patching a key to undefined removes it — which is exactly the
+    // "clear the restriction" path.
+    if (updates.activeDays !== undefined) {
+      updateData.activeDays = normalizeActiveDays(updates.activeDays);
+    }
+    if (updates.excludeFederalHolidays !== undefined) {
+      updateData.excludeFederalHolidays = updates.excludeFederalHolidays || undefined;
+    }
+    if (updates.customExclusions !== undefined) {
+      const cleaned = validateExclusions(updates.customExclusions);
+      updateData.customExclusions = cleaned && cleaned.length > 0 ? cleaned : undefined;
+    }
 
     await ctx.db.patch(id, updateData);
 

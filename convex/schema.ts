@@ -1125,6 +1125,19 @@ export default defineSchema({
     priority: v.number(), // For multiple matches, lower = higher priority
     isActive: v.boolean(),
 
+    // Service calendar (feature A). Which days this route actually runs,
+    // evaluated against the LOAD'S SERVICE DATE (loadInformation
+    // .firstStopDate), not the wall clock — "Monday" means Monday at the
+    // pickup facility. firstStopDate is already a business-local YYYY-MM-DD
+    // (sliced off the stop's offset-carrying windowBeginDate), so no
+    // timezone field is needed here and none should be added.
+    // Mirrors recurringLoadTemplates' fields deliberately: same names, same
+    // 0=Sun convention, same YYYY-MM-DD exclusion format.
+    // activeDays absent = runs every day (every pre-existing row).
+    activeDays: v.optional(v.array(v.number())), // 0=Sun, 1=Mon, ... 6=Sat
+    excludeFederalHolidays: v.optional(v.boolean()),
+    customExclusions: v.optional(v.array(v.string())), // ["2026-12-25"]
+
     // Metadata
     name: v.optional(v.string()), // Friendly name like "John's Amazon Route"
     notes: v.optional(v.string()),

@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/select';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { useMutation } from 'convex/react';
+import { ServiceDaysField, type ServiceDaysValue } from './service-days-field';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
@@ -34,6 +35,8 @@ interface RouteAssignment {
   driverId?: Id<'drivers'>;
   carrierPartnershipId?: Id<'carrierPartnerships'>;
   isActive: boolean;
+  activeDays?: number[];
+  excludeFederalHolidays?: boolean;
   name?: string;
   notes?: string;
 }
@@ -63,6 +66,10 @@ export function EditRouteAssignmentModal({
   const [tripNumber, setTripNumber] = React.useState(assignment.tripNumber || '');
   const [name, setName] = React.useState(assignment.name || '');
   const [notes, setNotes] = React.useState(assignment.notes || '');
+  const [serviceDays, setServiceDays] = React.useState<ServiceDaysValue>({
+    activeDays: assignment.activeDays,
+    excludeFederalHolidays: assignment.excludeFederalHolidays ?? false,
+  });
   const [driverId, setDriverId] = React.useState<string>(assignment.driverId || '');
   const [carrierId, setCarrierId] = React.useState<string>(assignment.carrierPartnershipId || '');
 
@@ -101,6 +108,10 @@ export function EditRouteAssignmentModal({
     setTripNumber(assignment.tripNumber || '');
     setName(assignment.name || '');
     setNotes(assignment.notes || '');
+    setServiceDays({
+      activeDays: assignment.activeDays,
+      excludeFederalHolidays: assignment.excludeFederalHolidays ?? false,
+    });
     setDriverId(assignment.driverId || '');
     setCarrierId(assignment.carrierPartnershipId || '');
     setAssigneeType(assignment.driverId ? 'driver' : 'carrier');
@@ -134,6 +145,10 @@ export function EditRouteAssignmentModal({
         driverId: assigneeType === 'driver' ? (driverId as Id<'drivers'>) : undefined,
         carrierPartnershipId:
           assigneeType === 'carrier' ? (carrierId as Id<'carrierPartnerships'>) : undefined,
+        // All seven days is how "no restriction" is sent — the mutation
+        // normalizes it back to an absent field.
+        activeDays: serviceDays.activeDays ?? [0, 1, 2, 3, 4, 5, 6],
+        excludeFederalHolidays: serviceDays.excludeFederalHolidays,
         name: name || undefined,
         notes: notes || undefined,
       });
@@ -275,6 +290,13 @@ export function EditRouteAssignmentModal({
                 </Select>
               </div>
             )}
+
+            {/* Service calendar */}
+            <ServiceDaysField
+              value={serviceDays}
+              onChange={setServiceDays}
+              disabled={isSubmitting}
+            />
 
             {/* Notes */}
             <div className="space-y-2">

@@ -21,6 +21,8 @@ type AutoAssignResult = {
     | 'NO_MATCH'
     | 'ALREADY_ASSIGNED'
     | 'OPTED_OUT'
+    | 'DAY_RESTRICTED'
+    | 'NO_SERVICE_DATE'
     | 'DRIVER_INACTIVE'
     | 'CARRIER_INACTIVE'
     | 'ERROR';
@@ -39,6 +41,8 @@ const autoAssignResultValidator = v.object({
     v.literal('NO_MATCH'),
     v.literal('ALREADY_ASSIGNED'),
     v.literal('OPTED_OUT'),
+    v.literal('DAY_RESTRICTED'),
+    v.literal('NO_SERVICE_DATE'),
     v.literal('DRIVER_INACTIVE'),
     v.literal('CARRIER_INACTIVE'),
     v.literal('ERROR')
@@ -135,13 +139,33 @@ export const autoAssignLoad = internalMutation({
     }
 
     // 5. Find the route rule — shared matcher, see lib/routeMatch.ts
-    const routeAssignment = await matchRouteAssignment(ctx, {
+    const match = await matchRouteAssignment(ctx, {
       workosOrgId: load.workosOrgId,
       hcr: loadFacets.hcr,
       trip: loadFacets.trip,
+      // The route calendar is evaluated against the load's SERVICE date,
+      // not the clock — see lib/routeMatch.ts.
+      serviceDate: load.firstStopDate,
     });
+    const routeAssignment = match.route;
 
     if (!routeAssignment) {
+      if (match.declinedBecause === 'NO_SERVICE_DATE') {
+        return {
+          success: false,
+          loadId: args.loadId,
+          action: 'NO_SERVICE_DATE',
+          message: `Route for HCR ${loadFacets.hcr} runs only on set days, and this load has no service date yet`,
+        };
+      }
+      if (match.declinedBecause === 'CALENDAR') {
+        return {
+          success: false,
+          loadId: args.loadId,
+          action: 'DAY_RESTRICTED',
+          message: `No route for HCR ${loadFacets.hcr} runs on ${load.firstStopDate}`,
+        };
+      }
       return {
         success: false,
         loadId: args.loadId,
@@ -312,7 +336,9 @@ export const autoAssignPendingLoads = internalAction({
           } else if (
             result.action === 'NO_MATCH' ||
             result.action === 'ALREADY_ASSIGNED' ||
-            result.action === 'OPTED_OUT'
+            result.action === 'OPTED_OUT' ||
+            result.action === 'DAY_RESTRICTED' ||
+            result.action === 'NO_SERVICE_DATE'
           ) {
             skipped++;
           } else {
@@ -466,13 +492,33 @@ export const triggerAutoAssignmentForLoad = internalMutation({
     }
 
     // Find the route rule — shared matcher, see lib/routeMatch.ts
-    const routeAssignment = await matchRouteAssignment(ctx, {
+    const match = await matchRouteAssignment(ctx, {
       workosOrgId: load.workosOrgId,
       hcr: loadFacets.hcr,
       trip: loadFacets.trip,
+      // The route calendar is evaluated against the load's SERVICE date,
+      // not the clock — see lib/routeMatch.ts.
+      serviceDate: load.firstStopDate,
     });
+    const routeAssignment = match.route;
 
     if (!routeAssignment) {
+      if (match.declinedBecause === 'NO_SERVICE_DATE') {
+        return {
+          success: false,
+          loadId: args.loadId,
+          action: 'NO_SERVICE_DATE',
+          message: `Route for HCR ${loadFacets.hcr} runs only on set days, and this load has no service date yet`,
+        };
+      }
+      if (match.declinedBecause === 'CALENDAR') {
+        return {
+          success: false,
+          loadId: args.loadId,
+          action: 'DAY_RESTRICTED',
+          message: `No route for HCR ${loadFacets.hcr} runs on ${load.firstStopDate}`,
+        };
+      }
       return {
         success: false,
         loadId: args.loadId,
