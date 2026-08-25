@@ -1,9 +1,11 @@
 import { v } from 'convex/values';
 import { internalMutation, internalAction, internalQuery } from './_generated/server';
+import type { MutationCtx } from './_generated/server';
 import { internal } from './_generated/api';
-import { Id } from './_generated/dataModel';
+import { Id, Doc } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
 import { matchRouteAssignment } from './lib/routeMatch';
+import { logAudit } from './lib/audit';
 import type { OverlapInfo } from './_helpers/timeUtils';
 
 /**
@@ -23,6 +25,7 @@ type AutoAssignResult = {
     | 'OPTED_OUT'
     | 'DAY_RESTRICTED'
     | 'NO_SERVICE_DATE'
+    | 'OVERLAP_CONFLICT'
     | 'DRIVER_INACTIVE'
     | 'CARRIER_INACTIVE'
     | 'ERROR';
@@ -43,6 +46,7 @@ const autoAssignResultValidator = v.object({
     v.literal('OPTED_OUT'),
     v.literal('DAY_RESTRICTED'),
     v.literal('NO_SERVICE_DATE'),
+    v.literal('OVERLAP_CONFLICT'),
     v.literal('DRIVER_INACTIVE'),
     v.literal('CARRIER_INACTIVE'),
     v.literal('ERROR')
@@ -195,18 +199,32 @@ export const autoAssignLoad = internalMutation({
         truckId: driver.currentTruckId,
         assignedBy: args.userId,
         assignedByName: args.userName ?? 'Auto-Assignment System',
+        // The robot does not get to double-book. A dispatcher may.
+        blockOnOverlap: true,
       });
 
-      if (result.status === 'SUCCESS') {
-        const overlapNote = result.overlaps && result.overlaps.length > 0
-          ? ` (schedule overlap with ${result.overlaps.map((o: OverlapInfo) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
-          : '';
+      if (result.status === 'OVERLAP') {
+        const conflicts = (result.overlaps ?? [])
+          .map((o: OverlapInfo) => `Load #${o.orderNumber ?? o.loadId}`)
+          .join(', ');
+        return {
+          success: false,
+          loadId: args.loadId,
+          action: 'OVERLAP_CONFLICT',
+          message: `${driver.firstName} ${driver.lastName} is already booked across this load's window (${conflicts})`,
+          routeAssignmentId: routeAssignment._id,
+          driverId: routeAssignment.driverId,
+        };
+      }
 
+      if (result.status === 'SUCCESS') {
+        // No overlap note: blockOnOverlap means a conflicting assignment
+        // returned OVERLAP above and never got here.
         return {
           success: true,
           loadId: args.loadId,
           action: 'ASSIGNED_DRIVER',
-          message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}${overlapNote}`,
+          message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}`,
           routeAssignmentId: routeAssignment._id,
           driverId: routeAssignment.driverId,
         };
@@ -286,6 +304,7 @@ export const autoAssignPendingLoads = internalAction({
     assigned: number;
     skipped: number;
     errors: number;
+    byAction: Array<{ action: string; count: number }>;
     results: AutoAssignResult[];
   }> => {
     // 1. Check if scheduled auto-assignment is enabled
@@ -299,6 +318,7 @@ export const autoAssignPendingLoads = internalAction({
         assigned: 0,
         skipped: 0,
         errors: 0,
+        byAction: [],
         results: [],
       };
     }
@@ -313,6 +333,10 @@ export const autoAssignPendingLoads = internalAction({
     let assigned = 0;
     let skipped = 0;
     let errors = 0;
+    // Why each load ended where it did. The counts alone can't distinguish
+    // "no rule configured" from "the rule declined today's date".
+    const byAction = new Map<string, number>();
+    const tally = (action: string) => byAction.set(action, (byAction.get(action) ?? 0) + 1);
 
     const MAX_RETRIES = 3;
 
@@ -330,6 +354,7 @@ export const autoAssignPendingLoads = internalAction({
           });
 
           results.push(result);
+          tally(result.action);
 
           if (result.success) {
             assigned++;
@@ -338,7 +363,8 @@ export const autoAssignPendingLoads = internalAction({
             result.action === 'ALREADY_ASSIGNED' ||
             result.action === 'OPTED_OUT' ||
             result.action === 'DAY_RESTRICTED' ||
-            result.action === 'NO_SERVICE_DATE'
+            result.action === 'NO_SERVICE_DATE' ||
+            result.action === 'OVERLAP_CONFLICT'
           ) {
             skipped++;
           } else {
@@ -354,6 +380,7 @@ export const autoAssignPendingLoads = internalAction({
             continue;
           }
           errors++;
+          tally('ERROR');
           results.push({
             success: false,
             loadId: load._id,
@@ -367,6 +394,7 @@ export const autoAssignPendingLoads = internalAction({
 
       if (!succeeded) {
         errors++;
+        tally('ERROR');
         results.push({
           success: false,
           loadId: load._id,
@@ -381,6 +409,9 @@ export const autoAssignPendingLoads = internalAction({
       assigned,
       skipped,
       errors,
+      byAction: [...byAction.entries()]
+        .map(([action, count]) => ({ action, count }))
+        .sort((a, b) => b.count - a.count),
       results,
     };
   },
@@ -426,6 +457,37 @@ export const getOpenLoadsWithHcr = internalQuery({
       }));
   },
 });
+
+/**
+ * Record on the load itself why auto-assignment passed it over (R9).
+ *
+ * Only from the on-create path. The scheduled sweep re-evaluates every Open
+ * load every cycle, so logging declines there would write the same row every
+ * hour for as long as the load sits — the sweep's aggregate goes to
+ * autoAssignmentSettings.lastRun instead.
+ *
+ * Only actionable declines get a row. NO_MATCH — "no rule exists for this
+ * HCR" — is the normal state for most loads in most orgs and would drown
+ * the trail.
+ */
+async function noteDecline(
+  ctx: MutationCtx,
+  load: Doc<'loadInformation'>,
+  action: string,
+  description: string,
+): Promise<void> {
+  await logAudit(ctx, {
+    organizationId: load.workosOrgId,
+    entityType: 'load',
+    entityId: load._id,
+    entityName: load.internalId,
+    action: 'auto_assign_skipped',
+    performedBy: 'system',
+    performedByName: 'Auto-Assignment System',
+    description,
+    changedFields: [action],
+  });
+}
 
 /**
  * Trigger auto-assignment for a newly created load
@@ -504,6 +566,8 @@ export const triggerAutoAssignmentForLoad = internalMutation({
 
     if (!routeAssignment) {
       if (match.declinedBecause === 'NO_SERVICE_DATE') {
+        await noteDecline(ctx, load, 'NO_SERVICE_DATE',
+          `Auto-assignment skipped: the route for HCR ${loadFacets.hcr} runs only on set days and this load has no service date yet`);
         return {
           success: false,
           loadId: args.loadId,
@@ -512,6 +576,8 @@ export const triggerAutoAssignmentForLoad = internalMutation({
         };
       }
       if (match.declinedBecause === 'CALENDAR') {
+        await noteDecline(ctx, load, 'DAY_RESTRICTED',
+          `Auto-assignment skipped: no route for HCR ${loadFacets.hcr} runs on ${load.firstStopDate}`);
         return {
           success: false,
           loadId: args.loadId,
@@ -547,18 +613,32 @@ export const triggerAutoAssignmentForLoad = internalMutation({
         truckId: driver.currentTruckId,
         assignedBy: args.userId,
         assignedByName: args.userName ?? 'Auto-Assignment System',
+        // The robot does not get to double-book. A dispatcher may.
+        blockOnOverlap: true,
       });
 
-      if (result.status === 'SUCCESS') {
-        const overlapNote = result.overlaps && result.overlaps.length > 0
-          ? ` (schedule overlap with ${result.overlaps.map((o: OverlapInfo) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
-          : '';
+      if (result.status === 'OVERLAP') {
+        const conflicts = (result.overlaps ?? [])
+          .map((o: OverlapInfo) => `Load #${o.orderNumber ?? o.loadId}`)
+          .join(', ');
+        return {
+          success: false,
+          loadId: args.loadId,
+          action: 'OVERLAP_CONFLICT',
+          message: `${driver.firstName} ${driver.lastName} is already booked across this load's window (${conflicts})`,
+          routeAssignmentId: routeAssignment._id,
+          driverId: routeAssignment.driverId,
+        };
+      }
 
+      if (result.status === 'SUCCESS') {
+        // No overlap note: blockOnOverlap means a conflicting assignment
+        // returned OVERLAP above and never got here.
         return {
           success: true,
           loadId: args.loadId,
           action: 'ASSIGNED_DRIVER',
-          message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}${overlapNote}`,
+          message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}`,
           routeAssignmentId: routeAssignment._id,
           driverId: routeAssignment.driverId,
         };

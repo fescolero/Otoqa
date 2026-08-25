@@ -492,6 +492,46 @@ export const assignDriver = mutation({
 
 // Internal version of assignDriver for system calls (auto-assignment, load creation)
 // Always proceeds — returns overlap insight alongside SUCCESS for logging/visibility
+/**
+ * The time ranges a driver would occupy if this load were assigned to them,
+ * computed WITHOUT mutating anything.
+ *
+ * Mirrors assignDriverInternal's leg logic: reuse the PENDING/ACTIVE legs
+ * if there are any, otherwise the single leg it would create spanning the
+ * first stop to the last. Ranges come from the stops, not from whoever is
+ * assigned, so they are identical before and after assignment — which is
+ * what lets the overlap check run as a pre-flight instead of a rollback.
+ *
+ * Keep in sync with assignDriverInternal's leg selection below.
+ */
+async function prospectiveLegRanges(
+  ctx: MutationCtx,
+  loadId: Id<'loadInformation'>,
+): Promise<({ start: number; end: number } | null)[]> {
+  const legs = await ctx.db
+    .query('dispatchLegs')
+    .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .collect();
+
+  const assignable = legs.filter((l) => l.status === 'PENDING' || l.status === 'ACTIVE');
+  if (assignable.length > 0) {
+    return await Promise.all(assignable.map((leg) => getLegTimeRange(ctx, leg)));
+  }
+
+  const stops = await ctx.db
+    .query('loadStops')
+    .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .collect();
+  if (stops.length < 2) return [];
+
+  const sorted = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const start = parseStopDateTime(first.windowBeginDate, first.windowBeginTime);
+  const end = parseStopDateTime(last.windowBeginDate, last.windowBeginTime);
+  return start === null || end === null ? [null] : [{ start, end }];
+}
+
 export const assignDriverInternal = internalMutation({
   args: {
     loadId: v.id('loadInformation'),
@@ -499,8 +539,19 @@ export const assignDriverInternal = internalMutation({
     truckId: v.optional(v.id('trucks')),
     assignedBy: v.string(),
     assignedByName: v.optional(v.string()),
+    // Refuse rather than proceed when the driver is already booked across
+    // this load's window. Auto-assignment passes true; every human-initiated
+    // caller leaves it off and keeps the warn-and-proceed behavior.
+    blockOnOverlap: v.optional(v.boolean()),
   },
-  handler: async (ctx, args): Promise<{ status: 'SUCCESS' | 'ERROR'; message?: string; overlaps?: OverlapInfo[] }> => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    status: 'SUCCESS' | 'ERROR' | 'OVERLAP';
+    message?: string;
+    overlaps?: OverlapInfo[];
+  }> => {
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
       return { status: 'ERROR', message: 'Driver is inactive or not found' };
@@ -512,6 +563,26 @@ export const assignDriverInternal = internalMutation({
     }
     if (load.status === 'Canceled') {
       return { status: 'ERROR', message: 'Cannot assign driver to a canceled load' };
+    }
+
+    // Pre-flight overlap check, for callers that cannot exercise judgment.
+    // A dispatcher looking at the driver's board may knowingly double-book —
+    // maybe the first load runs early, maybe the windows are soft — so the
+    // manual path keeps proceeding with a warning. Auto-assignment has no
+    // such judgment: an overlap there means the route rule or the data is
+    // wrong, and assigning anyway manufactures a conflict nobody requested
+    // and nobody reviews. Runs before any write, so declining needs no
+    // rollback.
+    if (args.blockOnOverlap) {
+      const conflicts = await detectDriverOverlaps(
+        ctx,
+        args.driverId,
+        await prospectiveLegRanges(ctx, args.loadId),
+        args.loadId,
+      );
+      if (conflicts.length > 0) {
+        return { status: 'OVERLAP', overlaps: conflicts };
+      }
     }
 
     const allLegsForLoad = await ctx.db

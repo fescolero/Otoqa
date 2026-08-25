@@ -1504,7 +1504,9 @@ export const applyPlan = mutation({
           results.push({ loadId, success: false, reason: 'Load not found' });
           continue;
         }
-        const res: { status: 'SUCCESS' | 'ERROR'; message?: string } = await ctx.runMutation(
+        // 'OVERLAP' is unreachable here — only auto-assignment passes
+        // blockOnOverlap — but the mutation's type admits it.
+        const res: { status: 'SUCCESS' | 'ERROR' | 'OVERLAP'; message?: string } = await ctx.runMutation(
           internal.dispatchLegs.assignDriverInternal,
           {
             loadId,
@@ -2082,7 +2084,9 @@ export const assignDriverToLoadsWeb = mutation({
         results.push({ internalId: null, success: false, reason: 'Load not found' });
         continue;
       }
-      const res: { status: 'SUCCESS' | 'ERROR'; message?: string } = await ctx.runMutation(
+      // 'OVERLAP' is unreachable here — only auto-assignment passes
+      // blockOnOverlap — but the mutation's type admits it.
+      const res: { status: 'SUCCESS' | 'ERROR' | 'OVERLAP'; message?: string } = await ctx.runMutation(
         internal.dispatchLegs.assignDriverInternal,
         {
           loadId,

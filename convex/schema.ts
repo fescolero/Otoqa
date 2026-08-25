@@ -1242,6 +1242,27 @@ export default defineSchema({
     scheduleIntervalMinutes: v.optional(v.number()), // Minutes between scheduled runs
     lastScheduledRunAt: v.optional(v.number()), // Last scheduled run timestamp (ms)
 
+    // Outcome of the most recent scheduled sweep (R9). Before this, the run
+    // counted its results, console.log'd a line and dropped them — so a rule
+    // that silently matched nothing looked exactly like one that was
+    // working. Day restrictions make that worse, since declining is now a
+    // normal outcome rather than a sign of misconfiguration.
+    // One row per org, overwritten each run: enough to answer "did the last
+    // run do anything, and why not", without a log table to grow and prune.
+    lastRun: v.optional(
+      v.object({
+        at: v.number(),
+        processed: v.number(),
+        assigned: v.number(),
+        skipped: v.number(),
+        errors: v.number(),
+        // Per-outcome counts, e.g. [{ action: 'DAY_RESTRICTED', count: 3 }].
+        // An array rather than a record so adding an action code needs no
+        // schema change.
+        byAction: v.array(v.object({ action: v.string(), count: v.number() })),
+      }),
+    ),
+
     // Audit
     updatedBy: v.string(),
     updatedAt: v.number(),

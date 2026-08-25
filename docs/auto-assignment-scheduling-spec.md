@@ -4,9 +4,10 @@ Status: in progress. Covers two independent features that both answer "which
 days does auto-assignment run?" — they mean different things and only one of
 them is safe to ship alone.
 
-**Done:** R11 (auto-assign opt-out), the matcher extraction, and feature A —
-steps 0–2 of the order below. **Next:** R9 (overlap declines on auto +
-the reporting channel), which day restrictions make load-bearing.
+**Done:** R11, the matcher extraction, feature A, and R9 — the whole order
+below. Remaining loose ends: R3/R4 (settings-form mechanics), R5 (delete the
+dead `fourKitesSyncHelpers.createLoad`), R12/R13 (driver availability,
+`employmentStatus` union).
 
 Today neither exists. `autoAssignmentSettings` has `enabled`,
 `triggerOnCreate`, `scheduledEnabled`, `scheduleIntervalMinutes`
@@ -410,9 +411,17 @@ what the rest of R9 exists to surface.
 
 ### The reporting channel
 
-1. Raise a `dispatchAlerts` row on `OVERLAP_CONFLICT` and on
-   `DRIVER_INACTIVE` — that table already has fanout and push
-   ([dispatchAlerts.ts:55](../convex/dispatchAlerts.ts)).
+1. ~~Raise a `dispatchAlerts` row~~ — **wrong, corrected during
+   implementation.** `dispatchAlerts` is not a general alert table: its
+   `assignmentId` is a required `v.id('loadCarrierAssignments')` and the
+   whole dedupe index is keyed on it
+   ([dispatchAlerts.ts:38](../convex/dispatchAlerts.ts),
+   [schema.ts:510](../convex/schema.ts)). An auto-assignment decline has no
+   carrier assignment, so using it would mean reshaping a table whose dedupe
+   design is assignment-scoped. Built instead: a per-load audit row
+   (`auto_assign_skipped`) written **only from the on-create path**, since
+   the sweep re-evaluates every Open load every cycle and would rewrite the
+   same row hourly.
 2. Persist per-run outcomes so the settings page can show "last run:
    14 assigned, 3 skipped (2 no matching route, 1 no service date)". The
    counters exist in `runScheduledAutoAssignment`; they are summed,

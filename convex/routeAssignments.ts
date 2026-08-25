@@ -623,6 +623,16 @@ export const getSettings = query({
       scheduledEnabled: v.boolean(),
       scheduleIntervalMinutes: v.optional(v.number()),
       lastScheduledRunAt: v.optional(v.number()),
+      lastRun: v.optional(
+        v.object({
+          at: v.number(),
+          processed: v.number(),
+          assigned: v.number(),
+          skipped: v.number(),
+          errors: v.number(),
+          byAction: v.array(v.object({ action: v.string(), count: v.number() })),
+        }),
+      ),
       updatedBy: v.string(),
       updatedAt: v.number(),
     }),
