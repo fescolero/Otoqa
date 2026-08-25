@@ -1,8 +1,10 @@
 import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import type { MutationCtx } from './_generated/server';
+import type { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
-import { matchRouteAssignment } from './lib/routeMatch';
+import { matchRouteAssignment, overlappingDays, DAY_NAMES } from './lib/routeMatch';
 
 /**
  * Route Assignments - Maps recurring routes (HCR+Trip) to drivers/carriers
@@ -21,6 +23,50 @@ import { matchRouteAssignment } from './lib/routeMatch';
  * a dispatcher who deselects every day means "never", and reading that as
  * "always" is the worst possible guess.
  */
+/**
+ * Reject a rule that would compete with an existing one on the same
+ * HCR + Trip for the same day.
+ *
+ * Paused rules are ignored: an inactive rule matches nothing, so it has no
+ * claim to reserve. Before service days this was a flat "one rule per
+ * HCR + Trip", which is why a second rule for different days was refused.
+ */
+async function assertNoDayCollision(
+  ctx: MutationCtx,
+  candidate: {
+    workosOrgId: string;
+    hcr: string;
+    tripNumber?: string;
+    activeDays?: number[];
+    excludeId?: Id<'routeAssignments'>;
+  },
+): Promise<void> {
+  const siblings = await ctx.db
+    .query('routeAssignments')
+    .withIndex('by_org_hcr_trip', (q) =>
+      q
+        .eq('workosOrgId', candidate.workosOrgId)
+        .eq('hcr', candidate.hcr)
+        .eq('tripNumber', candidate.tripNumber),
+    )
+    .collect();
+
+  for (const sibling of siblings) {
+    if (candidate.excludeId && sibling._id === candidate.excludeId) continue;
+    if (!sibling.isActive) continue;
+
+    const clash = overlappingDays(candidate, sibling);
+    if (clash.length === 0) continue;
+
+    const route = `HCR ${candidate.hcr}${candidate.tripNumber ? ` / Trip ${candidate.tripNumber}` : ''}`;
+    const which = sibling.name ? `"${sibling.name}"` : 'another rule';
+    throw new ConvexError(
+      `${which} already covers ${route} on ${clash.map((d) => DAY_NAMES[d]).join(', ')}. ` +
+        `Give the two rules different days, or pause the existing one.`,
+    );
+  }
+}
+
 function normalizeActiveDays(activeDays: number[] | undefined): number[] | undefined {
   if (activeDays === undefined) return undefined;
   if (activeDays.length === 0) {
@@ -369,22 +415,17 @@ export const create = mutation({
       }
     }
 
-    // Check for duplicate route assignment
-    const existing = await ctx.db
-      .query('routeAssignments')
-      .withIndex('by_org_hcr_trip', (q) =>
-        q
-          .eq('workosOrgId', args.workosOrgId)
-          .eq('hcr', args.hcr)
-          .eq('tripNumber', args.tripNumber)
-      )
-      .first();
-
-    if (existing) {
-      throw new ConvexError(
-        `Route assignment already exists for HCR ${args.hcr}${args.tripNumber ? ` / Trip ${args.tripNumber}` : ''}`
-      );
-    }
+    // Two rules may share an HCR + Trip as long as they never claim the
+    // same day — "Dana runs Mon/Wed/Fri, Sam runs Tue/Thu" is the whole
+    // point of service days. Only a genuine day collision is rejected,
+    // because then which rule wins depends on priority and nobody reading
+    // the list would be able to tell.
+    await assertNoDayCollision(ctx, {
+      workosOrgId: args.workosOrgId,
+      hcr: args.hcr,
+      tripNumber: args.tripNumber,
+      activeDays: normalizeActiveDays(args.activeDays),
+    });
 
     const now = Date.now();
 
@@ -508,6 +549,24 @@ export const update = mutation({
       const cleaned = validateExclusions(updates.customExclusions);
       updateData.customExclusions = cleaned && cleaned.length > 0 ? cleaned : undefined;
     }
+
+    // `update` never had the duplicate check `create` did, so a collision
+    // could always be produced by editing rather than creating. Now that
+    // rules legitimately share an HCR + Trip across different days, the
+    // check matters on both paths — against the values AFTER this edit.
+    await assertNoDayCollision(ctx, {
+      workosOrgId: existing.workosOrgId,
+      hcr: (updateData.hcr as string | undefined) ?? existing.hcr,
+      tripNumber:
+        'tripNumber' in updateData
+          ? (updateData.tripNumber as string | undefined)
+          : existing.tripNumber,
+      activeDays:
+        'activeDays' in updateData
+          ? (updateData.activeDays as number[] | undefined)
+          : existing.activeDays,
+      excludeId: id,
+    });
 
     await ctx.db.patch(id, updateData);
 

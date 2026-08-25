@@ -188,3 +188,73 @@ describe('feature A — calendar field validation', () => {
     expect((await t.run((ctx) => ctx.db.get(id)))?.activeDays).toBeUndefined();
   });
 });
+
+describe('feature A — two rules may share an HCR + Trip on different days', () => {
+  const asUser = (t: ReturnType<typeof convexTest>) =>
+    t.withIdentity({ subject: USER, org_id: ORG });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const driver = async (t: any, email: string) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    t.run(async (ctx: any) => {
+      const now = Date.now();
+      return ctx.db.insert('drivers', {
+        firstName: 'D', lastName: 'R', email, phone: '+15550000003',
+        licenseState: 'CA', licenseExpiration: '2030-01-01', licenseClass: 'A',
+        hireDate: '2024-01-01', employmentStatus: 'Active', employmentType: 'Full-time',
+        organizationId: ORG, createdBy: USER, createdAt: now, updatedAt: now,
+      });
+    });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rule = async (t: any, email: string, activeDays?: number[], name?: string) =>
+    asUser(t).mutation(api.routeAssignments.create, {
+      workosOrgId: ORG, hcr: '96036', tripNumber: '5',
+      driverId: await driver(t, email), createdBy: USER,
+      ...(activeDays ? { activeDays } : {}),
+      ...(name ? { name } : {}),
+    });
+
+  it('allows a second rule whose days do not cross the first', async () => {
+    const t = convexTest(schema);
+    await rule(t, 'a@t.co', [1, 3, 5], 'Dana MWF');
+    await expect(rule(t, 'b@t.co', [2, 4], 'Sam TuTh')).resolves.toBeDefined();
+  });
+
+  it('rejects a second rule that claims a day already covered', async () => {
+    const t = convexTest(schema);
+    await rule(t, 'a@t.co', [1, 3, 5], 'Dana MWF');
+    await expect(rule(t, 'b@t.co', [3, 4], 'Sam WeTh')).rejects.toThrow(/Dana MWF.*Wed/s);
+  });
+
+  it('an unrestricted rule collides with everything', async () => {
+    const t = convexTest(schema);
+    await rule(t, 'a@t.co', undefined, 'Every day');
+    await expect(rule(t, 'b@t.co', [2], 'Sam Tue')).rejects.toThrow(/Every day/);
+  });
+
+  it('a paused rule reserves nothing', async () => {
+    const t = convexTest(schema);
+    const first = await rule(t, 'a@t.co', [1, 3, 5], 'Dana MWF');
+    await asUser(t).mutation(api.routeAssignments.update, { id: first, isActive: false });
+    await expect(rule(t, 'b@t.co', [1, 3, 5], 'Sam MWF')).resolves.toBeDefined();
+  });
+
+  it('update cannot edit a rule into a collision', async () => {
+    const t = convexTest(schema);
+    await rule(t, 'a@t.co', [1, 3, 5], 'Dana MWF');
+    const second = await rule(t, 'b@t.co', [2, 4], 'Sam TuTh');
+    await expect(
+      asUser(t).mutation(api.routeAssignments.update, { id: second, activeDays: [4, 5] }),
+    ).rejects.toThrow(/Dana MWF.*Fri/s);
+  });
+
+  it('update can still edit a rule that stays disjoint', async () => {
+    const t = convexTest(schema);
+    await rule(t, 'a@t.co', [1, 3, 5], 'Dana MWF');
+    const second = await rule(t, 'b@t.co', [2, 4], 'Sam TuTh');
+    await expect(
+      asUser(t).mutation(api.routeAssignments.update, { id: second, activeDays: [2, 4, 6] }),
+    ).resolves.toBeDefined();
+  });
+});

@@ -213,3 +213,18 @@ describe('matchRouteAssignment — service calendar', () => {
     expect(result.declinedBecause).toBeUndefined();
   });
 });
+
+describe('matchRouteAssignment — two rules sharing an HCR + Trip', () => {
+  it('routes each day to the rule that covers it', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      await route(ctx, { trip: 'T1', priority: 1, name: 'mwf', activeDays: [1, 3, 5] });
+      await route(ctx, { trip: 'T1', priority: 1, name: 'tuth', activeDays: [2, 4] });
+    });
+    expect((await match(t, HCR, 'T1', MON))?.name).toBe('mwf');            // Monday
+    expect((await match(t, HCR, 'T1', '2026-09-15'))?.name).toBe('tuth');  // Tuesday
+    const sat = await matchFull(t, HCR, 'T1', SAT);
+    expect(sat.route).toBeNull();
+    expect(sat.declinedBecause).toBe('CALENDAR');
+  });
+});

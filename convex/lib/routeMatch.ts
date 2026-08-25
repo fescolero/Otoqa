@@ -24,6 +24,38 @@ import { getHolidaySet } from '../holidays';
  * was stored, edited, and displayed but never actually consulted.
  */
 
+/** Every weekday index, in order. */
+export const ALL_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
+
+/**
+ * The days a route can actually serve.
+ *
+ * Absent or empty `activeDays` means every day — that is the stored
+ * representation of "unrestricted" (a full seven-day selection normalizes
+ * back to absent), so it must expand rather than read as "no days".
+ *
+ * Federal-holiday and custom-date exclusions are deliberately NOT
+ * subtracted here. They are refinements within a day the route otherwise
+ * serves, and letting them create apparent disjointness would mean two
+ * rules could both claim Monday as long as one skipped a holiday.
+ */
+export function routeDaySet(route: { activeDays?: number[] }): number[] {
+  return route.activeDays !== undefined && route.activeDays.length > 0
+    ? [...new Set(route.activeDays)].sort((a, b) => a - b)
+    : ALL_WEEKDAYS;
+}
+
+/** Days two routes would both claim. Empty means they never compete. */
+export function overlappingDays(
+  a: { activeDays?: number[] },
+  b: { activeDays?: number[] },
+): number[] {
+  const bDays = new Set(routeDaySet(b));
+  return routeDaySet(a).filter((d) => bDays.has(d));
+}
+
+export const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
 /** Why no route matched, when routes did exist on the HCR. */
 export type RouteDeclineReason = 'CALENDAR' | 'NO_SERVICE_DATE';
 
