@@ -43,7 +43,7 @@ import {
 } from '@/components/web';
 
 import { AutoAssignModal } from '@/components/route-assignments/auto-assign-modal';
-import type { CombinedAssignment } from '@/components/route-assignments/route-assignments-table';
+import type { CombinedAssignment } from '@/components/route-assignments/types';
 
 // ─── helpers ────────────────────────────────────────────────────────────
 
