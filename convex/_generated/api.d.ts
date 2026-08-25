@@ -13,6 +13,7 @@ import type * as _devTools_facetSimulator from "../_devTools/facetSimulator.js";
 import type * as _devTools_geofenceBackfill from "../_devTools/geofenceBackfill.js";
 import type * as _devTools_payEngineValidationSetup from "../_devTools/payEngineValidationSetup.js";
 import type * as _devTools_syncLatencyDiag from "../_devTools/syncLatencyDiag.js";
+import type * as _devTools_tier3Cleanup from "../_devTools/tier3Cleanup.js";
 import type * as _helpers_cronUtils from "../_helpers/cronUtils.js";
 import type * as _helpers_dateUtils from "../_helpers/dateUtils.js";
 import type * as _helpers_mobileAuth from "../_helpers/mobileAuth.js";
@@ -254,6 +255,7 @@ declare const fullApi: ApiFromModules<{
   "_devTools/geofenceBackfill": typeof _devTools_geofenceBackfill;
   "_devTools/payEngineValidationSetup": typeof _devTools_payEngineValidationSetup;
   "_devTools/syncLatencyDiag": typeof _devTools_syncLatencyDiag;
+  "_devTools/tier3Cleanup": typeof _devTools_tier3Cleanup;
   "_helpers/cronUtils": typeof _helpers_cronUtils;
   "_helpers/dateUtils": typeof _helpers_dateUtils;
   "_helpers/mobileAuth": typeof _helpers_mobileAuth;

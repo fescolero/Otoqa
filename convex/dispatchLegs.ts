@@ -974,6 +974,95 @@ export const assignCarrier = mutation({
 });
 
 // Unassign all resources from a load (move back to Open status)
+/**
+ * Clear every resource off a load and return it to Open.
+ *
+ * Extracted from unassignResource so a backfill can reuse the whole
+ * cascade — legs cleared, SYSTEM payables removed, autoAssignOptOut set,
+ * audit row written. Patching the load directly instead skips the leg
+ * cleanup and leaves orphan PENDING legs behind, which this file has been
+ * bitten by before (see the note in applyLoadStatusUpdate's Expired
+ * branch).
+ */
+export async function unassignLoadResources(
+  ctx: MutationCtx,
+  loadId: Id<'loadInformation'>,
+  performer: { userId: string; userName?: string; userEmail?: string },
+  reason?: string,
+): Promise<{ status: 'SUCCESS' } | { status: 'ERROR'; message: string }> {
+  const load = await ctx.db.get(loadId);
+  if (!load) {
+    return { status: 'ERROR' as const, message: 'Load not found' };
+  }
+
+  const legs = await ctx.db
+    .query('dispatchLegs')
+    .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .collect();
+
+  const now = Date.now();
+  let clearedLegCount = 0;
+
+  // Clear each open leg's assignments.
+  for (const leg of legs) {
+    if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
+      await ctx.db.patch(leg._id, {
+        driverId: undefined,
+        carrierPartnershipId: undefined,
+        truckId: undefined,
+        trailerId: undefined,
+        updatedAt: now,
+      });
+      clearedLegCount++;
+    }
+  }
+
+  // autoAssignOptOut: a dispatcher pulling a resource off a load must not
+  // have the scheduled sweep hand it straight back — the load returns to
+  // Open, which is exactly what getOpenLoadsWithHcr selects for, and the
+  // same route rule still matches. Cleared via loads.setAutoAssignOptOut.
+  await ctx.db.patch(loadId, {
+    primaryDriverId: undefined,
+    primaryCarrierPartnershipId: undefined,
+    status: 'Open',
+    autoAssignOptOut: true,
+    updatedAt: now,
+  });
+
+  // Delete existing SYSTEM payables for cleared legs (non-locked only).
+  for (const leg of legs) {
+    if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
+      const payables = await ctx.db
+        .query('loadPayables')
+        .withIndex('by_leg', (q) => q.eq('legId', leg._id))
+        .collect();
+
+      for (const payable of payables) {
+        if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
+          await ctx.db.delete(payable._id);
+        }
+      }
+    }
+  }
+
+  await logAudit(ctx, {
+    organizationId: load.workosOrgId,
+    entityType: 'load',
+    entityId: loadId as string,
+    entityName: `Load ${load.internalId}`,
+    action: 'resource_unassigned',
+    performedBy: performer.userId,
+    performedByName: performer.userName,
+    performedByEmail: performer.userEmail,
+    description:
+      `Unassigned all resources from load ${load.orderNumber} ` +
+      `(${clearedLegCount} leg${clearedLegCount !== 1 ? 's' : ''} cleared)` +
+      (reason ? ` — ${reason}` : ''),
+  });
+
+  return { status: 'SUCCESS' as const };
+}
+
 export const unassignResource = mutation({
   args: {
     loadId: v.id('loadInformation'),
@@ -984,79 +1073,7 @@ export const unassignResource = mutation({
   returns: assignmentResponseValidator,
   handler: async (ctx, args) => {
     const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    // 1. Validate load exists
-    const load = await ctx.db.get(args.loadId);
-    if (!load) {
-      return { status: 'ERROR' as const, message: 'Load not found' };
-    }
-
-    // 2. Get all PENDING/ACTIVE legs for the load
-    const legs = await ctx.db
-      .query('dispatchLegs')
-      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
-      .collect();
-
-    const now = Date.now();
-    let clearedLegCount = 0;
-
-    // 3. Update each leg - clear all assignments
-    for (const leg of legs) {
-      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-        await ctx.db.patch(leg._id, {
-          driverId: undefined,
-          carrierPartnershipId: undefined,
-          truckId: undefined,
-          trailerId: undefined,
-          updatedAt: now,
-        });
-        clearedLegCount++;
-      }
-    }
-
-    // 4. Update load
-    // autoAssignOptOut: a dispatcher pulling a resource off a load must not
-    // have the scheduled sweep hand it straight back — the load returns to
-    // Open, which is exactly what getOpenLoadsWithHcr selects for, and the
-    // same route rule still matches. Cleared via loads.setAutoAssignOptOut.
-    await ctx.db.patch(args.loadId, {
-      primaryDriverId: undefined,
-      primaryCarrierPartnershipId: undefined,
-      status: 'Open',
-      autoAssignOptOut: true,
-      updatedAt: now,
-    });
-
-    // 5. Delete existing SYSTEM payables for cleared legs (non-locked only)
-    for (const leg of legs) {
-      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-        const payables = await ctx.db
-          .query('loadPayables')
-          .withIndex('by_leg', (q) => q.eq('legId', leg._id))
-          .collect();
-
-        for (const payable of payables) {
-          if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
-            await ctx.db.delete(payable._id);
-          }
-        }
-      }
-    }
-
-    // 6. Audit log
-    await logAudit(ctx, {
-      organizationId: args.workosOrgId,
-      entityType: 'load',
-      entityId: args.loadId as string,
-      entityName: `Load ${load.internalId}`,
-      action: 'resource_unassigned',
-      performedBy: userId,
-      performedByName: userName,
-      performedByEmail: userEmail,
-      description: `Unassigned all resources from load ${load.orderNumber} (${clearedLegCount} leg${clearedLegCount !== 1 ? 's' : ''} cleared)`,
-    });
-
-    // 7. Return success
-    return { status: 'SUCCESS' as const };
+    return await unassignLoadResources(ctx, args.loadId, { userId, userName, userEmail });
   },
 });
 

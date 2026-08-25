@@ -8,10 +8,13 @@ them is safe to ship alone.
 ends: R3/R4 (settings-form mechanics), R12/R13 (driver availability,
 `employmentStatus` union).
 
-Also shipped, not in the original review: two rules may share an HCR + Trip
-when their service days are disjoint. The pre-calendar "one rule per
-HCR + Trip" guard rejected exactly the configuration feature A exists to
-express.
+Also shipped, not in the original review:
+
+- Two rules may share an HCR + Trip when their service days are disjoint.
+  The pre-calendar "one rule per HCR + Trip" guard rejected exactly the
+  configuration feature A exists to express.
+- **The third matching tier was removed.** "Any active route on this HCR"
+  let a rule scoped to Trip 1 claim loads on Trip 821 — see R14.
 
 Today neither exists. `autoAssignmentSettings` has `enabled`,
 `triggerOnCreate`, `scheduledEnabled`, `scheduleIntervalMinutes`
@@ -506,7 +509,41 @@ a typo, a casing drift, a value from an importer — silently blocks every
 assignment for that driver, manual and automatic, with the message "Driver
 is inactive or not found." Should be a `v.union` of literals.
 
-## R14 — tests
+## R14 — the third matching tier was silently mis-assigning loads
+
+Found in production after feature A shipped, and worth recording because
+the extraction preserved it and `getByRoute` was "fixed" by adding it.
+
+Matching had a third tier: after an exact HCR + Trip miss and an HCR-only
+miss, take **any active route on this HCR**. The effect was that every
+trip-specific rule quietly became an HCR-wide catch-all.
+
+Observed on HCR 96036: rules existed for trips 1, 2, 5, 6, 7, 8 and none
+for 821. Twenty loads on trips 821/822 were assigned to the driver whose
+rule covered trip 1 — all rules shared `priority: 100`, so the winner came
+down to a tiebreak. Nothing in the UI could explain the assignment, because
+no rule for those trips existed to display.
+
+The legitimate catch-all is tier 2, which says so explicitly by omitting the
+trip. Tier 3 was the accidental version of that and could not be turned off.
+Removed; a trip with no rule is now a `NO_MATCH` that stays `Open` and shows
+up in the run breakdown.
+
+Two things this exposes about the earlier work:
+
+- The matcher extraction consolidated four copies faithfully, including
+  this. Consolidating a behavior is not the same as validating it.
+- `getByRoute` originally implemented only tiers 1–2, and that was recorded
+  as a defect ("the UI preview disagreed with the engine"). The preview was
+  right and the engine was wrong.
+
+Cleanup ran via `_devTools/tier3Cleanup`, which deliberately separates two
+causes: a trip with **no rule at all** (the artifact — 27 loads, unassigned)
+from a trip whose rule simply does not cover that weekday (11 loads,
+assigned before service days existed — left for a dispatcher, since
+retroactively undoing those is a judgment call, not a backfill).
+
+## R15 — tests
 
 - Weekday derivation from `firstStopDate` across a DST boundary — assert the
   string-slice approach in A.3 gives the same answer year-round.

@@ -17,7 +17,16 @@ import { getHolidaySet } from '../holidays';
  * Tiers, most specific first:
  *   1. exact HCR + trip
  *   2. HCR-only rule (a route with no tripNumber — "everything on this HCR")
- *   3. any active route on this HCR
+ *
+ * There is deliberately no third "any active route on this HCR" tier. One
+ * used to exist, and it silently promoted every trip-specific rule into an
+ * HCR-wide catch-all: a rule scoped to Trip 1 would claim a load on Trip
+ * 821 purely because no Trip 821 rule existed. With several same-priority
+ * rules on an HCR the winner was effectively a tiebreak, so loads landed on
+ * a driver nobody had assigned them to and no rule in the UI explained why.
+ * The legitimate catch-all is tier 2, which says so explicitly by omitting
+ * the trip. A trip with no rule is now a NO_MATCH that stays Open for a
+ * dispatcher — visible in the run breakdown rather than silently absorbed.
  *
  * Within a tier, lowest `priority` wins. That sort is the point: every
  * previous copy used `.first()`, which returns index order, so `priority`
@@ -161,21 +170,16 @@ export async function matchRouteAssignment(
     if (hit) return { route: hit };
   }
 
-  // Tiers 2 and 3 share the same index read.
-  const onHcr = (
+  // Tier 2 — the HCR-only rule, i.e. one that deliberately omits the trip.
+  const hcrOnly = (
     await ctx.db
       .query('routeAssignments')
       .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', args.workosOrgId).eq('hcr', args.hcr))
       .collect()
-  ).filter((r) => r.isActive);
+  ).filter((r) => r.isActive && r.tripNumber === undefined);
 
-  // Tier 2 — the HCR-only rule.
-  const hcrOnly = pick(onHcr.filter((r) => r.tripNumber === undefined), args.serviceDate, declines);
-  if (hcrOnly) return { route: hcrOnly };
-
-  // Tier 3 — any active route on this HCR.
-  const any = pick(onHcr, args.serviceDate, declines);
-  if (any) return { route: any };
+  const hit = pick(hcrOnly, args.serviceDate, declines);
+  if (hit) return { route: hit };
 
   // Nothing matched. Report a calendar decline only if one actually
   // happened — otherwise this is a plain "no rule configured".

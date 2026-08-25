@@ -60,12 +60,29 @@ describe('matchRouteAssignment', () => {
     expect((await match(t, HCR, 'T9'))?.name).toBe('hcr-only');
   });
 
-  it('falls back to any active route on the HCR as a last resort', async () => {
+  it('REGRESSION: a trip-specific rule never claims a different trip', async () => {
+    // The real incident: HCR 96036 had rules for trips 1,2,5,6,7,8 and none
+    // for 821. A removed third tier ("any active route on this HCR") handed
+    // 20 loads on trip 821 to the driver whose rule covered trip 1 — chosen
+    // by a same-priority tiebreak, with no rule in the UI to explain it.
     const t = convexTest(schema);
     await t.run(async (ctx) => {
-      await route(ctx, { trip: 'T1', priority: 5, name: 'some-trip' });
+      await route(ctx, { trip: '1', priority: 100, name: 'trip-1-jorge' });
+      await route(ctx, { trip: '2', priority: 100, name: 'trip-2-jorge' });
     });
-    expect((await match(t, HCR, 'T9'))?.name).toBe('some-trip');
+    const result = await matchFull(t, HCR, '821');
+    expect(result.route).toBeNull();
+    expect(result.declinedBecause).toBeUndefined();
+  });
+
+  it('an HCR-only rule IS the catch-all, and covers an unlisted trip', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      await route(ctx, { trip: '1', priority: 1, name: 'trip-1' });
+      await route(ctx, { priority: 100, name: 'catch-all' });
+    });
+    expect((await match(t, HCR, '821'))?.name).toBe('catch-all');
+    expect((await match(t, HCR, '1'))?.name).toBe('trip-1');
   });
 
   it('REGRESSION: lowest priority wins, not insertion order', async () => {
@@ -78,23 +95,24 @@ describe('matchRouteAssignment', () => {
     expect((await match(t, HCR, 'T1'))?.name).toBe('highest-priority');
   });
 
-  it('REGRESSION: priority decides the last-resort tier too', async () => {
+  it('REGRESSION: priority decides between catch-all rules too', async () => {
     const t = convexTest(schema);
     await t.run(async (ctx) => {
-      await route(ctx, { trip: 'TA', priority: 50, name: 'inserted-first' });
-      await route(ctx, { trip: 'TB', priority: 2, name: 'highest-priority' });
+      await route(ctx, { priority: 50, name: 'inserted-first' });
+      await route(ctx, { priority: 2, name: 'highest-priority' });
     });
     expect((await match(t, HCR, 'TZ'))?.name).toBe('highest-priority');
   });
 
-  it('ignores inactive routes at every tier', async () => {
+  it('ignores inactive routes at both tiers', async () => {
     const t = convexTest(schema);
     await t.run(async (ctx) => {
       await route(ctx, { trip: 'T1', priority: 1, isActive: false, name: 'exact-off' });
       await route(ctx, { priority: 2, isActive: false, name: 'hcr-only-off' });
-      await route(ctx, { trip: 'T2', priority: 3, name: 'live' });
+      await route(ctx, { priority: 3, name: 'hcr-only-live' });
     });
-    expect((await match(t, HCR, 'T1'))?.name).toBe('live');
+    // The exact rule is paused, so the live catch-all takes it.
+    expect((await match(t, HCR, 'T1'))?.name).toBe('hcr-only-live');
   });
 
   it('returns null when nothing on the HCR is active', async () => {
