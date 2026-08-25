@@ -28,10 +28,9 @@
 
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
-// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
-import { useQuery, useMutation, usePaginatedQuery, useConvexAuth } from 'convex/react';
+import { useMutation } from 'convex/react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { useAuthQuery } from '@/hooks/use-auth-query';
+import { useAuthQuery, useAuthPaginatedQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { toast } from 'sonner';
@@ -150,27 +149,24 @@ function PlannerScreen({
     return resolveDatePreset(raw);
   }, [filterChips]);
 
-  // Infinite-scroll the trips list. usePaginatedQuery injects `paginationOpts`
-  // itself and accumulates pages into `loads`, so the planner is no longer
-  // capped at the first 100 trips. Gated on auth the same way useAuthQuery is.
-  const { isAuthenticated } = useConvexAuth();
+  // Infinite-scroll the trips list. useAuthPaginatedQuery injects
+  // `paginationOpts` itself and accumulates pages into `loads`, so the planner
+  // is no longer capped at the first 100 trips.
   const {
     results: loads,
     status: loadsStatus,
     loadMore: loadMoreLoads,
-  } = usePaginatedQuery(
+  } = useAuthPaginatedQuery(
     api.loads.getLoads,
-    isAuthenticated
-      ? {
-          workosOrgId: organizationId,
-          status: statusTab,
-          search: search || undefined,
-          hcr: hcrFilter || undefined,
-          tripNumber: tripFilter || undefined,
-          startDate: dateRange.start,
-          endDate: dateRange.end,
-        }
-      : 'skip',
+    {
+      workosOrgId: organizationId,
+      status: statusTab,
+      search: search || undefined,
+      hcr: hcrFilter || undefined,
+      tripNumber: tripFilter || undefined,
+      startDate: dateRange.start,
+      endDate: dateRange.end,
+    },
     { initialNumItems: 100 },
   );
 
@@ -188,7 +184,7 @@ function PlannerScreen({
     endDate: dateRange.end,
   });
 
-  const loadDetails = useQuery(
+  const loadDetails = useAuthQuery(
     api.loads.getByIdWithRange,
     selectedLoadId ? { loadId: selectedLoadId } : 'skip',
   );
@@ -197,7 +193,7 @@ function PlannerScreen({
     workosOrgId: organizationId,
   });
 
-  const availableDrivers = useQuery(
+  const availableDrivers = useAuthQuery(
     api.dispatchLegs.getAvailableDrivers,
     loadDetails?.startTime
       ? {
