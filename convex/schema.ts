@@ -3147,6 +3147,19 @@ export default defineSchema({
     // the settlement review's shift line; honored by the NEW pay engine only
     // (calculateSessionPay) — legacy paySession ignores it.
     payProfileOverrideId: v.optional(v.id('payProfiles')),
+
+    // The org yard the shift opened inside. Stamped once by the yard
+    // evaluator (convex/yardGeofence.ts) from the first ARRIVED whose ping
+    // lands within minutes of startedAt — i.e. the driver was already
+    // parked in the fence when they tapped Start Shift. Absent when the
+    // shift started outside every fence (home, customer facility, an org
+    // with no yards configured) or when no fix landed in the window.
+    //
+    // The anchor for the end-shift reminder: coming back INTO this fence is
+    // what nudges a driver who forgot to end their shift. See
+    // docs/end-shift-reminder-spec.md.
+    startYardId: v.optional(v.id('yardLocations')),
+
     softCap10hAt: v.optional(v.float64()), // stamped when 10h banner shown
     softCap14hAt: v.optional(v.float64()), // stamped when 14h banner shown
 

@@ -161,20 +161,40 @@ minutes of the truck coming through the gate.
 
 ## 4. Data model
 
-### `driverSessions` — one new optional field
+### `driverSessions` — one new optional field  ✅ shipped
 
 ```ts
-// The org yard the shift started inside, resolved from the first GPS fix
-// after startSession. Absent when the driver started outside every fence
-// (home, customer facility, org has no yards configured) — in which case
-// no end-shift reminder is armed for the shift.
 startYardId: v.optional(v.id('yardLocations')),
 ```
 
-Additive, no migration. The device does not need it — its own copy lives in
-tracking state — but stamping it makes "started at Bay 4" available to the
-dispatcher's session timeline, and it survives a reinstall mid-shift, which
-device state does not.
+Additive, no migration.
+
+**Stamped server-side, by the yard evaluator.** `startSession` has no GPS fix
+to work from, so the anchor is derived instead: `evaluateYards`
+([yardGeofence.ts](../convex/yardGeofence.ts)) claims the slot on the first
+`ARRIVED` whose ping lands within `START_YARD_WINDOW_MS` (5 min) of
+`startedAt` — i.e. the driver was already parked in the fence when they
+tapped Start Shift. Absent when the shift opened outside every fence (home,
+customer facility, an org with no yards configured), or when no fix landed
+inside the window.
+
+The window is the whole discriminator between "the yard they started in" and
+"a yard they drove to later," so it is deliberately tight: the first fix is
+captured within seconds of Start Shift (the foreground watch has no previous
+point to rate-limit against), and `recordedAt` is capture time rather than
+sync time, so a yard with no signal still anchors correctly once the backlog
+drains. Five minutes covers a cold GPS lock and nothing else.
+
+At most one patch per session. The lookup runs on each `ARRIVED` of a session
+that has no anchor yet — a handful of reads per shift, since crossing a yard
+boundary is a rare event, not a per-ping one. This is the evaluator's only
+write to `driverSessions`; keeping it one-shot is what stops it invalidating
+dispatcher subscriptions on every GPS batch.
+
+The device does not strictly need this field — its own copy lives in tracking
+state — but it makes "started at Bay 4" available to the dispatcher's session
+timeline, it survives a reinstall mid-shift, and it is what the self-heal
+path in §5 recovers from.
 
 ### New query: `yardLocations.listForDriver`
 
@@ -224,10 +244,17 @@ after `startSession` and alongside the existing `startSessionTracking` call:
 1. Fetch `yardLocations.listForDriver` (cache in MMKV; the list is small and
    changes rarely).
 2. Take the first fix and find the enclosing fence.
-3. Persist it as `startYard` with `fenceState: 'inside'`, and patch
-   `startYardId` on the session.
+3. Persist it as `startYard` with `fenceState: 'inside'`.
 4. No enclosing fence → `startYard: null`, and the whole feature is inert for
    this shift.
+
+The device resolves its own anchor rather than waiting to read back
+`startYardId`: the server's copy only lands after the first ping syncs, and
+the device already holds both the fix and the fence list. The two agree by
+construction — same fences, same radius defaulting, same first fix. Where
+they can disagree is a shift that opens with no GPS lock: the device has no
+anchor to store, and the server may still stamp one from a fix minutes later.
+The server's copy is the durable one, so the recovery path below prefers it.
 
 The list must be cached rather than fetched per evaluation: the background
 task runs headless with no React context and, more importantly, must work
@@ -237,8 +264,8 @@ Also arm from `reconcileTrackingStateWithActiveSession`
 ([location-tracking.ts:432](../apps/driver/lib/location-tracking.ts)), the
 self-heal path for a driver who is mid-shift on a device where
 `startSessionTracking` never ran. Without a stored `startYard` that shift
-silently gets no reminder. The fence can be recovered from `startYardId` on
-the session — which is the second reason to stamp it server-side.
+silently gets no reminder. The fence is recovered by reading `startYardId`
+off the session and looking it up in the cached fence list.
 
 ---
 
@@ -345,6 +372,11 @@ session doc, so the measurement needs no new instrumentation.
 - **Fences must be accurate.** A 250 m default around a pin dropped on the
   office rather than the parking area will fire early or not at all. Worth
   auditing existing `yardLocations` rows before enabling the flag anywhere.
+- **A shift that opens with no GPS lock gets no anchor.** Five minutes
+  indoors or under a dock canopy and the window closes; the reminder is
+  inert for that shift, exactly as if the driver had started outside every
+  fence. Widening the window would let a yard visited later in the day claim
+  the slot, which is the worse failure.
 - **Device state is not durable across reinstall.** Recovered via
   `startYardId` on the session (§5), but a reinstall mid-shift before that
   field ships loses the arm.
@@ -383,8 +415,11 @@ session doc, so the measurement needs no new instrumentation.
 
 ## Suggested order
 
-1. `startYardId` on the schema + stamp it in `startSession`. Ships alone,
-   inert, and immediately gives the dispatcher timeline the start location.
+1. ✅ `startYardId` on the schema, stamped by the yard evaluator from the
+   first ARRIVED inside a 5-minute window. No client change; ships alone and
+   inert, and starts populating immediately — which is also the cheapest
+   read on whether drivers actually start inside the fences an org has
+   drawn.
 2. `yardLocations.listForDriver` + device cache. Also inert.
 3. Fence evaluation in the background task, behind the flag, **telemetry
    only** — no notification. Run it for a week on a pilot org and compare
