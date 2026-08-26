@@ -3281,3 +3281,59 @@ export const autoExpireStaleLoads = internalMutation({
     return null;
   },
 });
+
+/**
+ * Resolve a human-typed load reference to its document id.
+ *
+ * The diesel / DEF fuel-entry forms let a user type the load number
+ * printed on the receipt ("Linked load"). The `fuelEntries.loadId` /
+ * `defEntries.loadId` columns are `v.id('loadInformation')`, so the
+ * typed text has to be translated before the create/update mutation
+ * sees it — passing the raw string through fails arg validation.
+ *
+ * Lookup order mirrors `invoices`' matcher: internalId, the FK-
+ * prefixed internalId, then orderNumber. All three are index reads.
+ * Returns `null` when nothing matches so the caller can surface a
+ * field-level "not found" instead of a generic save failure.
+ */
+export const resolveReference = query({
+  args: { workosOrgId: v.string(), reference: v.string() },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const val = args.reference.trim();
+    if (!val) return null;
+
+    const byInternal = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_internal_id', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('internalId', val),
+      )
+      .first();
+
+    const byFk =
+      byInternal ??
+      (await ctx.db
+        .query('loadInformation')
+        .withIndex('by_internal_id', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('internalId', `FK-${val}`),
+        )
+        .first());
+
+    const match =
+      byFk ??
+      (await ctx.db
+        .query('loadInformation')
+        .withIndex('by_order_number', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('orderNumber', val),
+        )
+        .first());
+
+    if (!match) return null;
+    return {
+      _id: match._id,
+      internalId: match.internalId,
+      orderNumber: match.orderNumber,
+    };
+  },
+});

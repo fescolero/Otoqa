@@ -186,7 +186,12 @@ export const get = query({
       driverName: driver ? `${driver.firstName} ${driver.lastName}` : undefined,
       carrierName: carrier?.carrierName ?? undefined,
       truckUnitId: truck?.unitId ?? undefined,
-      loadReference: load ? ((load as Record<string, unknown>).referenceNumber as string | undefined) : undefined,
+      // `loadInformation` has no `referenceNumber` column — the
+      // human-facing load number is `internalId` (`orderNumber` is
+      // the fallback for rows that predate it). Reading the missing
+      // field made this always-undefined, so every consumer fell
+      // back to printing the raw document id.
+      loadReference: load ? (load.internalId ?? load.orderNumber) : undefined,
       receiptUrl,
     };
   },

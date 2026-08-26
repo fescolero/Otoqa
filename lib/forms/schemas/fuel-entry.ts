@@ -371,7 +371,7 @@ export function buildFuelEntrySchema(
             label: 'Linked load',
             kind: 'mono',
             placeholder: '0000000000',
-            hint: 'Leave blank if this fill-up wasn’t for a specific load.',
+            hint: 'Load number (or order number). Leave blank if this fill-up wasn’t for a specific load.',
           },
           {
             id: ids.notes,
@@ -451,7 +451,6 @@ export function mapValsToFuelEntryArgs(
     driverId: optionalId<'drivers'>(vals[ids.driverId]),
     truckId: optionalId<'trucks'>(vals[ids.truckId]),
     carrierId: optionalId<'carrierPartnerships'>(vals[ids.carrierId]),
-    loadId: optionalId<'loadInformation'>(vals[ids.loadId]),
     odometerReading: optionalNumber(vals[ids.odometerReading]),
     location: city && state ? { city, state: state.toUpperCase() } : undefined,
     paymentMethod: paymentMethod
@@ -462,6 +461,21 @@ export function mapValsToFuelEntryArgs(
     notes: optionalStr(vals[ids.notes]),
     receiptStorageId: optionalId<'_storage'>(vals[ids.attachment]),
   };
+}
+
+/**
+ * The "Linked load" field is free text — the user types the load
+ * number printed on the receipt, not a Convex document id. The
+ * mutations take `loadId: v.optional(v.id('loadInformation'))`, so the
+ * page wrapper has to resolve the reference (via
+ * `api.loads.resolveReference`) and attach the resulting id itself.
+ * Passing the typed string straight through fails arg validation and
+ * the save dies with a generic "please try again".
+ */
+export function readLoadReference(
+  vals: Record<string, unknown>,
+): string | undefined {
+  return optionalStr(vals[FUEL_ENTRY_FIELD_IDS.loadId]);
 }
 
 /* ────────────────────────────────────────────────────────────────────
@@ -505,6 +519,8 @@ export interface FuelEntryRecord {
   receiptNumber?: string;
   notes?: string;
   receiptStorageId?: string;
+  /** Human load number, resolved server-side from `loadId`. */
+  loadReference?: string;
 }
 
 export function mapRecordToFuelEntryVals(
@@ -522,7 +538,11 @@ export function mapRecordToFuelEntryVals(
     [ids.driverId]: record.driverId ?? '',
     [ids.truckId]: record.truckId ?? '',
     [ids.carrierId]: record.carrierId ?? '',
-    [ids.loadId]: record.loadId ?? '',
+    // Seed the free-text "Linked load" box with the human load
+    // number, never the raw document id — that's what the user
+    // typed on create and what `loads.resolveReference` can turn
+    // back into an id on save.
+    [ids.loadId]: record.loadReference ?? '',
     [ids.odometerReading]: record.odometerReading ?? '',
     [ids.city]: record.location?.city ?? '',
     [ids.state]: record.location?.state ?? '',
