@@ -1,283 +1,123 @@
 'use client';
 
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
+/**
+ * Fuel vendor edit page.
+ *
+ * Same shell as the vendor create flow, seeded with the existing
+ * record and pointed at `fuelVendors.update`. The schema's
+ * `mode: 'edit'` flag adjusts the title + breadcrumb; the field layout
+ * is identical because `update` accepts exactly the fields `create`
+ * does, all optional.
+ *
+ * Replaces ~280 lines of hand-rolled Card/Input markup. Two behaviors
+ * carried over from that version deserve a note:
+ *
+ *   - Discount program was a free-text input there and is a six-option
+ *     select here, so a row can hold a value outside the list. The
+ *     schema factory appends the stored value as an option rather than
+ *     showing a placeholder over data the user never chose.
+ *   - Country has no rendered field (the create flow stamps 'US'), but
+ *     it is seeded and passed back through so an existing value isn't
+ *     reset on save.
+ *
+ * Drafts are deliberately NOT enabled — the form loads from a real
+ * record, not an in-flight draft.
+ */
+
+import * as React from 'react';
+import { useRouter } from 'next/navigation';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useMutation } from 'convex/react';
-import { api } from '@/convex/_generated/api';
-import { Id } from '@/convex/_generated/dataModel';
-import { useRouter } from 'next/navigation';
-import { useState, useEffect, FormEvent } from 'react';
-import { Loader2 } from 'lucide-react';
-import { PhoneInput } from '@/components/ui/phone-input';
-import { useAuthQuery } from '@/hooks/use-auth-query';
 import { toast } from 'sonner';
+import { Loader2 } from 'lucide-react';
+import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
+import { useAuthQuery } from '@/hooks/use-auth-query';
+import { Button } from '@/components/ui/button';
+import { CreateForm } from '@/components/web/create-form';
+import {
+  buildFuelVendorSchema,
+  mapRecordToFuelVendorVals,
+  mapValsToFuelVendorUpdateArgs,
+  type FuelVendorRecord,
+} from '@/lib/forms/schemas/fuel-vendor';
 
 export function VendorEditContent({ vendorId }: { vendorId: string }) {
-  const { user } = useAuth();
   const router = useRouter();
+  const { user } = useAuth();
   const typedVendorId = vendorId as Id<'fuelVendors'>;
 
   const vendor = useAuthQuery(api.fuelVendors.get, { vendorId: typedVendorId });
   const updateVendor = useMutation(api.fuelVendors.update);
 
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const schema = React.useMemo(
+    () =>
+      buildFuelVendorSchema({
+        mode: 'edit',
+        currentDiscountProgram: vendor?.discountProgram,
+      }),
+    [vendor?.discountProgram],
+  );
 
-  const [name, setName] = useState('');
-  const [code, setCode] = useState('');
-  const [accountNumber, setAccountNumber] = useState('');
-  const [discountProgram, setDiscountProgram] = useState('');
-  const [contactName, setContactName] = useState('');
-  const [contactEmail, setContactEmail] = useState('');
-  const [contactPhone, setContactPhone] = useState('');
-  const [addressLine, setAddressLine] = useState('');
-  const [city, setCity] = useState('');
-  const [state, setState] = useState('');
-  const [zip, setZip] = useState('');
-  const [country, setCountry] = useState('');
-  const [notes, setNotes] = useState('');
-
-  useEffect(() => {
-    if (vendor) {
-      setName(vendor.name || '');
-      setCode(vendor.code || '');
-      setAccountNumber(vendor.accountNumber || '');
-      setDiscountProgram(vendor.discountProgram || '');
-      setContactName(vendor.contactName || '');
-      setContactEmail(vendor.contactEmail || '');
-      setContactPhone(vendor.contactPhone || '');
-      setAddressLine(vendor.addressLine || '');
-      setCity(vendor.city || '');
-      setState(vendor.state || '');
-      setZip(vendor.zip || '');
-      setCountry(vendor.country || '');
-      setNotes(vendor.notes || '');
-    }
+  // `useFormState` seeds `vals` once on mount and ignores later changes
+  // to `initialValues`, so the <CreateForm> below is keyed on the
+  // record id — see the comment at the key itself.
+  const initialValues = React.useMemo(() => {
+    if (!vendor) return undefined;
+    return mapRecordToFuelVendorVals(vendor as FuelVendorRecord);
   }, [vendor]);
 
-  if (!vendor) {
+  // ── Render gates — same loading / not-found fallbacks the diesel
+  // entry edit page uses, so the two flows behave alike.
+  if (vendor === undefined) {
     return (
       <div className="flex items-center justify-center h-screen">
-        <p className="text-muted-foreground">Loading vendor...</p>
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+  if (vendor === null) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <div className="text-center">
+          <p className="text-muted-foreground mb-4">Fuel vendor not found</p>
+          <Button onClick={() => router.push('/operations/diesel/vendors')}>
+            Back to Fuel Vendors
+          </Button>
+        </div>
       </div>
     );
   }
 
-  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (!user) return;
-
-    setIsSubmitting(true);
-
-    const formData = new FormData(e.currentTarget);
-    const phoneValue = (formData.get('contactPhone') as string) || '';
-
-    try {
-      await updateVendor({
-        vendorId: typedVendorId,
-        name: name || undefined,
-        code: code || undefined,
-        accountNumber: accountNumber || undefined,
-        discountProgram: discountProgram || undefined,
-        contactName: contactName || undefined,
-        contactEmail: contactEmail || undefined,
-        contactPhone: phoneValue || undefined,
-        addressLine: addressLine || undefined,
-        city: city || undefined,
-        state: state || undefined,
-        zip: zip || undefined,
-        country: country || undefined,
-        notes: notes || undefined,
-        updatedBy: user.id,
-      });
-
-      toast.success('Fuel vendor updated successfully');
-      // Land on the record you just edited, not the list — matches the
-      // vendor create flow and the diesel/DEF entry edit flow.
-      router.push(`/operations/diesel/vendors/${vendorId}`);
-    } catch (error) {
-      console.error('Failed to update fuel vendor:', error);
-      toast.error('Failed to update fuel vendor. Please try again.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
   return (
-    <>
-      <div className="flex flex-1 flex-col gap-6 p-6 pb-24">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">Edit Fuel Vendor</h1>
-            <p className="text-muted-foreground">{vendor.name}</p>
-          </div>
-        </div>
-
-        <form id="vendor-form" key={vendor._id} onSubmit={handleSubmit}>
-          <Card className="p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Vendor Information</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="group/field space-y-2">
-                <Label htmlFor="name" className="text-destructive group-has-[:valid]/field:text-foreground">
-                  Name
-                </Label>
-                <Input
-                  id="name"
-                  name="name"
-                  required
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="code">Code</Label>
-                <Input
-                  id="code"
-                  name="code"
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="accountNumber">Account Number</Label>
-                <Input
-                  id="accountNumber"
-                  name="accountNumber"
-                  value={accountNumber}
-                  onChange={(e) => setAccountNumber(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="discountProgram">Discount Program</Label>
-                <Input
-                  id="discountProgram"
-                  name="discountProgram"
-                  value={discountProgram}
-                  onChange={(e) => setDiscountProgram(e.target.value)}
-                />
-              </div>
-            </div>
-          </Card>
-
-          <Card className="p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Contact Information</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="contactName">Contact Name</Label>
-                <Input
-                  id="contactName"
-                  name="contactName"
-                  value={contactName}
-                  onChange={(e) => setContactName(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="contactEmail">Contact Email</Label>
-                <Input
-                  id="contactEmail"
-                  name="contactEmail"
-                  type="email"
-                  value={contactEmail}
-                  onChange={(e) => setContactEmail(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="contactPhone">Contact Phone</Label>
-                <PhoneInput
-                  id="contactPhone"
-                  name="contactPhone"
-                  defaultValue={contactPhone}
-                />
-              </div>
-            </div>
-          </Card>
-
-          <Card className="p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Address</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2 md:col-span-2">
-                <Label htmlFor="addressLine">Address Line</Label>
-                <Input
-                  id="addressLine"
-                  name="addressLine"
-                  value={addressLine}
-                  onChange={(e) => setAddressLine(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="city">City</Label>
-                <Input
-                  id="city"
-                  name="city"
-                  value={city}
-                  onChange={(e) => setCity(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="state">State</Label>
-                <Input
-                  id="state"
-                  name="state"
-                  value={state}
-                  onChange={(e) => setState(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="zip">ZIP</Label>
-                <Input
-                  id="zip"
-                  name="zip"
-                  value={zip}
-                  onChange={(e) => setZip(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="country">Country</Label>
-                <Input
-                  id="country"
-                  name="country"
-                  value={country}
-                  onChange={(e) => setCountry(e.target.value)}
-                />
-              </div>
-            </div>
-          </Card>
-
-          <Card className="p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Notes</h2>
-            <div className="space-y-2">
-              <Label htmlFor="notes">Notes</Label>
-              <Textarea
-                id="notes"
-                name="notes"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                rows={4}
-              />
-            </div>
-          </Card>
-        </form>
-      </div>
-
-      <div className="sticky bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 mt-auto">
-        <div className="flex h-16 items-center justify-end gap-4 px-6">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => router.push(`/operations/diesel/vendors/${vendorId}`)}
-            disabled={isSubmitting}
-          >
-            Cancel
-          </Button>
-          <Button type="submit" form="vendor-form" disabled={isSubmitting}>
-            {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Save Changes
-          </Button>
-        </div>
-      </div>
-    </>
+    <CreateForm
+      // Re-mount the shell when a different record loads (e.g. the user
+      // navigates between two edit pages in the same SPA session).
+      // Without the key the form would keep the previous vendor's
+      // values when the underlying id changes.
+      key={vendor._id}
+      schema={schema}
+      initialValues={initialValues}
+      onCancel={() => router.push(`/operations/diesel/vendors/${vendorId}`)}
+      onSaved={async (vals) => {
+        if (!user) {
+          toast.error('Not signed in — please refresh and try again.');
+          return;
+        }
+        try {
+          const args = mapValsToFuelVendorUpdateArgs(vals);
+          await updateVendor({
+            vendorId: typedVendorId,
+            ...args,
+            updatedBy: user.id,
+          });
+          toast.success('Fuel vendor updated.');
+          router.push(`/operations/diesel/vendors/${vendorId}`);
+        } catch (err) {
+          console.error('Failed to update fuel vendor:', err);
+          toast.error('Failed to update fuel vendor. Please try again.');
+        }
+      }}
+    />
   );
 }
