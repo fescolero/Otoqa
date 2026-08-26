@@ -1,6 +1,7 @@
 import { ConvexError, v } from 'convex/values';
 import { query, mutation } from './_generated/server';
 import { requireCallerOrgId, requireCallerIdentity, assertOrgPermission } from './lib/auth';
+import { resolveAuthenticatedDriver } from './driverMobile';
 import { YARD_DEFAULT_RADIUS_METERS, exitRadiusFor } from './lib/geo';
 
 /**
@@ -27,6 +28,27 @@ const yardValidator = v.object({
   updatedAt: v.number(),
 });
 
+/**
+ * The fence radius actually in force: the row's override when set, else the
+ * default. Every projection and the evaluator must agree on this — note that
+ * `exitRadiusFor(undefined)` returns the load-stop departure ring (1207 m),
+ * NOT 1.5× the yard default, so the default has to be applied BEFORE the
+ * exit ring is derived from it.
+ */
+// Driver-app projection: the fence, and nothing that isn't the fence.
+const yardFenceValidator = v.object({
+  _id: v.id('yardLocations'),
+  name: v.string(),
+  latitude: v.number(),
+  longitude: v.number(),
+  radiusMeters: v.number(), // effective (default applied)
+  exitRadiusMeters: v.number(), // 1.5x the effective radius
+});
+
+function effectiveRadiusMeters(radiusMeters?: number): number {
+  return radiusMeters && radiusMeters > 0 ? radiusMeters : YARD_DEFAULT_RADIUS_METERS;
+}
+
 function toClientYard(yard: {
   _id: import('./_generated/dataModel').Id<'yardLocations'>;
   name: string;
@@ -40,8 +62,7 @@ function toClientYard(yard: {
   notes?: string;
   updatedAt: number;
 }) {
-  const radius =
-    yard.radiusMeters && yard.radiusMeters > 0 ? yard.radiusMeters : YARD_DEFAULT_RADIUS_METERS;
+  const radius = effectiveRadiusMeters(yard.radiusMeters);
   return {
     _id: yard._id,
     name: yard.name,
@@ -69,6 +90,47 @@ export const list = query({
       .withIndex('by_org', (q) => q.eq('workosOrgId', callerOrgId).eq('isDeleted', false))
       .collect();
     return yards.map(toClientYard);
+  },
+});
+
+/**
+ * Fence-only projection for the driver app (docs/end-shift-reminder-spec.md).
+ *
+ * Separate from `list` for two reasons. Auth: `list` goes through
+ * `requireCallerOrgId`, the WorkOS org-claim path, and drivers authenticate
+ * by Clerk phone claim — a driver calling `list` gets "No organization claim
+ * on identity". Payload: a phone caching this for offline use needs the
+ * fence and nothing else, so addresses, notes and audit fields stay on the
+ * dispatcher side.
+ *
+ * Both radii are resolved server-side so the device can't re-derive them
+ * wrongly, and the 100-row ceiling matches `evaluateYards` exactly — if an
+ * org ever exceeds it, both sides must fall off the same edge, or the device
+ * would watch a fence the server doesn't (or vice versa).
+ */
+export const listForDriver = query({
+  args: {},
+  returns: v.array(yardFenceValidator),
+  handler: async (ctx) => {
+    const driver = await resolveAuthenticatedDriver(ctx);
+    const yards = await ctx.db
+      .query('yardLocations')
+      .withIndex('by_org', (q) =>
+        q.eq('workosOrgId', driver.organizationId).eq('isDeleted', false),
+      )
+      .take(100);
+
+    return yards.map((yard) => {
+      const radius = effectiveRadiusMeters(yard.radiusMeters);
+      return {
+        _id: yard._id,
+        name: yard.name,
+        latitude: yard.latitude,
+        longitude: yard.longitude,
+        radiusMeters: radius,
+        exitRadiusMeters: exitRadiusFor(radius),
+      };
+    });
   },
 });
 

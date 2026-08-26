@@ -28,6 +28,7 @@
 import { clearCachedPushToken } from './push-token';
 import { resetLocationQueue } from './location-queue';
 import { stopMotionService } from './motion-service';
+import { clearYardFences } from './yard-fences';
 import { log } from './log';
 
 const lg = log('Logout');
@@ -59,6 +60,17 @@ export async function performSignOut(
   } catch (err) {
     lg.warn(
       `stopMotionService failed (continuing): ${err instanceof Error ? err.message : err}`,
+    );
+  }
+
+  // Yard fences are org-scoped. The cache carries its own org stamp so a
+  // leftover copy can't be evaluated against another org's shift, but the
+  // next driver on this device has no business holding the last one's yards.
+  try {
+    await clearYardFences();
+  } catch (err) {
+    lg.warn(
+      `clearYardFences failed (continuing): ${err instanceof Error ? err.message : err}`,
     );
   }
 

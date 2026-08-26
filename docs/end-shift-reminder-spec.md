@@ -196,33 +196,32 @@ state — but it makes "started at Bay 4" available to the dispatcher's session
 timeline, it survives a reinstall mid-shift, and it is what the self-heal
 path in §5 recovers from.
 
-### New query: `yardLocations.listForDriver`
+### New query: `yardLocations.listForDriver`  ✅ shipped
 
 `yardLocations.list` cannot be reused: it authorizes with
 `requireCallerOrgId` ([lib/auth.ts:51](../convex/lib/auth.ts)), the WorkOS
 org-claim path, and drivers authenticate by Clerk phone claim through
 `resolveAuthenticatedDriver` ([driverMobile.ts:55](../convex/driverMobile.ts)).
+A driver calling `list` gets "No organization claim on identity".
 
-```ts
-// Driver-authed, fence-only projection: no notes, no address, no audit
-// fields. Called once per shift start and cached on the device.
-export const listForDriver = query({
-  args: {},
-  returns: v.array(v.object({
-    _id: v.id('yardLocations'),
-    name: v.string(),
-    latitude: v.float64(),
-    longitude: v.float64(),
-    radiusMeters: v.float64(),   // effective radius, defaulted server-side
-  })),
-  // resolveAuthenticatedDriver(ctx) → driver.organizationId → by_org index
-});
-```
+Fence-only projection — `_id`, `name`, `latitude`, `longitude`,
+`radiusMeters`, `exitRadiusMeters`. Addresses, notes and audit fields stay on
+the dispatcher side; a phone caching this for offline use needs the circle
+and nothing else.
 
-Defaulting `radiusMeters` server-side means the 250 m constant lives in one
-place and the device cannot drift from it.
+**Both radii are resolved server-side**, not just the entry radius as
+originally drafted. The device never derives an exit ring, because deriving
+one from an unset radius yields the load-stop departure ring (1207 m) rather
+than 1.5× the yard default — a trap worth disarming once rather than
+re-litigating in a second codebase. `effectiveRadiusMeters` in
+[yardLocations.ts](../convex/yardLocations.ts) is now the single place the
+250 m default is applied, shared by both projections.
 
-### Device state (MMKV, alongside `TrackingState`)
+The 100-row ceiling matches `evaluateYards` exactly. If an org ever exceeds
+it, both sides must fall off the same edge — otherwise the device watches a
+fence the server doesn't, or the reverse.
+
+### Device state (in `storage`, alongside `TrackingState`)
 
 ```ts
 startYard: { id, name, latitude, longitude, entryRadius, exitRadius } | null;
@@ -241,8 +240,12 @@ edge fires.
 At Start Shift ([start-shift.tsx](<../apps/driver/app/(app)/start-shift.tsx>)),
 after `startSession` and alongside the existing `startSessionTracking` call:
 
-1. Fetch `yardLocations.listForDriver` (cache in MMKV; the list is small and
-   changes rarely).
+1. Fetch `yardLocations.listForDriver` (cached by `refreshYardFences` in
+   [yard-fences.ts](<../apps/driver/lib/yard-fences.ts>); the list is small
+   and changes rarely). ✅ shipped — fire-and-forget from Start Shift, never
+   awaited on a path the driver is watching, and a failed refresh keeps the
+   previous cache rather than emptying it: a stale fence is worth far more
+   than no fence.
 2. Take the first fix and find the enclosing fence.
 3. Persist it as `startYard` with `fenceState: 'inside'`.
 4. No enclosing fence → `startYard: null`, and the whole feature is inert for
@@ -258,7 +261,19 @@ The server's copy is the durable one, so the recovery path below prefers it.
 
 The list must be cached rather than fetched per evaluation: the background
 task runs headless with no React context and, more importantly, must work
-with no network.
+with no network. The cache carries an `organizationId` stamp, so a driver who
+re-signs into a different org can never be evaluated against the previous
+org's yards — cheaper and harder to get wrong than clearing it from every
+path that can change orgs. It is also dropped outright on sign-out.
+
+The geometry lives in [yard-fence-math.ts](<../apps/driver/lib/yard-fence-math.ts>),
+which imports nothing from React Native or Convex so the rings, the
+hysteresis band, and the overlapping-fence tiebreak are unit-testable in
+node (a `driver` vitest project runs them). One deliberate difference from
+the server: when fences overlap, the device picks the **nearest**, not the
+first row scanned. The server's arbitrary-but-stable order is fine for an
+append-only event log; the device's answer anchors a whole shift and must
+survive a refresh reordering the list.
 
 Also arm from `reconcileTrackingStateWithActiveSession`
 ([location-tracking.ts:432](../apps/driver/lib/location-tracking.ts)), the
@@ -420,7 +435,8 @@ session doc, so the measurement needs no new instrumentation.
    inert, and starts populating immediately — which is also the cheapest
    read on whether drivers actually start inside the fences an org has
    drawn.
-2. `yardLocations.listForDriver` + device cache. Also inert.
+2. ✅ `yardLocations.listForDriver` + device cache. Also inert — the fences
+   come down at shift start and nothing reads them yet.
 3. Fence evaluation in the background task, behind the flag, **telemetry
    only** — no notification. Run it for a week on a pilot org and compare
    `shift_reminder_fired` against the org's actual `auto_timeout` /
