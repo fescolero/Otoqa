@@ -95,7 +95,9 @@ export function VendorEditContent({ vendorId }: { vendorId: string }) {
       });
 
       toast.success('Fuel vendor updated successfully');
-      router.push('/operations/diesel/vendors');
+      // Land on the record you just edited, not the list — matches the
+      // vendor create flow and the diesel/DEF entry edit flow.
+      router.push(`/operations/diesel/vendors/${vendorId}`);
     } catch (error) {
       console.error('Failed to update fuel vendor:', error);
       toast.error('Failed to update fuel vendor. Please try again.');
@@ -265,7 +267,7 @@ export function VendorEditContent({ vendorId }: { vendorId: string }) {
           <Button
             type="button"
             variant="outline"
-            onClick={() => router.push('/operations/diesel/vendors')}
+            onClick={() => router.push(`/operations/diesel/vendors/${vendorId}`)}
             disabled={isSubmitting}
           >
             Cancel
