@@ -16,6 +16,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
 import RoleSwitchScreen from './role-switch';
 import { useRegisterPushToken } from '../../lib/hooks/useRegisterPushToken';
+import { useShiftReminderResponse } from '../../lib/hooks/useShiftReminderResponse';
 import { performSignOut } from '../../lib/logout';
 import { useAutoUpdate } from '../../lib/auto-update';
 import {
@@ -224,6 +225,11 @@ export default function AppLayout() {
   // service. Same hoisting rule as useRegisterPushToken — must sit
   // above any conditional return.
   usePushWake(activeSession ?? null);
+
+  // End-shift reminder: route "End shift" / "Still working" / a plain tap on
+  // the lock-screen reminder. Same hoisting rule; inert without a session,
+  // since the reminder can only exist during a shift.
+  useShiftReminderResponse(!!activeSession);
 
   // Location-tracking lifecycle: resume-on-mount, foreground flush, and
   // orphan-tracking self-heal. Same hoisting rule.

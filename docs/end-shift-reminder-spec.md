@@ -307,7 +307,7 @@ and that number should decide whether it is worth the extra query.
 
 ---
 
-## 6. Delivery — frame 04c
+## 6. Delivery — frame 04c  ✅ shipped
 
 A local notification on a new channel, following `sync-stall-alert.ts`:
 
@@ -324,20 +324,37 @@ A local notification on a new channel, following `sync-stall-alert.ts`:
   notification categories today, so this is new ground; the response arrives
   through `addNotificationResponseReceivedListener`, which is already used in
   [notifications.tsx:74](<../apps/driver/app/(app)/notifications.tsx>).
-- **Tap** (no action button) deep-links into the app with the reminder banner
-  showing, i.e. frame 04d.
+- **Tap** (no action button) opens the More tab, where the shift controls
+  live. It will land on the reminder banner (frame 04d) once §7 ships.
 - The ongoing shift-status notification and the Live Activity stay exactly as
   they are. If a status line is wanted, `updateShiftStatus('Back at the yard
   — end shift?')` is a free, silent addition.
 
-**Open behavioral question — see §11:** whether "End shift" from the
-notification ends the shift outright, or opens the app to the confirmation
-sheet. The sheet is the current UX and carries the elapsed/loads/miles/stops
-summary; ending from the lock screen is faster but skips the active-load
-warning path.
+**Never audible.** The channel is silent on Android, `sound: false` covers
+iOS, and the global foreground handler in `fcm-handler.ts` was given a
+branch for this payload type. A driver may still be rolling through the yard
+to the fuel island when it fires; a chime is the wrong way to say "you're
+back".
 
-If notification permission is denied, the feature degrades to the in-app
-banner only. It never becomes a blocker.
+**"End shift" opens the confirmation sheet — it does not end the shift.**
+Decided rather than left open: `endSession` closes any ACTIVE legs, and the
+sheet is where that gets surfaced along with elapsed / loads / miles / stops.
+One extra tap is cheap next to a driver silently closing an open leg from a
+lock screen they half-read. The notification deep-links to
+`/(app)/(driver-tabs)/more?endShift=1`, which opens the existing sheet
+directly; §7's extraction upgrades that to the shared component.
+
+**"Still working" records the answer and dismisses.** It has nothing to mute:
+firing already marked this yard visit as reminded, and it stays that way
+until the driver leaves the fence. The branch exists so
+`shift_reminder_action` can tell a deliberate dismissal from an ignored
+notification.
+
+Permission is **checked, never requested** at fire time — a request cannot be
+answered from a background task, and asking for the first time at the end of
+a long shift is the worst possible moment. A denied grant emits
+`shift_reminder_suppressed` and the feature degrades to the in-app banner.
+It never becomes a blocker.
 
 ---
 
@@ -442,10 +459,9 @@ session doc, so the measurement needs no new instrumentation.
    `lib/dashboard-screen.jsx` were not in the handoff bundle — the index HTML
    references them but the `lib/` folder does not contain them. Needed for
    exact copy, button order, and the muted-state treatment.
-2. **Notification "End shift": inline or open the app?** Inline is one tap
-   from the lock screen. Opening the app shows the shift summary and the
-   active-load warning. If inline, decide what happens when the driver still
-   has an ACTIVE leg — `endSession` does not block, it just closes the legs.
+2. ~~**Notification "End shift": inline or open the app?**~~ **Decided:**
+   opens the app to the confirmation sheet. Ending a shift is irreversible
+   and closes any ACTIVE legs; the sheet is where that is surfaced.
 3. **Minimum shift duration before arming?** The `outside → inside` rule
    already suppresses the degenerate case. A driver who pulls out of the yard
    and comes right back after ten minutes would get a nudge. Probably fine —
@@ -471,5 +487,6 @@ session doc, so the measurement needs no new instrumentation.
    `shift_reminder_fired` against the org's actual `auto_timeout` /
    `next_session_opened` rate. This is the step that proves the fences are
    drawn correctly, and it is the step most likely to be skipped.
-4. The notification (04c) + channel + categories.
+4. ✅ The notification (04c) + channel + categories, plus the response
+   routing for its two actions and a plain tap.
 5. `EndShiftSheet` extraction, then the dashboard banner (04d/04e/04f).

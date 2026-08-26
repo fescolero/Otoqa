@@ -13,11 +13,14 @@
  * than at Start Shift, which means this module needs nothing plumbed through
  * the UI and recovers on its own if the app was restarted between the two.
  *
- * TELEMETRY ONLY at this step — `fire` returns true and emits an event, and
- * nothing yet shows the driver anything. The point is to watch
- * `shift_reminder_fired` against an org's real auto_timeout /
- * next_session_opened rate before a notification is wired to it, because a
- * reminder is only as good as the yard pins that org has drawn.
+ * Firing posts the lock-screen notification (end-shift-notification.ts) and
+ * emits `shift_reminder_fired` either way — the event records the decision,
+ * not the delivery, so a shift where the OS refused to show anything is
+ * still visible as a nudge that should have happened.
+ *
+ * The whole path is behind `shift_end_reminder_enabled`, off by default: a
+ * reminder is only as good as the yard pins an org has drawn, so the
+ * telemetry from a pilot org is what earns the flag flip.
  *
  * See docs/end-shift-reminder-spec.md.
  */
@@ -32,7 +35,12 @@ import {
   type ReminderZone,
 } from './end-shift-reminder-logic';
 import { getFlagBool, FLAG_SHIFT_END_REMINDER_ENABLED } from './feature-flags';
-import { trackShiftReminderArmed, trackShiftReminderFired } from './analytics';
+import {
+  trackShiftReminderArmed,
+  trackShiftReminderFired,
+  trackShiftReminderSuppressed,
+} from './analytics';
+import { presentEndShiftReminder, dismissEndShiftReminder } from './end-shift-notification';
 
 const lg = log('EndShiftReminder');
 
@@ -61,6 +69,14 @@ export type ReminderFix = {
   recordedAt: number;
 };
 
+/** "7h 20m" / "45m" — the shift length, as a driver would say it. */
+function formatElapsed(ms: number): string {
+  const totalMinutes = Math.max(0, Math.round(ms / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
 async function readState(): Promise<ReminderState | null> {
   try {
     const raw = await storage.getString(STATE_KEY);
@@ -79,8 +95,13 @@ async function writeState(state: ReminderState): Promise<void> {
   }
 }
 
-/** Drop the state. Called when tracking stops — the shift is over. */
+/**
+ * Drop the state and take down any standing reminder. Called when tracking
+ * stops — the shift is over, so a notification asking them to end it is
+ * worse than none.
+ */
 export async function clearShiftReminder(): Promise<void> {
+  void dismissEndShiftReminder();
   try {
     await storage.delete(STATE_KEY);
   } catch {
@@ -169,10 +190,11 @@ export async function evaluateShiftReminder(fix: ReminderFix): Promise<boolean> 
 
     if (!next.fire) return false;
 
+    const shiftElapsedMs = fix.recordedAt - fix.shiftStartedAt;
     trackShiftReminderFired({
       sessionId: fix.sessionId,
       fenceId: state.fence.id,
-      shiftElapsedMs: fix.recordedAt - fix.shiftStartedAt,
+      shiftElapsedMs,
       distanceMeters: Math.round(
         distanceMeters(
           fix.latitude,
@@ -182,7 +204,20 @@ export async function evaluateShiftReminder(fix: ReminderFix): Promise<boolean> 
         ),
       ),
     });
-    lg.debug(`Back at "${state.fence.name}" — reminder would fire`);
+
+    const shown = await presentEndShiftReminder({
+      sessionId: fix.sessionId,
+      yardName: state.fence.name,
+      shiftElapsedLabel: formatElapsed(shiftElapsedMs),
+    });
+    if (!shown) {
+      trackShiftReminderSuppressed({
+        sessionId: fix.sessionId,
+        reason: 'permission_denied',
+      });
+    }
+
+    lg.debug(`Back at "${state.fence.name}" — reminder fired (shown=${shown})`);
     return true;
   } catch (err) {
     lg.warn(`Reminder evaluation failed: ${err instanceof Error ? err.message : err}`);

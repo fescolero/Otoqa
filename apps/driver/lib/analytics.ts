@@ -582,6 +582,27 @@ export function trackShiftReminderFired(context: {
   capture('shift_reminder_fired', context);
 }
 
+/**
+ * What the driver did with a reminder. `surface` distinguishes the
+ * lock-screen notification from the in-app banner, because a driver who
+ * only ever acts on one of them is telling us the other isn't working.
+ */
+export function trackShiftReminderAction(context: {
+  sessionId: string;
+  action: 'end' | 'still_working' | 'opened';
+  surface: 'notification' | 'banner';
+}) {
+  capture('shift_reminder_action', context);
+}
+
+/** The reminder fired but the OS wouldn't show it. */
+export function trackShiftReminderSuppressed(context: {
+  sessionId: string;
+  reason: 'permission_denied';
+}) {
+  capture('shift_reminder_suppressed', context);
+}
+
 export function trackBGTaskFired(context: {
   locationCount: number;
   accuracies: string;
