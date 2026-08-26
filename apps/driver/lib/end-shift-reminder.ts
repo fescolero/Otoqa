@@ -57,7 +57,42 @@ type ReminderState = {
   fence: YardFence | null;
   zone: ReminderZone;
   remindedThisVisit: boolean;
+  /**
+   * When the driver answered the nudge with "Still working" (frame 04e).
+   * Distinct from `remindedThisVisit`, which only says we nudged: the
+   * in-app banner needs to tell "nudged, unanswered" from "nudged and
+   * waved off". Cleared with `remindedThisVisit` when they leave the fence.
+   */
+  acknowledgedAt?: number;
 };
+
+/** What the UI needs to render frames 04d / 04e. Null = nothing to show. */
+export type ShiftReminderSnapshot = {
+  sessionId: string;
+  yardName: string;
+  acknowledged: boolean;
+} | null;
+
+// In-process subscribers (the dashboard banner). Only reaches listeners in
+// the same JS runtime — a fire from the headless background task notifies
+// nobody, which is why the hook also re-reads when the app foregrounds.
+const listeners = new Set<() => void>();
+
+/** Subscribe to reminder changes. Returns an unsubscribe function. */
+export function subscribeShiftReminder(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function notifyListeners(): void {
+  for (const listener of listeners) {
+    try {
+      listener();
+    } catch {
+      // A broken subscriber must not break the GPS path.
+    }
+  }
+}
 
 export type ReminderFix = {
   organizationId: string;
@@ -93,6 +128,35 @@ async function writeState(state: ReminderState): Promise<void> {
   } catch (err) {
     lg.warn(`Failed to persist reminder state: ${err instanceof Error ? err.message : err}`);
   }
+  notifyListeners();
+}
+
+/**
+ * The current reminder, as the UI needs it. Null unless the driver has
+ * actually been nudged and is still inside the fence — leaving takes the
+ * banner down without anyone having to dismiss it.
+ */
+export async function getShiftReminderSnapshot(): Promise<ShiftReminderSnapshot> {
+  const state = await readState();
+  if (!state?.fence) return null;
+  if (state.zone !== 'inside' || !state.remindedThisVisit) return null;
+  return {
+    sessionId: state.sessionId,
+    yardName: state.fence.name,
+    acknowledged: state.acknowledgedAt !== undefined,
+  };
+}
+
+/**
+ * "Still working" — from the notification action or the in-app banner.
+ * Collapses the banner for the rest of this yard visit. The nudge itself is
+ * already spent (`remindedThisVisit`); this records that the driver answered
+ * rather than ignored, which is the difference between frames 04d and 04e.
+ */
+export async function acknowledgeShiftReminder(): Promise<void> {
+  const state = await readState();
+  if (!state || state.acknowledgedAt !== undefined) return;
+  await writeState({ ...state, acknowledgedAt: Date.now() });
 }
 
 /**
@@ -104,6 +168,7 @@ export async function clearShiftReminder(): Promise<void> {
   void dismissEndShiftReminder();
   try {
     await storage.delete(STATE_KEY);
+    notifyListeners();
   } catch {
     // Non-critical: state is session-stamped, so a leftover copy is
     // re-armed rather than misapplied to the next shift.
@@ -186,6 +251,10 @@ export async function evaluateShiftReminder(fix: ReminderFix): Promise<boolean> 
       ...state,
       zone: next.zone,
       remindedThisVisit: next.remindedThisVisit,
+      // Leaving re-arms the nudge, so the previous visit's answer expires
+      // with it — otherwise a driver who waved us off at lunch would never
+      // see the banner again all day.
+      acknowledgedAt: next.remindedThisVisit ? state.acknowledgedAt : undefined,
     });
 
     if (!next.fire) return false;

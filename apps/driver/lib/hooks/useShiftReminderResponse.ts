@@ -4,8 +4,8 @@
  *
  * Three ways in, all handled the same way:
  *   "End shift"     → the End-shift confirmation sheet on the More tab
- *   "Still working" → dismiss; the reminder is already muted for this yard
- *                     visit, so there is nothing to change
+ *   "Still working" → dismiss and collapse the in-app banner for the rest
+ *                     of this yard visit
  *   tapping the body → the More tab, where the shift controls live
  *
  * Ending the shift deliberately does NOT happen from the notification. It
@@ -24,6 +24,7 @@ import { useEffect, useRef } from 'react';
 import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 import { trackShiftReminderAction } from '../analytics';
+import { acknowledgeShiftReminder } from '../end-shift-reminder';
 import { log } from '../log';
 import {
   END_SHIFT_REMINDER_TYPE,
@@ -57,9 +58,10 @@ export function useShiftReminderResponse(enabled: boolean) {
       void dismissEndShiftReminder();
 
       if (response.actionIdentifier === ACTION_STILL_WORKING) {
-        // Nothing to mute — firing already marked this yard visit as
-        // reminded, and it stays that way until the driver leaves the
-        // fence. This branch exists to record that they answered.
+        // Collapses the in-app banner too (frame 04e): the nudge itself was
+        // already spent when it fired, but answering it is what separates a
+        // deliberate "not yet" from an ignored notification.
+        void acknowledgeShiftReminder();
         trackShiftReminderAction({ sessionId, action: 'still_working', surface: 'notification' });
         lg.debug('Driver chose "Still working"');
         return;

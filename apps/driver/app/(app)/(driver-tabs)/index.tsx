@@ -14,9 +14,10 @@ import { useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
 import { api } from '../../../../../convex/_generated/api';
 import { useMyLoads } from '../../../lib/hooks/useMyLoads';
+import { useShiftReminder } from '../../../lib/hooks/useShiftReminder';
 import { useDriver } from '../_layout';
 import { useLanguage } from '../../../lib/LanguageContext';
-import { trackScreen } from '../../../lib/analytics';
+import { trackScreen, trackShiftReminderAction } from '../../../lib/analytics';
 import { Icon, type IconName } from '../../../lib/design-icons';
 import {
   typeScale,
@@ -148,6 +149,10 @@ export default function HomeScreen() {
     driverId ? { driverId } : 'skip',
   );
 
+  // End-shift reminder (frames 04d / 04e). Decided on the GPS path; this
+  // only mirrors it. Inert when there's no shift to end.
+  const { reminder, dismiss: dismissReminder } = useShiftReminder(!!activeSession);
+
   useEffect(() => {
     trackScreen('Home');
   }, []);
@@ -235,6 +240,29 @@ export default function HomeScreen() {
       />
 
       <DayTabs tab={selectedDay} setTab={setSelectedDay} />
+
+      {reminder && !reminder.acknowledged && (
+        <EndShiftReminderBanner
+          yardName={reminder.yardName}
+          elapsed={formatElapsed(activeSession?.startedAt)}
+          onEndShift={() => {
+            trackShiftReminderAction({
+              sessionId: reminder.sessionId,
+              action: 'end',
+              surface: 'banner',
+            });
+            router.push('/(app)/(driver-tabs)/more?endShift=1');
+          }}
+          onStillWorking={() => {
+            trackShiftReminderAction({
+              sessionId: reminder.sessionId,
+              action: 'still_working',
+              surface: 'banner',
+            });
+            dismissReminder();
+          }}
+        />
+      )}
 
       <ScrollView
         contentContainerStyle={styles.scroll}
@@ -369,6 +397,65 @@ const OnDutyPill: React.FC<{ startedAt?: number; onPress: () => void }> = ({
       <Text style={styles.onDutyElapsed}>{elapsed}</Text>
       <Icon name="chevron-right" size={14} color={palette.textTertiary} />
     </Pressable>
+  );
+};
+
+/**
+ * End-shift reminder banner — design frame 04d.
+ *
+ * Shown when the driver has come back into the yard they started in and is
+ * still on shift. The On-duty pill above is passive by design; this is the
+ * one moment we know enough to actually ask.
+ *
+ * "End shift" routes to the More tab's confirmation sheet rather than ending
+ * inline — ending closes any ACTIVE legs, and that belongs behind the sheet
+ * with the shift summary. Same destination as the lock-screen notification,
+ * so there is one end-shift flow, not three.
+ */
+const EndShiftReminderBanner: React.FC<{
+  yardName: string;
+  elapsed: string;
+  onEndShift: () => void;
+  onStillWorking: () => void;
+}> = ({ yardName, elapsed, onEndShift, onStillWorking }) => {
+  const { palette, styles } = useDesignStyles();
+  return (
+    <View
+      style={[styles.reminderBanner, { backgroundColor: palette.accentTint }]}
+      accessibilityRole="alert"
+    >
+      <View style={styles.reminderBannerRow}>
+        <Icon name="map-pin" size={16} color={palette.accent} />
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.reminderBannerTitle} numberOfLines={1}>
+            Back at {yardName}
+          </Text>
+          <Text style={styles.reminderBannerBody}>
+            You&apos;re still on shift — {elapsed} so far.
+          </Text>
+        </View>
+      </View>
+      <View style={styles.reminderBannerActions}>
+        <Pressable
+          onPress={onEndShift}
+          accessibilityRole="button"
+          style={({ pressed }) => [
+            styles.reminderBannerCta,
+            { backgroundColor: palette.accent },
+            pressed && { opacity: 0.9 },
+          ]}
+        >
+          <Text style={styles.reminderBannerCtaText}>End shift</Text>
+        </Pressable>
+        <Pressable
+          onPress={onStillWorking}
+          accessibilityRole="button"
+          style={({ pressed }) => [styles.reminderBannerGhost, pressed && { opacity: 0.7 }]}
+        >
+          <Text style={styles.reminderBannerGhostText}>Still working</Text>
+        </Pressable>
+      </View>
+    </View>
   );
 };
 
@@ -1184,23 +1271,58 @@ const makeStyles = (
     fontSize: 12,
     fontWeight: '600',
   },
-  softCapBanner: {
+  // End-shift reminder banner (frame 04d). Replaces the softCap* style
+  // block that sat here unused — the 10h/14h banner it belonged to was
+  // never built, and markSoftCapHit has no caller on mobile.
+  reminderBanner: {
+    marginHorizontal: 16,
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: radii.lg,
+    gap: 10,
+  },
+  reminderBannerRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 10,
-    padding: 12,
-    borderRadius: radii.lg,
   },
-  softCapTitle: {
+  reminderBannerTitle: {
     fontSize: 13,
     fontWeight: '600',
     lineHeight: 18,
+    color: palette.textPrimary,
   },
-  softCapBody: {
+  reminderBannerBody: {
     fontSize: 12,
     lineHeight: 16,
     color: palette.textSecondary,
     marginTop: 2,
+  },
+  reminderBannerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  reminderBannerCta: {
+    flex: 1,
+    paddingVertical: 9,
+    borderRadius: radii.md,
+    alignItems: 'center',
+  },
+  reminderBannerCtaText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  reminderBannerGhost: {
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+  },
+  reminderBannerGhostText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: palette.textSecondary,
   },
 
   // Skeleton

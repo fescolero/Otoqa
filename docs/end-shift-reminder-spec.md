@@ -358,23 +358,44 @@ It never becomes a blocker.
 
 ---
 
-## 7. In-app states — frames 04d, 04e, 04f
+## 7. In-app states — frames 04d, 04e, 04f  ✅ 04d / 04e shipped
 
-The dashboard reads the same device reminder state.
+The dashboard mirrors the same device reminder state, via
+[useShiftReminder](<../apps/driver/lib/hooks/useShiftReminder.ts>). The state
+is decided on the GPS path, so the hook refreshes two ways: an in-process
+subscription for a fire while the app is open, and a re-read on foreground
+for one that happened in the headless background task, whose runtime has no
+listeners to notify.
 
-- **04d `active`** — banner above the load list: back at the yard, shift
-  elapsed, `End shift` / `Still working`.
-- **04e `muted`** — "Still working" sets `remindedThisVisit` and the banner
-  collapses to the existing On-duty pill. Nothing else changes.
-- **04f `ended`** — the post-end off-duty state.
+- **04d `active`** ✅ — banner between the day tabs and the load list: back
+  at the yard, shift elapsed, `End shift` / `Still working`. It replaces the
+  orphaned `softCap*` styles that sat in the dashboard for a banner that was
+  never built.
+- **04e `muted`** ✅ — "Still working" stamps `acknowledgedAt` and the banner
+  collapses to the existing On-duty pill. This needed a field of its own:
+  `remindedThisVisit` only says we nudged, and the banner has to tell
+  "nudged, unanswered" from "nudged and waved off". It expires when the
+  driver leaves the fence, alongside `remindedThisVisit` — otherwise someone
+  who waved us off at lunch would never see the banner again all day.
+- **04f `ended`** — **not built.** Ending the shift already clears the
+  session, so the banner and the On-duty pill both disappear and the
+  dashboard returns to its ordinary off-duty state. Whether the design
+  intends something more (a "shift ended · 7h 20m" confirmation strip?) can't
+  be read from the frame name alone — see §11.
 
-`EndShiftSheet` has to be lifted out of `more.tsx` into a shared component so
-the dashboard, the More tab, and the notification deep-link all present the
-same sheet with the same active-load handling. That refactor is the bulk of
-the UI work; the banner itself is small.
+**`EndShiftSheet` was not extracted**, and does not need to be. The spec
+assumed the dashboard would present its own copy of the sheet; instead the
+banner reuses the `?endShift=1` deep link built for the notification, so all
+three entry points — banner, notification, On-duty pill — land on the one
+implementation in `more.tsx`. That is the outcome the extraction was for,
+without refactoring a working 1400-line screen and its 1000-line style
+factory. The cost is a tab transition instead of an in-place sheet, which is
+already how the On-duty pill behaves.
 
-Exact copy and button order to follow `lib/end-shift-reminder.jsx` from the
-design bundle **(not yet received — see §11)**.
+**Copy is provisional.** `lib/end-shift-reminder.jsx` still hasn't arrived
+(§11), so the banner's wording — "Back at {yard}" / "You're still on shift —
+{elapsed} so far." — is a best reading of the frame names, not the design's
+text. Swapping it is a string change in one component.
 
 ---
 
@@ -455,10 +476,12 @@ session doc, so the measurement needs no new instrumentation.
 
 ## 11. Open questions
 
-1. **Design source.** `lib/end-shift-reminder.jsx` and the reminder-aware
-   `lib/dashboard-screen.jsx` were not in the handoff bundle — the index HTML
-   references them but the `lib/` folder does not contain them. Needed for
-   exact copy, button order, and the muted-state treatment.
+1. **Design source — still outstanding.** `lib/end-shift-reminder.jsx` and
+   the reminder-aware `lib/dashboard-screen.jsx` were not in the handoff
+   bundle; the index HTML references them but the `lib/` folder does not
+   contain them. Two things are blocked on it: the banner's exact copy and
+   button order (shipped with a provisional reading), and what frame 04f
+   `ended` is actually meant to show beyond the ordinary off-duty dashboard.
 2. ~~**Notification "End shift": inline or open the app?**~~ **Decided:**
    opens the app to the confirmation sheet. Ending a shift is irreversible
    and closes any ACTIVE legs; the sheet is where that is surfaced.
@@ -489,4 +512,7 @@ session doc, so the measurement needs no new instrumentation.
    drawn correctly, and it is the step most likely to be skipped.
 4. ✅ The notification (04c) + channel + categories, plus the response
    routing for its two actions and a plain tap.
-5. `EndShiftSheet` extraction, then the dashboard banner (04d/04e/04f).
+5. ✅ The dashboard banner (04d/04e). The `EndShiftSheet` extraction turned
+   out to be unnecessary — the banner reuses the notification's deep link,
+   so there is still exactly one end-shift sheet. 04f is open pending the
+   design source.
