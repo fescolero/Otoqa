@@ -53,6 +53,15 @@ export const FLAG_FCM_WAKE_ENABLED = 'fcm_wake_enabled';
 // useOwnerModeEnabled (reactive) with the cached value as offline fallback.
 export const FLAG_OWNER_MODE_IN_DRIVER_APP = 'owner_mode_in_driver_app';
 
+// End-shift reminder (docs/end-shift-reminder-spec.md). Gates the on-device
+// yard-fence evaluation that nudges a driver who forgot to end their shift.
+// Default FALSE: the reminder is only as good as the yard pins an org has
+// drawn, so it stays off until a pilot org's telemetry says the fences sit
+// where drivers actually park. Read at arm time (so a shift on an org with
+// the flag off stores no state at all) AND on every evaluation, so flipping
+// it off is an immediate kill switch rather than a next-shift one.
+export const FLAG_SHIFT_END_REMINDER_ENABLED = 'shift_end_reminder_enabled';
+
 // How long getQueueBackend is willing to wait on a fresh refresh when the
 // cache is empty, before falling back to the in-code default (sqlite).
 // Keeps first-launch cold-start delay bounded while still giving an online

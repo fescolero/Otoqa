@@ -547,6 +547,41 @@ export function trackWatchLocationError(context: { step: 'callback' | 'insert' |
 // BACKGROUND LOCATION TASK DIAGNOSTICS
 // ============================================
 
+// ============================================================================
+// END-SHIFT REMINDER (docs/end-shift-reminder-spec.md)
+// ============================================================================
+
+/**
+ * Emitted once per shift, the first time the reminder gets a fix to work
+ * with. `armed: false` carries the reason — these are the numbers that say
+ * whether the feature can work at all for an org before any notification
+ * ships.
+ */
+export function trackShiftReminderArmed(context: {
+  sessionId: string;
+  armed: boolean;
+  reason: 'opened_inside_fence' | 'outside_all_fences' | 'window_closed';
+  fenceId?: string;
+  fenceCount: number;
+  sinceShiftStartMs: number;
+}) {
+  capture('shift_reminder_armed', context);
+}
+
+/**
+ * The driver came back into the yard they started in. Telemetry-only for
+ * now — compare the rate of this against the org's actual auto_timeout /
+ * next_session_opened end reasons before wiring a notification to it.
+ */
+export function trackShiftReminderFired(context: {
+  sessionId: string;
+  fenceId: string;
+  shiftElapsedMs: number;
+  distanceMeters: number;
+}) {
+  capture('shift_reminder_fired', context);
+}
+
 export function trackBGTaskFired(context: {
   locationCount: number;
   accuracies: string;

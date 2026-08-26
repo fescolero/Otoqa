@@ -107,7 +107,7 @@ they never have.
 
 ---
 
-## 3. The trigger
+## 3. The trigger  ✅ shipped
 
 Mirror the server's state machine exactly, so the device and the dispatcher
 timeline never disagree about whether a driver is in the yard.
@@ -221,43 +221,61 @@ The 100-row ceiling matches `evaluateYards` exactly. If an org ever exceeds
 it, both sides must fall off the same edge — otherwise the device watches a
 fence the server doesn't, or the reverse.
 
-### Device state (in `storage`, alongside `TrackingState`)
+### Device state  ✅ shipped
+
+One `storage` key, `end_shift_reminder_state`, alongside `TrackingState`:
 
 ```ts
-startYard: { id, name, latitude, longitude, entryRadius, exitRadius } | null;
-fenceState: 'inside' | 'outside' | 'unknown';
+sessionId: string;        // stamped, so last shift's state can't be reused
+organizationId: string;
+fence: YardFence | null;  // null = this shift has no anchor
+zone: 'inside' | 'outside' | 'unknown';
 remindedThisVisit: boolean;
 ```
 
-`unknown` is the state before the first accepted fix. It transitions to
-`inside` or `outside` without firing — only an explicit `outside → inside`
-edge fires.
+`zone` is the last *settled* side. A fix in the hysteresis band is never
+stored — it leaves the previous answer standing, which is what makes jitter
+free. `unknown` precedes the first settling fix and can never fire: it means
+we don't know whether the driver just arrived or was here all along.
+
+Writes happen only on a change of side, not per fix — a truck parked in the
+yard overnight produces one write, not one every two minutes.
 
 ---
 
-## 5. Arming the reminder
+## 5. Arming the reminder  ✅ shipped
 
 At Start Shift ([start-shift.tsx](<../apps/driver/app/(app)/start-shift.tsx>)),
-after `startSession` and alongside the existing `startSessionTracking` call:
+`refreshYardFences` pulls `yardLocations.listForDriver` into the device cache
+— fire-and-forget, never awaited on a path the driver is watching, and a
+failed refresh keeps the previous copy rather than emptying it: a stale fence
+is worth far more than no fence.
 
-1. Fetch `yardLocations.listForDriver` (cached by `refreshYardFences` in
-   [yard-fences.ts](<../apps/driver/lib/yard-fences.ts>); the list is small
-   and changes rarely). ✅ shipped — fire-and-forget from Start Shift, never
-   awaited on a path the driver is watching, and a failed refresh keeps the
-   previous cache rather than emptying it: a stale fence is worth far more
-   than no fence.
-2. Take the first fix and find the enclosing fence.
-3. Persist it as `startYard` with `fenceState: 'inside'`.
-4. No enclosing fence → `startYard: null`, and the whole feature is inert for
-   this shift.
+**Arming itself happens on the first evaluated fix, not at Start Shift.**
+Start Shift has no fix to hand — the GPS subscription has only just been
+created — so plumbing one through the UI would mean waiting on a lock while
+the driver watches a spinner. Instead the first fix that reaches
+`evaluateShiftReminder` with no state for its session establishes the anchor:
 
-The device resolves its own anchor rather than waiting to read back
-`startYardId`: the server's copy only lands after the first ping syncs, and
-the device already holds both the fix and the fence list. The two agree by
-construction — same fences, same radius defaulting, same first fix. Where
-they can disagree is a shift that opens with no GPS lock: the device has no
-anchor to store, and the server may still stamp one from a fix minutes later.
-The server's copy is the durable one, so the recovery path below prefers it.
+1. Past `ARM_WINDOW_MS` (5 min) since tracking started → **tombstone**. The
+   shift gets no anchor, recorded so the reminder stops re-reading the cache
+   on every ping for the rest of the day.
+2. Fence cache empty → **retry on the next fix**. The refresh above is
+   fire-and-forget, so a fast GPS lock can beat it home; treating "not yet"
+   as "this org has no yards" would silently disarm exactly the shifts that
+   start well.
+3. Otherwise **arm** on the enclosing fence, or on `null` when the shift
+   genuinely opened outside every fence — a real answer, not a failure.
+
+The window mirrors the server's `START_YARD_WINDOW_MS` exactly. Falling out
+of this design for free: a driver whose app restarts a minute into the shift
+re-arms itself with no recovery path at all, because the arming rule is a
+property of the fix stream rather than of the Start Shift screen.
+
+The device resolves its own anchor rather than reading back `startYardId`:
+the server's copy only lands after the first ping syncs, and the device
+already holds both the fix and the fence list. The two agree by construction
+— same fences, same radius defaulting, same window, same first fix.
 
 The list must be cached rather than fetched per evaluation: the background
 task runs headless with no React context and, more importantly, must work
@@ -275,12 +293,17 @@ first row scanned. The server's arbitrary-but-stable order is fine for an
 append-only event log; the device's answer anchors a whole shift and must
 survive a refresh reordering the list.
 
-Also arm from `reconcileTrackingStateWithActiveSession`
-([location-tracking.ts:432](../apps/driver/lib/location-tracking.ts)), the
-self-heal path for a driver who is mid-shift on a device where
-`startSessionTracking` never ran. Without a stored `startYard` that shift
-silently gets no reminder. The fence is recovered by reading `startYardId`
-off the session and looking it up in the cached fence list.
+**Still open: the self-heal path.**
+`reconcileTrackingStateWithActiveSession`
+([location-tracking.ts:432](../apps/driver/lib/location-tracking.ts)) rescues
+a driver who is mid-shift on a device where `startSessionTracking` never ran.
+It patches the session id into tracking state but leaves `startedAt` at the
+legacy tracking start, which is typically hours old — so the arm window is
+already closed and that shift tombstones. Recovering it means reading
+`startYardId` off the session (`getActiveSession` does not return it yet) and
+looking the fence up in the cache. Deferred deliberately: the
+`window_closed` telemetry from step 3 says how often this actually happens,
+and that number should decide whether it is worth the extra query.
 
 ---
 
@@ -338,18 +361,23 @@ design bundle **(not yet received — see §11)**.
 
 ---
 
-## 8. Flag and telemetry
+## 8. Flag and telemetry  ✅ shipped (the reminder half)
 
 Flag `shift_end_reminder_enabled` in `feature-flags.ts`, defaulting **false**
 until a pilot org confirms the fences are drawn where drivers actually park.
+Read at arm time, so a shift under an org with the flag off stores no state
+at all, **and** on every evaluation — flipping it off is then an immediate
+kill switch rather than a next-shift one, matching how `ar_wake_enabled` and
+`fcm_wake_enabled` are gated.
 
 Events, in the `trackX` convention of `lib/analytics.ts`:
 
-| Event | Fired when |
-|---|---|
-| `shift_reminder_armed` | Start yard resolved at shift start (and when it is not — with a reason: no yards, outside all fences, no fix) |
-| `shift_reminder_fired` | `outside → inside` at the start yard; carries shift elapsed and distance |
-| `shift_reminder_action` | `end` / `still_working` / `ignored`, and the surface (notification vs banner) |
+| Event | Fired when | |
+|---|---|---|
+| `shift_reminder_armed` | Once per shift, on the first fix that settles the anchor. Carries `armed`, a reason (`opened_inside_fence` / `outside_all_fences` / `window_closed`), the cached fence count, and how long after shift start the fix landed. | ✅ |
+| `shift_reminder_fired` | `outside → inside` at the start yard; carries shift elapsed and distance from the pin. | ✅ |
+| `shift_reminder_action` | `end` / `still_working` / `ignored`, and the surface (notification vs banner). | ships with the UI |
+| `shift_reminder_suppressed` | Notification permission denied. | ships with the notification |
 | `shift_reminder_suppressed` | Permission denied, or fired while the app had no notification grant |
 
 The number that matters is the rate of `auto_timeout` and
@@ -392,9 +420,10 @@ session doc, so the measurement needs no new instrumentation.
   inert for that shift, exactly as if the driver had started outside every
   fence. Widening the window would let a yard visited later in the day claim
   the slot, which is the worse failure.
-- **Device state is not durable across reinstall.** Recovered via
-  `startYardId` on the session (§5), but a reinstall mid-shift before that
-  field ships loses the arm.
+- **Device state is not durable across reinstall**, and the self-heal path
+  does not re-arm (§5). A driver reinstalled or self-healed mid-shift
+  tombstones for the rest of the day. The `window_closed` count in
+  `shift_reminder_armed` measures exactly how often this bites.
 - **No server backstop in v1.** If the app is killed and the OS stops
   delivering background fixes, no reminder fires. A server-side sweep over
   `sessionGeofenceEvents` — "session still active, last event is an `ARRIVED`
@@ -437,7 +466,7 @@ session doc, so the measurement needs no new instrumentation.
    drawn.
 2. ✅ `yardLocations.listForDriver` + device cache. Also inert — the fences
    come down at shift start and nothing reads them yet.
-3. Fence evaluation in the background task, behind the flag, **telemetry
+3. ✅ Fence evaluation in the background task, behind the flag, **telemetry
    only** — no notification. Run it for a week on a pilot org and compare
    `shift_reminder_fired` against the org's actual `auto_timeout` /
    `next_session_opened` rate. This is the step that proves the fences are
