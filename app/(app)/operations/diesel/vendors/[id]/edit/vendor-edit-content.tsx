@@ -16,9 +16,9 @@
  *     select here, so a row can hold a value outside the list. The
  *     schema factory appends the stored value as an option rather than
  *     showing a placeholder over data the user never chose.
- *   - Country has no rendered field (the create flow stamps 'US'), but
- *     it is seeded and passed back through so an existing value isn't
- *     reset on save.
+ *   - Country seeds from the record, not from the field's 'US' default,
+ *     so a row that never had one stays blank instead of being
+ *     backfilled on the next save.
  *
  * Drafts are deliberately NOT enabled — the form loads from a real
  * record, not an in-flight draft.

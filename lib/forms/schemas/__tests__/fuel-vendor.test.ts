@@ -18,6 +18,10 @@ import {
   type FuelVendorRecord,
 } from '../fuel-vendor';
 
+function fieldById(schema: ReturnType<typeof buildFuelVendorSchema>, id: string) {
+  return schema.sections.flatMap((s) => s.fields ?? []).find((f) => f.id === id);
+}
+
 const FULL_RECORD: FuelVendorRecord = {
   name: 'Loves Travel Stops',
   code: 'LV',
@@ -50,13 +54,26 @@ describe('fuel-vendor edit mode', () => {
     }
   });
 
-  it('leaves country unset on update instead of backfilling US', () => {
-    // The create translator stamps 'US' as a default. Applying that on
-    // update would write a country onto every edited row that never
-    // had one.
+  it("defaults country to 'US' on the field, not in the translator", () => {
+    // A new vendor gets 'US' because the field seeds it. The translator
+    // must NOT re-apply that default, or editing a row that never had a
+    // country would silently backfill one.
+    const field = fieldById(buildFuelVendorSchema(), 'country');
+    expect(field?.default).toBe('US');
+
     const vals = mapRecordToFuelVendorVals({ name: 'Bare Vendor' });
-    expect(mapValsToFuelVendorArgs(vals).country).toBe('US');
+    expect(mapValsToFuelVendorArgs(vals).country).toBeUndefined();
     expect(mapValsToFuelVendorUpdateArgs(vals).country).toBeUndefined();
+  });
+
+  it('clears country when the user empties the field', () => {
+    const vals = mapRecordToFuelVendorVals({ name: 'Petro-Canada', country: 'CA' });
+    expect(mapValsToFuelVendorUpdateArgs({ ...vals, country: '' }).country).toBeUndefined();
+  });
+
+  it('renders country inside the address section', () => {
+    const section = buildFuelVendorSchema().sections.find((s) => s.id === 'address');
+    expect((section?.fields ?? []).map((f) => f.id)).toContain('country');
   });
 
   it('keeps a non-US country through an edit', () => {
@@ -70,11 +87,9 @@ describe('fuel-vendor edit mode', () => {
       mode: 'edit',
       currentDiscountProgram: 'PILOT_LEGACY',
     });
-    const field = schema.sections
-      .flatMap((s) => s.fields ?? [])
-      .find((f) => f.id === 'discountProgram');
-
-    expect(field?.options?.map((o) => o.value)).toContain('PILOT_LEGACY');
+    expect(
+      fieldById(schema, 'discountProgram')?.options?.map((o) => o.value),
+    ).toContain('PILOT_LEGACY');
   });
 
   it('does not duplicate a discount program already in the list', () => {
@@ -82,12 +97,8 @@ describe('fuel-vendor edit mode', () => {
       mode: 'edit',
       currentDiscountProgram: 'WEX',
     });
-    const field = schema.sections
-      .flatMap((s) => s.fields ?? [])
-      .find((f) => f.id === 'discountProgram');
-
-    const wex = (field?.options ?? []).filter((o) => o.value === 'WEX');
-    expect(wex).toHaveLength(1);
+    const opts = fieldById(schema, 'discountProgram')?.options ?? [];
+    expect(opts.filter((o) => o.value === 'WEX')).toHaveLength(1);
   });
 
   it('titles the two modes differently but keeps one field layout', () => {

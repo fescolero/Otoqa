@@ -14,9 +14,10 @@
  *   - Address          — composite (optional)
  *   - Notes
  *
- * Country defaults to 'US' so the address composite stays valid even
- * when filled manually (Google Places autocomplete writes 'US' on
- * pick).
+ * Country is a real field defaulting to 'US' — new vendors get the
+ * common case for free, and it stays editable for the direct-billing
+ * chains that aren't US-based. On edit it seeds from the record, so a
+ * row with no country stays blank rather than being backfilled.
  */
 
 import type {
@@ -182,6 +183,22 @@ export function buildFuelVendorSchema(
               zip: ids.addrZip,
             },
           },
+          {
+            // Sits outside the composite: the shared address control
+            // has no country slot, and adding one would change every
+            // schema that renders an address. The composite forces a
+            // full-width row, so this lands on its own line beneath it.
+            //
+            // No length validation on purpose — rows written by the
+            // legacy hand-rolled edit form can hold 'United States',
+            // and a 2-letter rule would block saving them until fixed.
+            id: ids.country,
+            label: 'Country',
+            kind: 'text',
+            default: 'US',
+            placeholder: 'US',
+            hint: 'Two-letter code. Blank on older records is left as-is.',
+          },
         ],
       },
       {
@@ -245,7 +262,7 @@ export function mapValsToFuelVendorArgs(
     city: optionalStr(vals[ids.addrCity]),
     state: optionalStr(vals[ids.addrState]),
     zip: optionalStr(vals[ids.addrZip]),
-    country: optionalStr(vals[ids.country]) ?? 'US',
+    country: optionalStr(vals[ids.country]),
     notes: optionalStr(vals[ids.notes]),
   };
 }
@@ -259,9 +276,10 @@ export function mapValsToFuelVendorArgs(
  *  Every column is already a flat string, so there's no translation
  *  work beyond `undefined → ''`.
  *
- *  `country` has no rendered field (the create flow stamps 'US'), but
- *  it IS seeded here so an existing non-US value survives a round-trip
- *  through the form instead of being reset to 'US' on save.
+ *  `country` seeds from the record rather than from the field's 'US'
+ *  default: `useFormState` only falls back to a field default when the
+ *  key is absent from `initialValues`, so seeding '' here is what keeps
+ *  an older row's blank country blank instead of backfilling it.
  * ──────────────────────────────────────────────────────────────── */
 
 /** Subset of the persisted row the schema reads. Redeclared locally so
@@ -312,13 +330,7 @@ export type FuelVendorUpdateArgs = Partial<FuelVendorCreateArgs>;
 export function mapValsToFuelVendorUpdateArgs(
   vals: Record<string, unknown>,
 ): FuelVendorUpdateArgs {
-  return {
-    ...mapValsToFuelVendorArgs(vals),
-    // The create translator stamps 'US' when country is absent. On
-    // update that would backfill every edited row with a country it
-    // never had, so pass the seeded value through as-is instead.
-    country: optionalStr(vals[FUEL_VENDOR_FIELD_IDS.country]),
-  };
+  return mapValsToFuelVendorArgs(vals);
 }
 
 function optionalStr(v: unknown): string | undefined {
