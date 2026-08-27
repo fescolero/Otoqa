@@ -1,0 +1,437 @@
+/**
+ * Shared dispatch primitives — the React Native counterparts of the v8
+ * design's `lib-dispatch/ui.jsx`.
+ *
+ * Lives in lib/ rather than app/ because Expo Router treats every file under
+ * app/ as a route.
+ *
+ * Kept deliberately small and presentational: these take plain values, never
+ * Convex documents, so the Board, Drivers list and driver detail can all
+ * reach for the same chip without agreeing on a query shape first.
+ */
+import { Text, TextInput, View, Pressable, ScrollView } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { borderRadius, colors, typography } from './theme';
+import { hasHosSignal, hosBarValue, hosTone, type HosLike } from './hos-display';
+
+export { hasHosSignal, hosBarValue, hosTone, type HosLike } from './hos-display';
+
+/**
+ * The design's avatar hues, ported from oklch (unsupported in RN) to the
+ * nearest HSL. Index is derived from the id so a driver keeps their color
+ * between renders and between screens.
+ */
+const AVATAR_HUES = [212, 268, 158, 24, 340, 190, 44, 300];
+
+export function avatarHue(id: string): number {
+  let sum = 0;
+  for (let i = 0; i < id.length; i++) sum += id.charCodeAt(i);
+  return AVATAR_HUES[sum % AVATAR_HUES.length];
+}
+
+export function initials(first?: string | null, last?: string | null): string {
+  const a = (first ?? '').trim();
+  const b = (last ?? '').trim();
+  const letters = `${a.charAt(0)}${b.charAt(0)}`.toUpperCase();
+  return letters || '?';
+}
+
+export type DriverStatus = 'moving' | 'idle' | 'late' | 'offline';
+
+export const DRIVER_STATUS: Record<DriverStatus, { color: string; label: string; tint: string }> = {
+  moving: { color: colors.primary, label: 'Moving', tint: colors.accentTint },
+  idle: { color: colors.success, label: 'Available', tint: 'rgba(16,185,129,0.12)' },
+  late: { color: colors.warning, label: 'Running late', tint: 'rgba(245,158,11,0.14)' },
+  offline: { color: colors.foregroundSubtle, label: 'Offline', tint: colors.muted },
+};
+
+export function Avatar({
+  id,
+  first,
+  last,
+  size = 40,
+}: {
+  id: string;
+  first?: string | null;
+  last?: string | null;
+  size?: number;
+}) {
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: 999,
+        backgroundColor: `hsl(${avatarHue(id)}, 42%, 44%)`,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <Text style={{ color: '#fff', fontWeight: typography.bold, fontSize: size * 0.36 }}>
+        {initials(first, last)}
+      </Text>
+    </View>
+  );
+}
+
+/** Avatar with the design's status dot notched into the bottom-right. */
+export function AvatarWithStatus({
+  id,
+  first,
+  last,
+  status,
+  size = 40,
+}: {
+  id: string;
+  first?: string | null;
+  last?: string | null;
+  status: DriverStatus;
+  size?: number;
+}) {
+  const dot = Math.round(size * 0.3);
+  return (
+    <View style={{ position: 'relative' }}>
+      <Avatar id={id} first={first} last={last} size={size} />
+      <View
+        style={{
+          position: 'absolute',
+          right: -1,
+          bottom: -1,
+          width: dot,
+          height: dot,
+          borderRadius: 999,
+          backgroundColor: (DRIVER_STATUS[status] ?? DRIVER_STATUS.idle).color,
+          borderWidth: 2,
+          borderColor: colors.background,
+        }}
+      />
+    </View>
+  );
+}
+
+export function StatusPill({ status }: { status: DriverStatus }) {
+  const s = DRIVER_STATUS[status] ?? DRIVER_STATUS.idle;
+  return (
+    <View
+      style={{
+        backgroundColor: s.tint,
+        paddingHorizontal: 8,
+        paddingVertical: 3,
+        borderRadius: borderRadius.full,
+      }}
+    >
+      <Text style={{ color: s.color, fontSize: typography.xs, fontWeight: typography.bold }}>
+        {s.label}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Hours-of-service bar (D11 — a session-derived *estimate*, never an ELD
+ * reading). The rules live in hos-display.ts so they can be unit-tested;
+ * this is just their rendering.
+ *
+ * Renders nothing when there is no signal — check `hasHosSignal` to decide
+ * what to show instead.
+ */
+export function HosBar({ hos, width = 44 }: { hos: HosLike; width?: number }) {
+  if (!hasHosSignal(hos)) return null;
+
+  const { remaining, max, label } = hosBarValue(hos);
+  const pct = Math.max(0.04, Math.min(1, remaining / max));
+  const tone = hosTone(remaining);
+  const color =
+    tone === 'danger' ? colors.error : tone === 'warning' ? colors.warning : colors.success;
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+      <View
+        style={{
+          width,
+          height: 4,
+          borderRadius: 999,
+          backgroundColor: colors.subtle,
+          overflow: 'hidden',
+        }}
+      >
+        <View style={{ width: `${pct * 100}%`, height: '100%', backgroundColor: color, borderRadius: 999 }} />
+      </View>
+      <Text style={{ fontSize: typography.sm, fontWeight: typography.semibold, color }}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+export function SearchField({
+  value,
+  onChangeText,
+  placeholder,
+}: {
+  value: string;
+  onChangeText: (v: string) => void;
+  placeholder: string;
+}) {
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 9,
+        height: 42,
+        paddingHorizontal: 12,
+        borderRadius: borderRadius.md,
+        backgroundColor: colors.muted,
+      }}
+    >
+      <Ionicons name="search" size={17} color={colors.foregroundSubtle} />
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor={colors.foregroundSubtle}
+        autoCorrect={false}
+        style={{ flex: 1, fontSize: typography.base, color: colors.foreground }}
+      />
+      {value.length > 0 && (
+        <Pressable onPress={() => onChangeText('')} hitSlop={10}>
+          <Ionicons name="close-circle" size={17} color={colors.foregroundSubtle} />
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+export interface SegItem<K extends string> {
+  k: K;
+  label: string;
+}
+
+/**
+ * Pill filter row.
+ *
+ * Sized so the standard four filters fit a phone width without scrolling: a
+ * horizontally-scrolling row whose content *almost* fits is the worst of
+ * both worlds — the last chip looks sliced off rather than scrollable, and
+ * nobody discovers the gesture. The ScrollView stays for narrow screens and
+ * for surfaces that add a fifth filter, where scrolling is unmistakable.
+ *
+ * The row pins its own height. A horizontal ScrollView placed in a flex
+ * column between fixed content and a growing list will otherwise be
+ * compressed by its siblings, cropping the chips along their bottom edge —
+ * and `minHeight` on a child cannot push back against a parent that has
+ * already been shrunk. Hence flexGrow/flexShrink 0 here and a fixed height
+ * on the chip rather than a minimum.
+ */
+export function SegRow<K extends string>({
+  items,
+  value,
+  onChange,
+  counts,
+}: {
+  items: SegItem<K>[];
+  value: K;
+  onChange: (k: K) => void;
+  counts?: Partial<Record<K, number>>;
+}) {
+  return (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={{ flexGrow: 0, flexShrink: 0 }}
+      contentContainerStyle={{
+        gap: 6,
+        paddingLeft: 24,
+        paddingRight: 16,
+        alignItems: 'center',
+        paddingVertical: 3,
+      }}
+    >
+      {items.map((it) => {
+        const on = it.k === value;
+        return (
+          <Pressable
+            key={it.k}
+            onPress={() => onChange(it.k)}
+            style={{
+              height: 34,
+              paddingHorizontal: 11,
+              borderRadius: borderRadius.full,
+              backgroundColor: on ? colors.primary : colors.muted,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 5,
+            }}
+          >
+            <Text
+              style={{
+                fontSize: typography.sm,
+                fontWeight: typography.semibold,
+                color: on ? colors.primaryForeground : colors.foregroundMuted,
+              }}
+            >
+              {it.label}
+            </Text>
+            {counts?.[it.k] != null && (
+              <View
+                style={{
+                  paddingHorizontal: 5,
+                  paddingVertical: 1,
+                  borderRadius: 999,
+                  backgroundColor: on ? 'rgba(255,255,255,0.22)' : colors.subtle,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: typography.xs,
+                    fontWeight: typography.bold,
+                    color: on ? '#fff' : colors.foregroundSubtle,
+                  }}
+                >
+                  {counts[it.k]}
+                </Text>
+              </View>
+            )}
+          </Pressable>
+        );
+      })}
+    </ScrollView>
+  );
+}
+
+
+/**
+ * The Otoqa orbit mark, ported from the design bundle's `OrbitOSymbol`.
+ *
+ * Pure Views rather than SVG: the shape is four concentric circles, and
+ * `react-native-svg` isn't a dependency of this app — adding one for a logo
+ * would be a poor trade. Geometry follows the design's 100-unit viewBox, so
+ * proportions hold at any size.
+ */
+export function BrandMark({ size = 46, color }: { size?: number; color?: string }) {
+  const accent = color ?? colors.primary;
+  const u = size / 100;
+  const ring = 64 * u;
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      {/* Outer orbit */}
+      <View
+        style={{
+          width: ring,
+          height: ring,
+          borderRadius: ring / 2,
+          borderWidth: 8 * u,
+          borderColor: accent,
+        }}
+      />
+      {/* Solid core */}
+      <View
+        style={{
+          position: 'absolute',
+          width: 24 * u,
+          height: 24 * u,
+          borderRadius: 12 * u,
+          backgroundColor: accent,
+        }}
+      />
+      {/* The travelling dot punches a hole in the ring, then sits in it. */}
+      <View
+        style={{
+          position: 'absolute',
+          left: 66 * u,
+          top: 22 * u,
+          width: 20 * u,
+          height: 20 * u,
+          borderRadius: 10 * u,
+          backgroundColor: colors.background,
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          left: 70 * u,
+          top: 26 * u,
+          width: 12 * u,
+          height: 12 * u,
+          borderRadius: 6 * u,
+          backgroundColor: accent,
+        }}
+      />
+    </View>
+  );
+}
+
+/** Centred brand block — mark, title, one line of context. */
+export function Brand({ title, sub }: { title: string; sub: string }) {
+  return (
+    <View style={{ alignItems: 'center' }}>
+      <BrandMark size={46} />
+      <Text
+        style={{
+          fontSize: typography.lg,
+          fontWeight: typography.bold,
+          color: colors.foreground,
+          marginTop: 14,
+        }}
+      >
+        {title}
+      </Text>
+      <Text
+        style={{
+          fontSize: typography.base,
+          lineHeight: 19,
+          color: colors.foregroundSubtle,
+          marginTop: 5,
+          textAlign: 'center',
+        }}
+      >
+        {sub}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Numeric keypad for code entry (design `signin.jsx`).
+ *
+ * Deliberately replaces the system keyboard on the OTP step: bigger targets,
+ * no keyboard-height reflow, and it fills the space the design allots it.
+ */
+export function Keypad({ onKey, onBack }: { onKey: (k: string) => void; onBack: () => void }) {
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'];
+  return (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+      {keys.map((k, i) =>
+        k === '' ? (
+          <View key={i} style={{ flexBasis: '31%', flexGrow: 1, minHeight: 52 }} />
+        ) : (
+          <Pressable
+            key={i}
+            onPress={() => (k === '⌫' ? onBack() : onKey(k))}
+            style={{
+              flexBasis: '31%',
+              flexGrow: 1,
+              minHeight: 52,
+              borderRadius: borderRadius.lg,
+              backgroundColor: colors.card,
+              borderWidth: 1,
+              borderColor: colors.borderSubtle,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Text
+              style={{
+                fontSize: k === '⌫' ? 17 : 21,
+                fontWeight: typography.semibold,
+                color: colors.foreground,
+              }}
+            >
+              {k}
+            </Text>
+          </Pressable>
+        ),
+      )}
+    </View>
+  );
+}

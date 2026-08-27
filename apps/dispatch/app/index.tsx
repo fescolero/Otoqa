@@ -2,7 +2,7 @@
 import { Redirect } from 'expo-router';
 import { useConvexAuth } from 'convex/react';
 import { ActivityIndicator, View } from 'react-native';
-import { colors } from '@otoqa/mobile-core';
+import { colors } from '../lib/theme';
 
 export default function Index() {
   const { isLoading, isAuthenticated } = useConvexAuth();

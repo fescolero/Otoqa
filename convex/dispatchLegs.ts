@@ -492,6 +492,46 @@ export const assignDriver = mutation({
 
 // Internal version of assignDriver for system calls (auto-assignment, load creation)
 // Always proceeds — returns overlap insight alongside SUCCESS for logging/visibility
+/**
+ * The time ranges a driver would occupy if this load were assigned to them,
+ * computed WITHOUT mutating anything.
+ *
+ * Mirrors assignDriverInternal's leg logic: reuse the PENDING/ACTIVE legs
+ * if there are any, otherwise the single leg it would create spanning the
+ * first stop to the last. Ranges come from the stops, not from whoever is
+ * assigned, so they are identical before and after assignment — which is
+ * what lets the overlap check run as a pre-flight instead of a rollback.
+ *
+ * Keep in sync with assignDriverInternal's leg selection below.
+ */
+async function prospectiveLegRanges(
+  ctx: MutationCtx,
+  loadId: Id<'loadInformation'>,
+): Promise<({ start: number; end: number } | null)[]> {
+  const legs = await ctx.db
+    .query('dispatchLegs')
+    .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .collect();
+
+  const assignable = legs.filter((l) => l.status === 'PENDING' || l.status === 'ACTIVE');
+  if (assignable.length > 0) {
+    return await Promise.all(assignable.map((leg) => getLegTimeRange(ctx, leg)));
+  }
+
+  const stops = await ctx.db
+    .query('loadStops')
+    .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .collect();
+  if (stops.length < 2) return [];
+
+  const sorted = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const start = parseStopDateTime(first.windowBeginDate, first.windowBeginTime);
+  const end = parseStopDateTime(last.windowBeginDate, last.windowBeginTime);
+  return start === null || end === null ? [null] : [{ start, end }];
+}
+
 export const assignDriverInternal = internalMutation({
   args: {
     loadId: v.id('loadInformation'),
@@ -499,8 +539,19 @@ export const assignDriverInternal = internalMutation({
     truckId: v.optional(v.id('trucks')),
     assignedBy: v.string(),
     assignedByName: v.optional(v.string()),
+    // Refuse rather than proceed when the driver is already booked across
+    // this load's window. Auto-assignment passes true; every human-initiated
+    // caller leaves it off and keeps the warn-and-proceed behavior.
+    blockOnOverlap: v.optional(v.boolean()),
   },
-  handler: async (ctx, args): Promise<{ status: 'SUCCESS' | 'ERROR'; message?: string; overlaps?: OverlapInfo[] }> => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    status: 'SUCCESS' | 'ERROR' | 'OVERLAP';
+    message?: string;
+    overlaps?: OverlapInfo[];
+  }> => {
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
       return { status: 'ERROR', message: 'Driver is inactive or not found' };
@@ -512,6 +563,26 @@ export const assignDriverInternal = internalMutation({
     }
     if (load.status === 'Canceled') {
       return { status: 'ERROR', message: 'Cannot assign driver to a canceled load' };
+    }
+
+    // Pre-flight overlap check, for callers that cannot exercise judgment.
+    // A dispatcher looking at the driver's board may knowingly double-book —
+    // maybe the first load runs early, maybe the windows are soft — so the
+    // manual path keeps proceeding with a warning. Auto-assignment has no
+    // such judgment: an overlap there means the route rule or the data is
+    // wrong, and assigning anyway manufactures a conflict nobody requested
+    // and nobody reviews. Runs before any write, so declining needs no
+    // rollback.
+    if (args.blockOnOverlap) {
+      const conflicts = await detectDriverOverlaps(
+        ctx,
+        args.driverId,
+        await prospectiveLegRanges(ctx, args.loadId),
+        args.loadId,
+      );
+      if (conflicts.length > 0) {
+        return { status: 'OVERLAP', overlaps: conflicts };
+      }
     }
 
     const allLegsForLoad = await ctx.db
@@ -903,6 +974,103 @@ export const assignCarrier = mutation({
 });
 
 // Unassign all resources from a load (move back to Open status)
+/**
+ * Clear every resource off a load and return it to Open.
+ *
+ * Extracted from unassignResource so a backfill can reuse the whole
+ * cascade — legs cleared, SYSTEM payables removed, autoAssignOptOut set,
+ * audit row written. Patching the load directly instead skips the leg
+ * cleanup and leaves orphan PENDING legs behind, which this file has been
+ * bitten by before (see the note in applyLoadStatusUpdate's Expired
+ * branch).
+ */
+export async function unassignLoadResources(
+  ctx: MutationCtx,
+  loadId: Id<'loadInformation'>,
+  performer: { userId: string; userName?: string; userEmail?: string },
+  reason?: string,
+  /**
+   * Set autoAssignOptOut so the sweep can't hand the load straight back.
+   * Correct for a dispatcher pulling a resource off — that is a decision to
+   * respect. A backfill correcting the system's own bad assignment is the
+   * opposite: the load should become freely assignable again, including by
+   * a rule added later. Defaults true so the dispatcher path is unchanged.
+   */
+  optOut = true,
+): Promise<{ status: 'SUCCESS' } | { status: 'ERROR'; message: string }> {
+  const load = await ctx.db.get(loadId);
+  if (!load) {
+    return { status: 'ERROR' as const, message: 'Load not found' };
+  }
+
+  const legs = await ctx.db
+    .query('dispatchLegs')
+    .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .collect();
+
+  const now = Date.now();
+  let clearedLegCount = 0;
+
+  // Clear each open leg's assignments.
+  for (const leg of legs) {
+    if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
+      await ctx.db.patch(leg._id, {
+        driverId: undefined,
+        carrierPartnershipId: undefined,
+        truckId: undefined,
+        trailerId: undefined,
+        updatedAt: now,
+      });
+      clearedLegCount++;
+    }
+  }
+
+  // autoAssignOptOut: a dispatcher pulling a resource off a load must not
+  // have the scheduled sweep hand it straight back — the load returns to
+  // Open, which is exactly what getOpenLoadsWithHcr selects for, and the
+  // same route rule still matches. Cleared via loads.setAutoAssignOptOut.
+  await ctx.db.patch(loadId, {
+    primaryDriverId: undefined,
+    primaryCarrierPartnershipId: undefined,
+    status: 'Open',
+    autoAssignOptOut: optOut ? true : undefined,
+    updatedAt: now,
+  });
+
+  // Delete existing SYSTEM payables for cleared legs (non-locked only).
+  for (const leg of legs) {
+    if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
+      const payables = await ctx.db
+        .query('loadPayables')
+        .withIndex('by_leg', (q) => q.eq('legId', leg._id))
+        .collect();
+
+      for (const payable of payables) {
+        if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
+          await ctx.db.delete(payable._id);
+        }
+      }
+    }
+  }
+
+  await logAudit(ctx, {
+    organizationId: load.workosOrgId,
+    entityType: 'load',
+    entityId: loadId as string,
+    entityName: `Load ${load.internalId}`,
+    action: 'resource_unassigned',
+    performedBy: performer.userId,
+    performedByName: performer.userName,
+    performedByEmail: performer.userEmail,
+    description:
+      `Unassigned all resources from load ${load.orderNumber} ` +
+      `(${clearedLegCount} leg${clearedLegCount !== 1 ? 's' : ''} cleared)` +
+      (reason ? ` — ${reason}` : ''),
+  });
+
+  return { status: 'SUCCESS' as const };
+}
+
 export const unassignResource = mutation({
   args: {
     loadId: v.id('loadInformation'),
@@ -913,74 +1081,7 @@ export const unassignResource = mutation({
   returns: assignmentResponseValidator,
   handler: async (ctx, args) => {
     const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    // 1. Validate load exists
-    const load = await ctx.db.get(args.loadId);
-    if (!load) {
-      return { status: 'ERROR' as const, message: 'Load not found' };
-    }
-
-    // 2. Get all PENDING/ACTIVE legs for the load
-    const legs = await ctx.db
-      .query('dispatchLegs')
-      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
-      .collect();
-
-    const now = Date.now();
-    let clearedLegCount = 0;
-
-    // 3. Update each leg - clear all assignments
-    for (const leg of legs) {
-      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-        await ctx.db.patch(leg._id, {
-          driverId: undefined,
-          carrierPartnershipId: undefined,
-          truckId: undefined,
-          trailerId: undefined,
-          updatedAt: now,
-        });
-        clearedLegCount++;
-      }
-    }
-
-    // 4. Update load
-    await ctx.db.patch(args.loadId, {
-      primaryDriverId: undefined,
-      primaryCarrierPartnershipId: undefined,
-      status: 'Open',
-      updatedAt: now,
-    });
-
-    // 5. Delete existing SYSTEM payables for cleared legs (non-locked only)
-    for (const leg of legs) {
-      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-        const payables = await ctx.db
-          .query('loadPayables')
-          .withIndex('by_leg', (q) => q.eq('legId', leg._id))
-          .collect();
-
-        for (const payable of payables) {
-          if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
-            await ctx.db.delete(payable._id);
-          }
-        }
-      }
-    }
-
-    // 6. Audit log
-    await logAudit(ctx, {
-      organizationId: args.workosOrgId,
-      entityType: 'load',
-      entityId: args.loadId as string,
-      entityName: `Load ${load.internalId}`,
-      action: 'resource_unassigned',
-      performedBy: userId,
-      performedByName: userName,
-      performedByEmail: userEmail,
-      description: `Unassigned all resources from load ${load.orderNumber} (${clearedLegCount} leg${clearedLegCount !== 1 ? 's' : ''} cleared)`,
-    });
-
-    // 7. Return success
-    return { status: 'SUCCESS' as const };
+    return await unassignLoadResources(ctx, args.loadId, { userId, userName, userEmail });
   },
 });
 

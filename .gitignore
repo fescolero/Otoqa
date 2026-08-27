@@ -74,3 +74,19 @@ apps/driver/modules/*/android/build/
 
 # Next.js build output in workspace apps (root /.next/ is anchored)
 apps/*/.next/
+
+# Agent tooling installed per-machine (npx convex ai-files install,
+# skills add). Regenerated on demand; the lockfile pins versions for
+# whoever re-runs the install.
+.agents/
+.claude/skills/
+skills-lock.json
+convex/_generated/ai/
+AGENTS.md
+CLAUDE.md
+
+# Stray native prebuild of the driver app (OtoqaDriver): ios/Pods,
+# android/build, dist/, .expo/, node_modules and a .env — ~2.1G of
+# generated output with no package.json and no JS source. The real app
+# is apps/driver/. Safe to delete, not just ignore.
+/mobile/

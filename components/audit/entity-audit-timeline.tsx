@@ -81,6 +81,7 @@ const ACTION_STYLES: Partial<Record<AuditAction, ActionStyle>> = {
   resource_unassigned: { icon: UserMinus, ...RED },
   expired: { icon: Clock, ...AMBER },
   expiry_warned: { icon: AlertTriangle, ...AMBER },
+  auto_assign_skipped: { icon: UserMinus, ...AMBER },
 };
 
 const DEFAULT_STYLE: ActionStyle = { icon: History, bg: 'bg-muted', fg: 'text-muted-foreground' };

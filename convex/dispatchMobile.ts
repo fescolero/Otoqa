@@ -286,6 +286,73 @@ async function assignmentsByStatus(
  * the web TMS create dispatchLegs, not loadCarrierAssignments — without
  * the merge their Board is empty (same model gap listDriverHistory
  * closes). Leg rows are read-only on the client (source: 'leg'). */
+/**
+ * Open loads — the web-TMS backlog.
+ *
+ * The board previously read two sources: brokered carrier assignments, and
+ * dispatch legs. A load that is `status: 'Open'` has neither — no broker
+ * assignment because nobody brokered it, and no leg because a leg is what
+ * dispatching one *creates*. So the entire population this app exists to
+ * assign was invisible to it, and the horizon tiles read zero while the
+ * backlog sat in the TMS.
+ *
+ * Bounded on purpose, per the design's premise that a phone never shows
+ * "all unassigned": a date window off the by_org_status_first_stop index,
+ * plus a hard cap. `truncated` tells the client the tiles are a floor
+ * rather than a total, so a big backlog never renders as a small one.
+ */
+const OPEN_BACKLOG_CAP = 200;
+const OPEN_BACKLOG_DAYS_BACK = 1;
+const OPEN_BACKLOG_DAYS_FORWARD = 14;
+
+const dateKey = (ms: number) => new Date(ms).toISOString().split('T')[0];
+
+async function openBacklog(ctx: QueryCtx, resolved: ResolvedOrg, now: number) {
+  const from = dateKey(now - OPEN_BACKLOG_DAYS_BACK * 86_400_000);
+  const to = dateKey(now + OPEN_BACKLOG_DAYS_FORWARD * 86_400_000);
+  const orgScopes = [...new Set([...resolved.driverOrgIds, resolved.externalId])];
+
+  const loads: Doc<'loadInformation'>[] = [];
+  for (const orgId of orgScopes) {
+    loads.push(
+      ...(await ctx.db
+        .query('loadInformation')
+        .withIndex('by_org_status_first_stop', (q) =>
+          q.eq('workosOrgId', orgId).eq('status', 'Open').gte('firstStopDate', from).lte('firstStopDate', to),
+        )
+        .take(OPEN_BACKLOG_CAP + 1)),
+    );
+  }
+
+  // A load that already has a leg is dispatched, whatever its status says —
+  // it must not appear twice on one board.
+  const legged = new Set<string>();
+  for (const orgId of orgScopes) {
+    for (const status of ['PENDING', 'ACTIVE'] as const) {
+      for (const leg of await ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_org_status', (q) => q.eq('workosOrgId', orgId).eq('status', status))
+        .collect()) {
+        legged.add(leg.loadId as string);
+      }
+    }
+  }
+
+  const seen = new Set<string>();
+  const fresh = loads.filter((l) => {
+    const key = l._id as string;
+    if (legged.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  fresh.sort((a, b) => (a.firstStopDate ?? '').localeCompare(b.firstStopDate ?? ''));
+
+  return {
+    loads: fresh.slice(0, OPEN_BACKLOG_CAP),
+    truncated: fresh.length > OPEN_BACKLOG_CAP,
+  };
+}
+
 export const listActiveAssignments = query({
   args: {},
   handler: async (ctx) => {
@@ -406,7 +473,44 @@ export const listActiveAssignments = query({
       });
     }
 
-    return [...assignmentRows, ...legRows];
+    // Open loads: the web-TMS backlog, which has neither a carrier assignment
+    // nor a leg. Shaped like the other rows so the board's bucketing, tiles
+    // and assign affordance treat them uniformly.
+    const { loads: openLoads, truncated } = await openBacklog(ctx, resolved, now);
+    const openRows = await Promise.all(
+      openLoads
+        .filter((load) => !seenLoads.has(load._id as string))
+        .map(async (load) => {
+          const stops = await ctx.db
+            .query('loadStops')
+            .withIndex('by_load', (q) => q.eq('loadId', load._id))
+            .collect();
+          const facets = await getLoadFacets(ctx, load._id);
+          return {
+            _id: load._id as unknown as Id<'loadCarrierAssignments'>,
+            loadId: load._id,
+            source: 'open' as const,
+            status: 'AWARDED' as const,
+            openBacklogTruncated: truncated,
+            load: {
+              _id: load._id,
+              internalId: load.internalId,
+              customerName: load.customerName,
+              trackingStatus: load.trackingStatus,
+              effectiveMiles: load.effectiveMiles,
+              equipmentType: load.equipmentType,
+              tripNumber: facets.trip,
+              hcr: facets.hcr,
+              facets: facets.all,
+            },
+            stops: stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber),
+            driver: null,
+            driverLocation: null,
+          };
+        }),
+    );
+
+    return [...assignmentRows, ...legRows, ...openRows];
   },
 });
 
@@ -664,7 +768,42 @@ export const declineOffer = mutation({
   },
 });
 
-/** Fleet list — active drivers + last ping + current load (mirrors getDrivers). */
+/**
+ * Fleet list (v8 design, `lib-dispatch/drivers.jsx`). Beyond the name and
+ * phone the old version returned, each row now carries what the design's
+ * DriverRow actually renders: a data-backed status, the truck, the route
+ * they're running, an HOS estimate and today's leg count.
+ *
+ * Legs are fetched once per org scope and grouped in memory rather than
+ * queried per driver — the per-driver fan-out is already 3 reads (location
+ * + the two HOS session queries), and this list renders the whole fleet.
+ */
+const STALE_FIX_MS = 30 * 60_000;
+const LATE_GRACE_MS = 15 * 60_000;
+
+export type DriverListStatus = 'moving' | 'idle' | 'late' | 'offline';
+
+/**
+ * Every state is a checkable condition, never a guess:
+ *   offline — rolling, but the GPS went quiet (this is "tracking lost")
+ *   moving  — rolling with a fresh fix
+ *   late    — should have started a leg by now and hasn't
+ *   idle    — nothing active: genuinely available
+ */
+function driverStatus(
+  hasActiveLeg: boolean,
+  lastFixAt: number | null,
+  earliestPendingStartMs: number | null,
+  now: number,
+): DriverListStatus {
+  if (hasActiveLeg) {
+    if (lastFixAt == null || now - lastFixAt > STALE_FIX_MS) return 'offline';
+    return 'moving';
+  }
+  if (earliestPendingStartMs != null && earliestPendingStartMs < now - LATE_GRACE_MS) return 'late';
+  return 'idle';
+}
+
 export const listDrivers = query({
   args: {},
   handler: async (ctx) => {
@@ -672,11 +811,102 @@ export const listDrivers = query({
     const drivers = await orgDrivers(ctx, resolved);
     const inProgress = await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS');
 
-    return Promise.all(
+    // One pass for the org's open legs, then group by driver.
+    const orgScopes = [...new Set([...resolved.driverOrgIds, resolved.externalId])];
+    const openLegs: Doc<'dispatchLegs'>[] = [];
+    for (const orgId of orgScopes) {
+      for (const status of ['PENDING', 'ACTIVE'] as const) {
+        openLegs.push(
+          ...(await ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_org_status', (q) => q.eq('workosOrgId', orgId).eq('status', status))
+            .collect()),
+        );
+      }
+    }
+    const legsByDriver = new Map<string, Doc<'dispatchLegs'>[]>();
+    for (const leg of openLegs) {
+      if (!leg.driverId) continue;
+      const key = leg.driverId as string;
+      const list = legsByDriver.get(key);
+      if (list) list.push(leg);
+      else legsByDriver.set(key, [leg]);
+    }
+
+    const now = Date.now();
+    const dayStart = new Date(now).setHours(0, 0, 0, 0);
+    const dayEnd = dayStart + 86_400_000;
+
+    // Trucks and stops repeat across drivers/legs — read each at most once.
+    const truckCache = new Map<string, string | null>();
+    const truckUnit = async (truckId: Id<'trucks'> | undefined) => {
+      if (!truckId) return null;
+      const key = truckId as string;
+      if (truckCache.has(key)) return truckCache.get(key)!;
+      const truck = await ctx.db.get(truckId);
+      const unit = truck?.unitId ?? null;
+      truckCache.set(key, unit);
+      return unit;
+    };
+    const cityOf = async (stopId: Id<'loadStops'>) => {
+      const stop = await ctx.db.get(stopId);
+      return stop?.city ?? stop?.state ?? null;
+    };
+
+    return await Promise.all(
       drivers.map(async (driver) => {
-        const lastLocation = await latestLocation(ctx, driver._id);
-        const currentAssignment = inProgress.find((a) => a.assignedDriverId === driver._id) ?? null;
-        const load = currentAssignment ? await ctx.db.get(currentAssignment.loadId) : null;
+        const legs = legsByDriver.get(driver._id as string) ?? [];
+        const activeLeg = legs.find((l) => l.status === 'ACTIVE') ?? null;
+        const pendingStarts = legs
+          .filter((l) => l.status === 'PENDING' && l.scheduledStartMs != null)
+          .map((l) => l.scheduledStartMs!)
+          .sort((a, b) => a - b);
+        // Both work models are live (see listActiveAssignments, which merges
+        // the same two): web-TMS legs, and carrier assignments for the Clerk
+        // owner-operator path. A driver rolling on an assignment is rolling.
+        const activeAssignment =
+          inProgress.find((a) => a.assignedDriverId === driver._id) ?? null;
+        const onActiveWork = !!activeLeg || !!activeAssignment;
+
+        const location = await latestLocation(ctx, driver._id);
+        const lastFixAt = location?.recordedAt ?? null;
+        const status = driverStatus(onActiveWork, lastFixAt, pendingStarts[0] ?? null, now);
+
+        // The route the design puts under the name — only knowable while
+        // work is running. Idle drivers have no route line (GPS gives us
+        // coordinates, not a city; there is no reverse geocode here).
+        let route: { from: string | null; to: string | null } | null = null;
+        let currentLoad: { _id: Id<'loadInformation'>; internalId: string } | null = null;
+        if (activeLeg) {
+          const [from, to] = await Promise.all([
+            cityOf(activeLeg.startStopId),
+            cityOf(activeLeg.endStopId),
+          ]);
+          route = { from, to };
+          const load = await ctx.db.get(activeLeg.loadId);
+          if (load) currentLoad = { _id: load._id, internalId: load.internalId };
+        } else if (activeAssignment) {
+          const load = await ctx.db.get(activeAssignment.loadId);
+          if (load) {
+            currentLoad = { _id: load._id, internalId: load.internalId };
+            const stops = await ctx.db
+              .query('loadStops')
+              .withIndex('by_load', (q) => q.eq('loadId', load._id))
+              .collect();
+            const ordered = stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+            if (ordered.length > 0) {
+              const first = ordered[0];
+              const last = ordered[ordered.length - 1];
+              route = {
+                from: first.city ?? first.state ?? null,
+                to: last.city ?? last.state ?? null,
+              };
+            }
+          }
+        }
+
+        const hos = await hosForDriver(ctx, driver._id);
+
         return {
           _id: driver._id,
           firstName: driver.firstName,
@@ -684,8 +914,26 @@ export const listDrivers = query({
           phone: driver.phone,
           employmentStatus: driver.employmentStatus,
           currentTruckId: driver.currentTruckId,
-          lastLocation,
-          currentLoad: load ? { _id: load._id, internalId: load.internalId } : null,
+          truckUnitId: await truckUnit(activeLeg?.truckId ?? driver.currentTruckId),
+          status,
+          route,
+          currentLoad,
+          /**
+           * What's on their plate today, not a completed count: legs scheduled
+           * to start today, plus an in-progress carrier assignment when no leg
+           * already represents it (the two models don't overlap per driver).
+           */
+          loadsToday:
+            legs.filter(
+              (l) =>
+                l.scheduledStartMs != null &&
+                l.scheduledStartMs >= dayStart &&
+                l.scheduledStartMs < dayEnd,
+            ).length + (!activeLeg && activeAssignment ? 1 : 0),
+          hos,
+          hosLabel: hosChipLabel(hos),
+          lastFixAt,
+          lastLocation: location,
         };
       }),
     );
@@ -871,6 +1119,41 @@ export const suggestDriversForLoad = query({
  * path can't serve WorkOS staff (assignments key on the CLERK org id).
  * Conflict-aware per §4.6: returns alreadyAssigned instead of clobbering.
  */
+/**
+ * Ranked candidates for a TMS load — the same scorer suggestDriversForLoad
+ * uses, keyed by loadId rather than by a carrier assignment.
+ *
+ * Serves any load that commits through the leg model, whether it has no leg
+ * yet (status Open) or an existing driverless one: assignDriverInternal
+ * patches assignable legs when they exist and creates one when they don't.
+ * Deliberately not gated on status — a driverless PENDING leg needs a driver
+ * exactly as much as an untouched open load, and gating here would leave
+ * that row on the board with nothing to press.
+ */
+export const suggestDriversForTmsLoad = query({
+  args: { loadId: v.id('loadInformation') },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const load = await ctx.db.get(args.loadId);
+    const orgScopes = new Set([...resolved.driverOrgIds, resolved.externalId]);
+    if (!load || !orgScopes.has(load.workosOrgId)) {
+      throw new ConvexError('Load not found');
+    }
+    const stops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', load._id))
+      .collect();
+    const pickup = stops
+      .filter((st) => st.stopType === 'PICKUP')
+      .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
+    const origin =
+      pickup?.latitude != null && pickup?.longitude != null
+        ? { lat: pickup.latitude, lng: pickup.longitude }
+        : null;
+    return await rankDriversForOrigin(ctx, resolved, origin);
+  },
+});
+
 export const assignDriverToLoad = mutation({
   args: {
     assignmentId: v.id('loadCarrierAssignments'),
@@ -925,8 +1208,22 @@ const PLAN_MAX_DEADHEAD_MI = 150;
 /** Slack added between a drop and the next pickup (unload + check-out). */
 const PLAN_CHAIN_BUFFER_MS = 45 * 60 * 1000;
 
+/**
+ * What committing a piece of planned work actually touches.
+ *
+ * The two backlogs commit differently: a brokered load patches its carrier
+ * assignment, an open TMS load gets a dispatch leg created. Carrying the
+ * reference on the item lets one planner chain both without the commit path
+ * having to guess which it's holding.
+ */
+export type WorkRef =
+  | { kind: 'assignment'; assignmentId: Id<'loadCarrierAssignments'> }
+  | { kind: 'load'; loadId: Id<'loadInformation'> };
+
 interface PlanItem {
-  assignment: Doc<'loadCarrierAssignments'>;
+  ref: WorkRef;
+  /** Null for open TMS loads — they have no carrier assignment. */
+  assignment: Doc<'loadCarrierAssignments'> | null;
   load: Doc<'loadInformation'> | null;
   facets: { trip?: string; hcr?: string };
   stopCount: number;
@@ -937,6 +1234,9 @@ interface PlanItem {
   endT: number;
   origin: { lat: number; lng: number } | null;
   dest: { lat: number; lng: number } | null;
+  /** Endpoint cities, for the run route line. Display only. */
+  originCity: string | null;
+  destCity: string | null;
 }
 
 const lightLoad = (
@@ -970,82 +1270,134 @@ const lightLoad = (
  * the proposal never double-books. Top 3 candidates returned per run —
  * warned candidates ranked, never hidden.
  */
+/**
+ * Shape the unassigned AWARDED backlog into chainable items.
+ *
+ * Shared by suggestPlan and boardCapacity so the two can never disagree
+ * about what is plannable or where a load starts and ends.
+ */
+async function shapeBacklog(ctx: QueryCtx, resolved: ResolvedOrg) {
+  const now = Date.now();
+
+  /** Windows, endpoints and cities — identical whichever backlog it came from. */
+  const shapeOne = async (
+    ref: WorkRef,
+    loadId: Id<'loadInformation'>,
+    assignment: Doc<'loadCarrierAssignments'> | null,
+  ) => {
+    const load = await ctx.db.get(loadId);
+    const facets = load ? await getLoadFacets(ctx, load._id) : {};
+    const stops = (
+      await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', loadId))
+        .collect()
+    ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+    const pickup = stops.filter((st) => st.stopType === 'PICKUP')[0] ?? stops[0];
+    const lastStop = stops[stops.length - 1];
+    const startT = pickup?.windowBeginTime ? Date.parse(pickup.windowBeginTime) : NaN;
+    const startCloseT = pickup?.windowEndTime ? Date.parse(pickup.windowEndTime) : startT;
+    const endT = lastStop?.windowEndTime
+      ? Date.parse(lastStop.windowEndTime)
+      : lastStop?.windowBeginTime
+        ? Date.parse(lastStop.windowBeginTime)
+        : NaN;
+    if (!Number.isFinite(startT) || !Number.isFinite(endT)) {
+      return { ref, assignment, load, facets, reason: 'Missing appointment windows' };
+    }
+    return {
+      ref,
+      assignment,
+      load,
+      facets,
+      stopCount: stops.length,
+      startT,
+      startCloseT: Number.isFinite(startCloseT) ? startCloseT : startT,
+      endT,
+      origin:
+        pickup?.latitude != null && pickup?.longitude != null
+          ? { lat: pickup.latitude, lng: pickup.longitude }
+          : null,
+      dest:
+        lastStop?.latitude != null && lastStop?.longitude != null
+          ? { lat: lastStop.latitude, lng: lastStop.longitude }
+          : null,
+      originCity: pickup?.city ?? pickup?.state ?? null,
+      destCity: lastStop?.city ?? lastStop?.state ?? null,
+    };
+  };
+
+  const brokered = (await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')).filter(
+    (a) => !a.assignedDriverId,
+  );
+  const { loads: openLoads, truncated } = await openBacklog(ctx, resolved, now);
+
+  const shaped = await Promise.all([
+    ...brokered.map((a) =>
+      shapeOne({ kind: 'assignment', assignmentId: a._id }, a.loadId, a),
+    ),
+    ...openLoads.map((l) => shapeOne({ kind: 'load', loadId: l._id }, l._id, null)),
+  ]);
+
+  const unplannable = shaped
+    .filter((x): x is Extract<typeof x, { reason: string }> => 'reason' in x)
+    .map((x) => ({
+      ref: x.ref,
+      assignmentId: x.ref.kind === 'assignment' ? x.ref.assignmentId : null,
+      loadId: x.ref.kind === 'load' ? x.ref.loadId : null,
+      load: lightLoad(x.load, x.facets),
+      reason: x.reason,
+    }));
+
+  const plannable = (shaped.filter((x) => !('reason' in x)) as PlanItem[])
+    // Past-due work is off the board entirely (see lib/board isActionable), so
+    // the planner must not propose it either — suggesting a truck take a
+    // pickup whose window closed is worse than staying silent.
+    .filter((x) => x.startT >= now)
+    .sort((a, b) => a.startT - b.startT || (refKey(a.ref) < refKey(b.ref) ? -1 : 1));
+
+  // The open backlog is capped, so every count derived from it is a floor.
+  // Saying so is the difference between "200" and "at least 200".
+  return { plannable, unplannable, truncated };
+}
+
+/** Stable string for deterministic ordering across both backlogs. */
+function refKey(ref: WorkRef): string {
+  return ref.kind === 'assignment' ? `a:${ref.assignmentId}` : `l:${ref.loadId}`;
+}
+
+/**
+ * Greedy chaining onto the first run whose tail can feasibly reach the next
+ * pickup. Pure — deterministic for a given snapshot, which is what lets
+ * convex-test pin the bundling behavior.
+ */
+function chainIntoRuns(plannable: PlanItem[]): { items: PlanItem[]; deadheads: number[] }[] {
+  const runs: { items: PlanItem[]; deadheads: number[] }[] = [];
+  for (const it of plannable) {
+    let placed = false;
+    for (const run of runs) {
+      const tail = run.items[run.items.length - 1];
+      if (!tail.dest || !it.origin) continue;
+      const deadhead = milesBetween(tail.dest.lat, tail.dest.lng, it.origin.lat, it.origin.lng);
+      if (deadhead > PLAN_MAX_DEADHEAD_MI) continue;
+      const arrival = tail.endT + PLAN_CHAIN_BUFFER_MS + (deadhead / PLAN_AVG_MPH) * 3600_000;
+      if (arrival > it.startCloseT) continue;
+      run.items.push(it);
+      run.deadheads.push(deadhead);
+      placed = true;
+      break;
+    }
+    if (!placed) runs.push({ items: [it], deadheads: [] });
+  }
+  return runs;
+}
+
 export const suggestPlan = query({
   args: {},
   handler: async (ctx) => {
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');
-    const backlog = (await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')).filter(
-      (a) => !a.assignedDriverId,
-    );
-
-    const shaped: (PlanItem | { assignment: Doc<'loadCarrierAssignments'>; load: Doc<'loadInformation'> | null; facets: { trip?: string; hcr?: string }; reason: string })[] =
-      await Promise.all(
-        backlog.map(async (assignment) => {
-          const load = await ctx.db.get(assignment.loadId);
-          const facets = load ? await getLoadFacets(ctx, load._id) : {};
-          const stops = (
-            await ctx.db
-              .query('loadStops')
-              .withIndex('by_load', (q) => q.eq('loadId', assignment.loadId))
-              .collect()
-          ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-          const pickup = stops.filter((s) => s.stopType === 'PICKUP')[0] ?? stops[0];
-          const lastStop = stops[stops.length - 1];
-          const startT = pickup?.windowBeginTime ? Date.parse(pickup.windowBeginTime) : NaN;
-          const startCloseT = pickup?.windowEndTime ? Date.parse(pickup.windowEndTime) : startT;
-          const endT = lastStop?.windowEndTime
-            ? Date.parse(lastStop.windowEndTime)
-            : lastStop?.windowBeginTime
-              ? Date.parse(lastStop.windowBeginTime)
-              : NaN;
-          if (!Number.isFinite(startT) || !Number.isFinite(endT)) {
-            return { assignment, load, facets, reason: 'Missing appointment windows' };
-          }
-          return {
-            assignment,
-            load,
-            facets,
-            stopCount: stops.length,
-            startT,
-            startCloseT: Number.isFinite(startCloseT) ? startCloseT : startT,
-            endT,
-            origin:
-              pickup?.latitude != null && pickup?.longitude != null
-                ? { lat: pickup.latitude, lng: pickup.longitude }
-                : null,
-            dest:
-              lastStop?.latitude != null && lastStop?.longitude != null
-                ? { lat: lastStop.latitude, lng: lastStop.longitude }
-                : null,
-          };
-        }),
-      );
-
-    const unplannable = shaped
-      .filter((s): s is Extract<typeof s, { reason: string }> => 'reason' in s)
-      .map((s) => ({ assignmentId: s.assignment._id, load: lightLoad(s.load, s.facets), reason: s.reason }));
-    const plannable = shaped
-      .filter((s): s is PlanItem => !('reason' in s))
-      .sort((a, b) => a.startT - b.startT || (a.assignment._id < b.assignment._id ? -1 : 1));
-
-    // Greedy chaining onto the first run whose tail can feasibly reach it.
-    const runs: { items: PlanItem[]; deadheads: number[] }[] = [];
-    for (const it of plannable) {
-      let placed = false;
-      for (const run of runs) {
-        const tail = run.items[run.items.length - 1];
-        if (!tail.dest || !it.origin) continue;
-        const deadhead = milesBetween(tail.dest.lat, tail.dest.lng, it.origin.lat, it.origin.lng);
-        if (deadhead > PLAN_MAX_DEADHEAD_MI) continue;
-        const arrival = tail.endT + PLAN_CHAIN_BUFFER_MS + (deadhead / PLAN_AVG_MPH) * 3600_000;
-        if (arrival > it.startCloseT) continue;
-        run.items.push(it);
-        run.deadheads.push(deadhead);
-        placed = true;
-        break;
-      }
-      if (!placed) runs.push({ items: [it], deadheads: [] });
-    }
+    const { plannable, unplannable } = await shapeBacklog(ctx, resolved);
+    const runs = chainIntoRuns(plannable);
 
     // Rank per run; never suggest one driver for two runs in one plan.
     const taken = new Set<string>();
@@ -1059,7 +1411,10 @@ export const suggestPlan = query({
       if (top[0]) taken.add(top[0]._id);
       proposed.push({
         loads: run.items.map((it) => ({
-          assignmentId: it.assignment._id,
+          ref: it.ref,
+          // Present only for brokered work; open TMS loads carry loadId.
+          assignmentId: it.ref.kind === 'assignment' ? it.ref.assignmentId : null,
+          loadId: it.ref.kind === 'load' ? it.ref.loadId : null,
           load: lightLoad(it.load, it.facets),
           stopCount: it.stopCount,
           start: it.startT,
@@ -1087,14 +1442,18 @@ export const applyPlan = mutation({
     picks: v.array(
       v.object({
         driverId: v.id('drivers'),
-        assignmentIds: v.array(v.id('loadCarrierAssignments')),
+        assignmentIds: v.optional(v.array(v.id('loadCarrierAssignments'))),
+        /** Open TMS loads in the same run — committed by creating a leg. */
+        loadIds: v.optional(v.array(v.id('loadInformation'))),
       }),
     ),
   },
   handler: async (ctx, args) => {
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const identity = await ctx.auth.getUserIdentity();
     const results: {
-      assignmentId: Id<'loadCarrierAssignments'>;
+      assignmentId?: Id<'loadCarrierAssignments'>;
+      loadId?: Id<'loadInformation'>;
       success: boolean;
       reason?: string;
     }[] = [];
@@ -1103,7 +1462,7 @@ export const applyPlan = mutation({
       if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
         throw new ConvexError('Driver not found in your organization');
       }
-      for (const assignmentId of pick.assignmentIds) {
+      for (const assignmentId of pick.assignmentIds ?? []) {
         const assignment = await ctx.db.get(assignmentId);
         if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
           throw new ConvexError('Assignment not found');
@@ -1134,6 +1493,34 @@ export const applyPlan = mutation({
         });
         results.push({ assignmentId, success: true });
       }
+
+      // Open TMS loads commit through the leg model, not by patching an
+      // assignment that doesn't exist. Same guarded internal the web uses, so
+      // conflicts are reported rather than clobbered.
+      for (const loadId of pick.loadIds ?? []) {
+        const load = await ctx.db.get(loadId);
+        const orgScopes = new Set([...resolved.driverOrgIds, resolved.externalId]);
+        if (!load || !orgScopes.has(load.workosOrgId)) {
+          results.push({ loadId, success: false, reason: 'Load not found' });
+          continue;
+        }
+        // 'OVERLAP' is unreachable here — only auto-assignment passes
+        // blockOnOverlap — but the mutation's type admits it.
+        const res: { status: 'SUCCESS' | 'ERROR' | 'OVERLAP'; message?: string } = await ctx.runMutation(
+          internal.dispatchLegs.assignDriverInternal,
+          {
+            loadId,
+            driverId: pick.driverId,
+            assignedBy: identity?.subject ?? 'dispatch-app',
+            assignedByName: `${driver.firstName} ${driver.lastName}`,
+          },
+        );
+        results.push({
+          loadId,
+          success: res.status === 'SUCCESS',
+          reason: res.status === 'SUCCESS' ? undefined : (res.message ?? 'Could not assign'),
+        });
+      }
     }
     return { results };
   },
@@ -1141,6 +1528,166 @@ export const applyPlan = mutation({
 
 
 /** Upsert this device's Expo push token for high-severity alert fan-out (§5.7). */
+/**
+ * Capacity-first board data (§5.9, design `lib-dispatch/capacity.jsx`).
+ *
+ * The design's premise: a phone never shows "all unassigned". It shows work
+ * bounded by *fleet size* — the trucks that need loads — plus the bundled
+ * runs the backlog chains into.
+ *
+ * Deliberately cheaper than suggestPlan, which is why it can back the
+ * landing screen: suggestPlan ranks every driver once per proposed run
+ * (a location and an HOS read apiece, per run). This inverts the direction —
+ * each driver is read once, each backlog load once, and the driver→work
+ * scoring is pure haversine over what's already in memory. Reads are
+ * O(drivers + backlog), not O(runs × drivers).
+ */
+export const boardCapacity = query({
+  args: {},
+  handler: async (ctx) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const { plannable, unplannable, truncated } = await shapeBacklog(ctx, resolved);
+    const chained = chainIntoRuns(plannable);
+
+    // ── Bundled runs ────────────────────────────────────────────────────
+    const runs = chained.map((run) => {
+      const head = run.items[0];
+      const tail = run.items[run.items.length - 1];
+      // Full point list, then squash repeats: a drop and the next pickup in
+      // the same city should read as one waypoint, not two.
+      const points: (string | null)[] = [];
+      for (const it of run.items) points.push(it.originCity, it.destCity);
+      const named = points.filter((c): c is string => !!c);
+      const squashed = named.filter((c, i) => i === 0 || c !== named[i - 1]);
+      return {
+        key: refKey(head.ref),
+        work: run.items.map((it) => it.ref),
+        assignmentIds: run.items
+          .map((it) => (it.ref.kind === 'assignment' ? it.ref.assignmentId : null))
+          .filter((x): x is Id<'loadCarrierAssignments'> => x !== null),
+        loadIds: run.items
+          .map((it) => (it.ref.kind === 'load' ? it.ref.loadId : null))
+          .filter((x): x is Id<'loadInformation'> => x !== null),
+        loadCount: run.items.length,
+        from: squashed[0] ?? null,
+        to: squashed.length > 1 ? squashed[squashed.length - 1] : null,
+        via: squashed.slice(1, -1),
+        startT: head.startT,
+        endT: tail.endT,
+        loadedMiles: run.items.reduce((n, it) => n + (it.load?.effectiveMiles ?? 0), 0),
+        deadheadMiles: Math.round(run.deadheads.reduce((n, d) => n + d, 0)),
+        stopCount: run.items.reduce((n, it) => n + it.stopCount, 0),
+        origin: head.origin,
+        customerName: head.load?.customerName ?? null,
+        // On HCR contract work the same two cities repeat all day, so the
+        // route line identifies nothing. The contract and trip numbers are
+        // what actually distinguish one run from the next.
+        hcrs: [...new Set(run.items.map((it) => it.facets.hcr).filter((x): x is string => !!x))],
+        trips: run.items.map((it) => it.facets.trip).filter((x): x is string => !!x),
+        loads: run.items.map((it) => lightLoad(it.load, it.facets)),
+      };
+    });
+
+    // ── Open trucks ─────────────────────────────────────────────────────
+    const drivers = await orgDrivers(ctx, resolved);
+    const inProgress = await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS');
+
+    const orgScopes = [...new Set([...resolved.driverOrgIds, resolved.externalId])];
+    const openLegs: Doc<'dispatchLegs'>[] = [];
+    for (const orgId of orgScopes) {
+      for (const status of ['PENDING', 'ACTIVE'] as const) {
+        openLegs.push(
+          ...(await ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_org_status', (q) => q.eq('workosOrgId', orgId).eq('status', status))
+            .collect()),
+        );
+      }
+    }
+    const busyDrivers = new Set<string>();
+    for (const leg of openLegs) if (leg.driverId) busyDrivers.add(leg.driverId as string);
+    for (const a of inProgress) if (a.assignedDriverId) busyDrivers.add(a.assignedDriverId as string);
+
+    // Bounded by fleet size, not backlog size — and it empties out as work
+    // is assigned, which is the whole point of the section.
+    const open = drivers.filter((d) => !busyDrivers.has(d._id as string));
+
+    const openTrucks = await Promise.all(
+      open.map(async (driver) => {
+        const location = await latestLocation(ctx, driver._id);
+        const hos = await hosForDriver(ctx, driver._id);
+        const truck = driver.currentTruckId ? await ctx.db.get(driver.currentTruckId) : null;
+
+        const warns: string[] = [];
+        if (hos.onShift && hos.windowRemainingHours != null && hos.windowRemainingHours < 3) {
+          warns.push(`~${hos.windowRemainingHours}h left in 14h window (est)`);
+        }
+        if (hos.cycleRemainingHours < 5) {
+          warns.push(`~${hos.cycleRemainingHours}h left in 70h cycle (est)`);
+        }
+
+        // Nearest work first. Without a fix we cannot rank by distance, so
+        // fall back to soonest-starting rather than inventing a position.
+        const scored = runs
+          .map((run) => ({
+            run,
+            deadheadMi:
+              location && run.origin
+                ? Math.round(
+                    milesBetween(location.latitude, location.longitude, run.origin.lat, run.origin.lng),
+                  )
+                : null,
+          }))
+          .sort((a, b) => {
+            if (a.deadheadMi != null && b.deadheadMi != null) return a.deadheadMi - b.deadheadMi;
+            return a.run.startT - b.run.startT;
+          })
+          .slice(0, 3);
+
+        return {
+          _id: driver._id,
+          firstName: driver.firstName,
+          lastName: driver.lastName,
+          phone: driver.phone,
+          truckUnitId: truck?.unitId ?? null,
+          hos,
+          hosLabel: hosChipLabel(hos),
+          warns,
+          lastFixAt: location?.recordedAt ?? null,
+          suggestions: scored.map((sc) => ({
+            key: sc.run.key,
+            assignmentIds: sc.run.assignmentIds,
+            loadIds: sc.run.loadIds,
+            loadCount: sc.run.loadCount,
+            from: sc.run.from,
+            to: sc.run.to,
+            via: sc.run.via,
+            hcrs: sc.run.hcrs,
+            trips: sc.run.trips,
+            startT: sc.run.startT,
+            loadedMiles: sc.run.loadedMiles,
+            customerName: sc.run.customerName,
+            deadheadMi: sc.deadheadMi,
+          })),
+        };
+      }),
+    );
+
+    return {
+      runs,
+      openTrucks,
+      /**
+       * Everything waiting on a driver: both backlogs, chainable or not.
+       * shapeBacklog already spans them and drops past-due, so this agrees
+       * with what the board shows rather than being a second opinion.
+       */
+      unassignedCount: plannable.length + unplannable.length,
+      /** True when the open backlog hit its cap — the count is a floor. */
+      unassignedTruncated: truncated,
+    };
+  },
+});
+
 export const registerPushToken = mutation({
   args: { token: v.string(), platform: v.union(v.literal('ios'), v.literal('android')) },
   handler: async (ctx, args) => {
@@ -1537,7 +2084,9 @@ export const assignDriverToLoadsWeb = mutation({
         results.push({ internalId: null, success: false, reason: 'Load not found' });
         continue;
       }
-      const res: { status: 'SUCCESS' | 'ERROR'; message?: string } = await ctx.runMutation(
+      // 'OVERLAP' is unreachable here — only auto-assignment passes
+      // blockOnOverlap — but the mutation's type admits it.
+      const res: { status: 'SUCCESS' | 'ERROR' | 'OVERLAP'; message?: string } = await ctx.runMutation(
         internal.dispatchLegs.assignDriverInternal,
         {
           loadId,

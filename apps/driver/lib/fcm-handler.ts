@@ -95,6 +95,7 @@
  */
 
 import * as Notifications from 'expo-notifications';
+import { END_SHIFT_REMINDER_TYPE } from './end-shift-notification';
 import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 import { log } from './log';
@@ -511,6 +512,19 @@ Notifications.setNotificationHandler({
         shouldShowList: false,
         shouldPlaySound: false,
         shouldSetBadge: false,
+      };
+    }
+    // End-shift reminder: visible, never audible. The driver may still be
+    // rolling through the yard when it fires, and a chime is the wrong way
+    // to say "you're back". The Android channel silences it too; this
+    // covers the foreground path and iOS, where the channel has no say.
+    if (type === END_SHIFT_REMINDER_TYPE) {
+      return {
+        shouldShowAlert: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: false,
+        shouldSetBadge: true,
       };
     }
     // Driver-facing pushes (dispatch messages, etc.) — default visible.

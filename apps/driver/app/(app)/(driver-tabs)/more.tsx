@@ -34,7 +34,7 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useClerk } from '@clerk/clerk-expo';
 import { performSignOut } from '../../../lib/logout';
 import { useMutation, useQuery } from 'convex/react';
@@ -77,6 +77,13 @@ export default function MoreScreen() {
 
   const [signOutOpen, setSignOutOpen] = useState(false);
   const [endShiftOpen, setEndShiftOpen] = useState(false);
+
+  // Deep link from the end-shift reminder notification (frame 04c): open the
+  // confirmation sheet straight away rather than making the driver find the
+  // button. Guarded on there actually being a shift to end — a stale link
+  // after the shift closed should land on the tab, not on an empty sheet.
+  const { endShift: endShiftParam } = useLocalSearchParams<{ endShift?: string }>();
+  const consumedEndShiftParam = useRef(false);
   const [isEnding, setIsEnding] = useState(false);
   const [roleSwitchOpen, setRoleSwitchOpen] = useState(false);
   const [isSwitchingRole, setIsSwitchingRole] = useState(false);
@@ -122,6 +129,18 @@ export default function MoreScreen() {
   const onDuty = !!activeSession;
   const elapsedLabel = formatElapsed(activeSession?.startedAt);
   const startedLabel = formatClock(activeSession?.startedAt);
+
+  // Consume ?endShift=1 once the session query has resolved. `activeSession`
+  // is undefined while loading and null when there is none, so waiting for a
+  // truthy value avoids opening the sheet against a session we don't have
+  // yet — and the ref keeps a re-render from re-opening it after the driver
+  // dismisses it with the param still in the URL.
+  useEffect(() => {
+    if (consumedEndShiftParam.current) return;
+    if (endShiftParam !== '1' || !activeSession) return;
+    consumedEndShiftParam.current = true;
+    setEndShiftOpen(true);
+  }, [endShiftParam, activeSession]);
 
   const handleEndShift = async () => {
     if (!activeSession) return;

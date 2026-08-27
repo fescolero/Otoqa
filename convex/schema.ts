@@ -1129,6 +1129,19 @@ export default defineSchema({
     priority: v.number(), // For multiple matches, lower = higher priority
     isActive: v.boolean(),
 
+    // Service calendar (feature A). Which days this route actually runs,
+    // evaluated against the LOAD'S SERVICE DATE (loadInformation
+    // .firstStopDate), not the wall clock — "Monday" means Monday at the
+    // pickup facility. firstStopDate is already a business-local YYYY-MM-DD
+    // (sliced off the stop's offset-carrying windowBeginDate), so no
+    // timezone field is needed here and none should be added.
+    // Mirrors recurringLoadTemplates' fields deliberately: same names, same
+    // 0=Sun convention, same YYYY-MM-DD exclusion format.
+    // activeDays absent = runs every day (every pre-existing row).
+    activeDays: v.optional(v.array(v.number())), // 0=Sun, 1=Mon, ... 6=Sat
+    excludeFederalHolidays: v.optional(v.boolean()),
+    customExclusions: v.optional(v.array(v.string())), // ["2026-12-25"]
+
     // Metadata
     name: v.optional(v.string()), // Friendly name like "John's Amazon Route"
     notes: v.optional(v.string()),
@@ -1232,6 +1245,27 @@ export default defineSchema({
     scheduledEnabled: v.boolean(), // Run on schedule
     scheduleIntervalMinutes: v.optional(v.number()), // Minutes between scheduled runs
     lastScheduledRunAt: v.optional(v.number()), // Last scheduled run timestamp (ms)
+
+    // Outcome of the most recent scheduled sweep (R9). Before this, the run
+    // counted its results, console.log'd a line and dropped them — so a rule
+    // that silently matched nothing looked exactly like one that was
+    // working. Day restrictions make that worse, since declining is now a
+    // normal outcome rather than a sign of misconfiguration.
+    // One row per org, overwritten each run: enough to answer "did the last
+    // run do anything, and why not", without a log table to grow and prune.
+    lastRun: v.optional(
+      v.object({
+        at: v.number(),
+        processed: v.number(),
+        assigned: v.number(),
+        skipped: v.number(),
+        errors: v.number(),
+        // Per-outcome counts, e.g. [{ action: 'DAY_RESTRICTED', count: 3 }].
+        // An array rather than a record so adding an action code needs no
+        // schema change.
+        byAction: v.array(v.object({ action: v.string(), count: v.number() })),
+      }),
+    ),
 
     // Audit
     updatedBy: v.string(),
@@ -1578,6 +1612,15 @@ export default defineSchema({
       state: v.string(),       // e.g. "US-CA"
       portionBps: v.number(),  // basis points; entries sum to 10000
     }))),
+
+    // Auto-assignment opt-out (R11). Set when a human deliberately returns
+    // this load to Open — unassigning a driver, or canceling a carrier
+    // assignment. Without it the scheduled sweep re-matches the same route
+    // rule and hands the load straight back to the resource that was just
+    // removed, undoing the dispatcher within scheduleIntervalMinutes.
+    // Absent/false = eligible for auto-assignment (every legacy row).
+    // Cleared via loads.setAutoAssignOptOut.
+    autoAssignOptOut: v.optional(v.boolean()),
 
     // Denormalized First Stop Date (for efficient date range filtering)
     // Source of truth: loadStops where sequenceNumber = 1, windowBeginDate
@@ -3119,6 +3162,19 @@ export default defineSchema({
     // the settlement review's shift line; honored by the NEW pay engine only
     // (calculateSessionPay) — legacy paySession ignores it.
     payProfileOverrideId: v.optional(v.id('payProfiles')),
+
+    // The org yard the shift opened inside. Stamped once by the yard
+    // evaluator (convex/yardGeofence.ts) from the first ARRIVED whose ping
+    // lands within minutes of startedAt — i.e. the driver was already
+    // parked in the fence when they tapped Start Shift. Absent when the
+    // shift started outside every fence (home, customer facility, an org
+    // with no yards configured) or when no fix landed in the window.
+    //
+    // The anchor for the end-shift reminder: coming back INTO this fence is
+    // what nudges a driver who forgot to end their shift. See
+    // docs/end-shift-reminder-spec.md.
+    startYardId: v.optional(v.id('yardLocations')),
+
     softCap10hAt: v.optional(v.float64()), // stamped when 10h banner shown
     softCap14hAt: v.optional(v.float64()), // stamped when 14h banner shown
 

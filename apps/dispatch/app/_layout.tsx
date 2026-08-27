@@ -12,7 +12,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as SecureStore from 'expo-secure-store';
 import { ClerkProvider } from '@clerk/clerk-expo';
 import { PostHogProvider, usePostHog } from 'posthog-react-native';
-import { colors, typography } from '@otoqa/mobile-core';
+import { colors, typography } from '../lib/theme';
 import { DispatchAuthProvider } from '../lib/convex';
 import {
   captureAppException,

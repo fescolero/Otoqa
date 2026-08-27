@@ -1,12 +1,93 @@
 import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import type { MutationCtx } from './_generated/server';
+import type { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
+import { matchRouteAssignment, overlappingDays, DAY_NAMES } from './lib/routeMatch';
 
 /**
  * Route Assignments - Maps recurring routes (HCR+Trip) to drivers/carriers
  * Used by the auto-assignment system to automatically assign loads
  */
+
+/**
+ * Normalize a route's service calendar before it is stored.
+ *
+ * "Absent = runs every day" is the ONE representation of unrestricted, so
+ * a full seven-day selection is stored as absent rather than as
+ * [0,1,2,3,4,5,6]. Otherwise the two would behave differently for a load
+ * with no service date, which routeMatch declines for any restricted route.
+ *
+ * An empty array is rejected rather than silently treated as "every day" —
+ * a dispatcher who deselects every day means "never", and reading that as
+ * "always" is the worst possible guess.
+ */
+/**
+ * Reject a rule that would compete with an existing one on the same
+ * HCR + Trip for the same day.
+ *
+ * Paused rules are ignored: an inactive rule matches nothing, so it has no
+ * claim to reserve. Before service days this was a flat "one rule per
+ * HCR + Trip", which is why a second rule for different days was refused.
+ */
+async function assertNoDayCollision(
+  ctx: MutationCtx,
+  candidate: {
+    workosOrgId: string;
+    hcr: string;
+    tripNumber?: string;
+    activeDays?: number[];
+    excludeId?: Id<'routeAssignments'>;
+  },
+): Promise<void> {
+  const siblings = await ctx.db
+    .query('routeAssignments')
+    .withIndex('by_org_hcr_trip', (q) =>
+      q
+        .eq('workosOrgId', candidate.workosOrgId)
+        .eq('hcr', candidate.hcr)
+        .eq('tripNumber', candidate.tripNumber),
+    )
+    .collect();
+
+  for (const sibling of siblings) {
+    if (candidate.excludeId && sibling._id === candidate.excludeId) continue;
+    if (!sibling.isActive) continue;
+
+    const clash = overlappingDays(candidate, sibling);
+    if (clash.length === 0) continue;
+
+    const route = `HCR ${candidate.hcr}${candidate.tripNumber ? ` / Trip ${candidate.tripNumber}` : ''}`;
+    const which = sibling.name ? `"${sibling.name}"` : 'another rule';
+    throw new ConvexError(
+      `${which} already covers ${route} on ${clash.map((d) => DAY_NAMES[d]).join(', ')}. ` +
+        `Give the two rules different days, or pause the existing one.`,
+    );
+  }
+}
+
+function normalizeActiveDays(activeDays: number[] | undefined): number[] | undefined {
+  if (activeDays === undefined) return undefined;
+  if (activeDays.length === 0) {
+    throw new ConvexError('Select at least one day, or turn off the day restriction');
+  }
+  const unique = [...new Set(activeDays)].sort((a, b) => a - b);
+  if (unique.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) {
+    throw new ConvexError('Days must be integers 0 (Sunday) through 6 (Saturday)');
+  }
+  return unique.length === 7 ? undefined : unique;
+}
+
+function validateExclusions(dates: string[] | undefined): string[] | undefined {
+  if (dates === undefined) return undefined;
+  for (const d of dates) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      throw new ConvexError(`Exclusion dates must be YYYY-MM-DD (got "${d}")`);
+    }
+  }
+  return [...new Set(dates)].sort();
+}
 
 // List all route assignments for an organization
 export const list = query({
@@ -26,6 +107,9 @@ export const list = query({
       carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
       priority: v.number(),
       isActive: v.boolean(),
+      activeDays: v.optional(v.array(v.number())),
+      excludeFederalHolidays: v.optional(v.boolean()),
+      customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -109,6 +193,9 @@ export const get = query({
       carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
       priority: v.number(),
       isActive: v.boolean(),
+      activeDays: v.optional(v.array(v.number())),
+      excludeFederalHolidays: v.optional(v.boolean()),
+      customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -157,6 +244,8 @@ export const getByRoute = query({
     workosOrgId: v.string(),
     hcr: v.string(),
     tripNumber: v.optional(v.string()),
+    // Business-local YYYY-MM-DD. Omit to ignore route service calendars.
+    serviceDate: v.optional(v.string()),
   },
   returns: v.union(
     v.object({
@@ -169,6 +258,9 @@ export const getByRoute = query({
       carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
       priority: v.number(),
       isActive: v.boolean(),
+      activeDays: v.optional(v.array(v.number())),
+      excludeFederalHolidays: v.optional(v.boolean()),
+      customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -180,32 +272,16 @@ export const getByRoute = query({
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
-    // First try exact match (HCR + Trip)
-    if (args.tripNumber) {
-      const exactMatch = await ctx.db
-        .query('routeAssignments')
-        .withIndex('by_org_hcr_trip', (q) =>
-          q
-            .eq('workosOrgId', args.workosOrgId)
-            .eq('hcr', args.hcr)
-            .eq('tripNumber', args.tripNumber)
-        )
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .first();
-
-      if (exactMatch) return exactMatch;
-    }
-
-    // Fall back to HCR-only match
-    const hcrMatch = await ctx.db
-      .query('routeAssignments')
-      .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', args.workosOrgId).eq('hcr', args.hcr))
-      .filter((q) =>
-        q.and(q.eq(q.field('isActive'), true), q.eq(q.field('tripNumber'), undefined))
-      )
-      .first();
-
-    return hcrMatch;
+    // Shared matcher (lib/routeMatch.ts). This query previously implemented
+    // only the first two tiers, so the UI's preview disagreed with what the
+    // assignment engine would actually pick.
+    const match = await matchRouteAssignment(ctx, {
+      workosOrgId: args.workosOrgId,
+      hcr: args.hcr,
+      trip: args.tripNumber,
+      serviceDate: args.serviceDate,
+    });
+    return match.route;
   },
 });
 
@@ -225,6 +301,9 @@ export const getByDriver = query({
       carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
       priority: v.number(),
       isActive: v.boolean(),
+      activeDays: v.optional(v.array(v.number())),
+      excludeFederalHolidays: v.optional(v.boolean()),
+      customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -260,6 +339,9 @@ export const getByCarrier = query({
       carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
       priority: v.number(),
       isActive: v.boolean(),
+      activeDays: v.optional(v.array(v.number())),
+      excludeFederalHolidays: v.optional(v.boolean()),
+      customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -288,6 +370,10 @@ export const create = mutation({
     driverId: v.optional(v.id('drivers')),
     carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
     priority: v.optional(v.number()),
+    // Service calendar — see lib/routeMatch.ts. Omit for "runs every day".
+    activeDays: v.optional(v.array(v.number())),
+    excludeFederalHolidays: v.optional(v.boolean()),
+    customExclusions: v.optional(v.array(v.string())),
     name: v.optional(v.string()),
     notes: v.optional(v.string()),
     createdBy: v.string(),
@@ -329,22 +415,17 @@ export const create = mutation({
       }
     }
 
-    // Check for duplicate route assignment
-    const existing = await ctx.db
-      .query('routeAssignments')
-      .withIndex('by_org_hcr_trip', (q) =>
-        q
-          .eq('workosOrgId', args.workosOrgId)
-          .eq('hcr', args.hcr)
-          .eq('tripNumber', args.tripNumber)
-      )
-      .first();
-
-    if (existing) {
-      throw new ConvexError(
-        `Route assignment already exists for HCR ${args.hcr}${args.tripNumber ? ` / Trip ${args.tripNumber}` : ''}`
-      );
-    }
+    // Two rules may share an HCR + Trip as long as they never claim the
+    // same day — "Dana runs Mon/Wed/Fri, Sam runs Tue/Thu" is the whole
+    // point of service days. Only a genuine day collision is rejected,
+    // because then which rule wins depends on priority and nobody reading
+    // the list would be able to tell.
+    await assertNoDayCollision(ctx, {
+      workosOrgId: args.workosOrgId,
+      hcr: args.hcr,
+      tripNumber: args.tripNumber,
+      activeDays: normalizeActiveDays(args.activeDays),
+    });
 
     const now = Date.now();
 
@@ -356,6 +437,11 @@ export const create = mutation({
       carrierPartnershipId: args.carrierPartnershipId,
       priority: args.priority ?? 100, // Default priority
       isActive: true,
+      activeDays: normalizeActiveDays(args.activeDays),
+      excludeFederalHolidays: args.excludeFederalHolidays || undefined,
+      customExclusions: validateExclusions(args.customExclusions)?.length
+        ? validateExclusions(args.customExclusions)
+        : undefined,
       name: args.name,
       notes: args.notes,
       createdBy: userId,
@@ -388,6 +474,11 @@ export const update = mutation({
     driverId: v.optional(v.id('drivers')),
     carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
     priority: v.optional(v.number()),
+    // Service calendar. Send all seven days (or an empty exclusion list) to
+    // clear a restriction; normalizeActiveDays stores that as absent.
+    activeDays: v.optional(v.array(v.number())),
+    excludeFederalHolidays: v.optional(v.boolean()),
+    customExclusions: v.optional(v.array(v.string())),
     name: v.optional(v.string()),
     notes: v.optional(v.string()),
     isActive: v.optional(v.boolean()),
@@ -444,6 +535,38 @@ export const update = mutation({
     if (updates.name !== undefined) updateData.name = updates.name;
     if (updates.notes !== undefined) updateData.notes = updates.notes;
     if (updates.isActive !== undefined) updateData.isActive = updates.isActive;
+
+    // Calendar fields normalize to `undefined` when unrestricted, and
+    // patching a key to undefined removes it — which is exactly the
+    // "clear the restriction" path.
+    if (updates.activeDays !== undefined) {
+      updateData.activeDays = normalizeActiveDays(updates.activeDays);
+    }
+    if (updates.excludeFederalHolidays !== undefined) {
+      updateData.excludeFederalHolidays = updates.excludeFederalHolidays || undefined;
+    }
+    if (updates.customExclusions !== undefined) {
+      const cleaned = validateExclusions(updates.customExclusions);
+      updateData.customExclusions = cleaned && cleaned.length > 0 ? cleaned : undefined;
+    }
+
+    // `update` never had the duplicate check `create` did, so a collision
+    // could always be produced by editing rather than creating. Now that
+    // rules legitimately share an HCR + Trip across different days, the
+    // check matters on both paths — against the values AFTER this edit.
+    await assertNoDayCollision(ctx, {
+      workosOrgId: existing.workosOrgId,
+      hcr: (updateData.hcr as string | undefined) ?? existing.hcr,
+      tripNumber:
+        'tripNumber' in updateData
+          ? (updateData.tripNumber as string | undefined)
+          : existing.tripNumber,
+      activeDays:
+        'activeDays' in updateData
+          ? (updateData.activeDays as number[] | undefined)
+          : existing.activeDays,
+      excludeId: id,
+    });
 
     await ctx.db.patch(id, updateData);
 
@@ -559,6 +682,16 @@ export const getSettings = query({
       scheduledEnabled: v.boolean(),
       scheduleIntervalMinutes: v.optional(v.number()),
       lastScheduledRunAt: v.optional(v.number()),
+      lastRun: v.optional(
+        v.object({
+          at: v.number(),
+          processed: v.number(),
+          assigned: v.number(),
+          skipped: v.number(),
+          errors: v.number(),
+          byAction: v.array(v.object({ action: v.string(), count: v.number() })),
+        }),
+      ),
       updatedBy: v.string(),
       updatedAt: v.number(),
     }),

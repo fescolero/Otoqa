@@ -31,6 +31,35 @@ interface AutoAssignmentSettingsProps {
   userId: string;
 }
 
+/**
+ * Human labels for the outcome codes autoAssignPendingLoads reports.
+ * Unknown codes fall through to the raw string rather than being hidden —
+ * a new decline reason showing up as "OVERLAP_CONFLICT" is still far more
+ * useful than it silently vanishing from the breakdown.
+ */
+const ACTION_LABELS: Record<string, string> = {
+  ASSIGNED_DRIVER: 'Assigned to a driver',
+  ASSIGNED_CARRIER: 'Assigned to a carrier',
+  NO_MATCH: 'No route rule for that HCR',
+  ALREADY_ASSIGNED: 'Already assigned',
+  OPTED_OUT: 'Excluded after a manual unassignment',
+  DAY_RESTRICTED: "Route doesn't run on that day",
+  NO_SERVICE_DATE: 'No pickup date yet',
+  OVERLAP_CONFLICT: 'Driver already booked',
+  DRIVER_INACTIVE: 'Driver inactive',
+  CARRIER_INACTIVE: 'Carrier inactive',
+  ERROR: 'Error',
+};
+
+function formatRunTime(ms: number): string {
+  const mins = Math.round((Date.now() - ms) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
 export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmentSettingsProps) {
   const [isSaving, setIsSaving] = React.useState(false);
 
@@ -185,6 +214,44 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
               />
             </div>
           </div>
+
+          {/* Last run — without this, a rule that silently matches nothing
+              looks exactly like one that is working. */}
+          {settings?.lastRun && (
+            <>
+              <Separator />
+              <div className="space-y-2">
+                <div className="flex items-baseline justify-between">
+                  <h4 className="text-sm font-medium">Last scheduled run</h4>
+                  <span className="text-xs text-muted-foreground">
+                    {formatRunTime(settings.lastRun.at)}
+                  </span>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  {settings.lastRun.processed} load
+                  {settings.lastRun.processed === 1 ? '' : 's'} checked ·{' '}
+                  <span className="text-foreground font-medium">
+                    {settings.lastRun.assigned} assigned
+                  </span>{' '}
+                  · {settings.lastRun.skipped} skipped
+                  {settings.lastRun.errors > 0 && ` · ${settings.lastRun.errors} errors`}
+                </p>
+                {settings.lastRun.byAction.length > 0 && (
+                  <ul className="space-y-1 pt-1">
+                    {settings.lastRun.byAction.map((entry) => (
+                      <li
+                        key={entry.action}
+                        className="flex items-center justify-between text-xs text-muted-foreground"
+                      >
+                        <span>{ACTION_LABELS[entry.action] ?? entry.action}</span>
+                        <span className="tabular-nums">{entry.count}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </>
+          )}
 
           {/* Save Button */}
           <div className="flex justify-end pt-4">

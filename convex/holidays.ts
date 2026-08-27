@@ -105,7 +105,7 @@ export function getFederalHolidaysForYear(year: number): string[] {
 // Cache for holiday lookups (keyed by year)
 const holidayCache = new Map<number, Set<string>>();
 
-function getHolidaySet(year: number): Set<string> {
+export function getHolidaySet(year: number): Set<string> {
   if (!holidayCache.has(year)) {
     holidayCache.set(year, new Set(getFederalHolidaysForYear(year)));
   }

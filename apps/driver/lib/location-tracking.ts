@@ -37,6 +37,7 @@ import {
 } from './analytics';
 import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
 import { startShiftStatus, updateShiftStatus, endShiftStatus } from 'otoqa-shift-status';
+import { evaluateShiftReminder, clearShiftReminder } from './end-shift-reminder';
 import { setBootState, clearBootState } from './boot-state';
 import { noteSyncFailure, noteSyncSuccess } from './sync-stall-alert';
 
@@ -814,6 +815,25 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     `BG task: filtered ${addedCount}/${locations.length} to save (rejected: ${rejectedAccuracy} accuracy, ${rejectedDistance} distance, ${rejectedStale} stale${savedHeartbeat ? ', +heartbeat' : ''})`,
   );
 
+  // End-shift reminder: fold the newest accepted fix into the yard-fence
+  // state machine. Newest only, mirroring the server evaluator, which also
+  // takes one ping per batch — the intermediate fixes in a task run can only
+  // re-derive the same answer. Awaited (not fired off) so the storage write
+  // completes before the headless task's runtime can be torn down, and
+  // deliberately outside the queue write below: this must never be able to
+  // cost us a ping.
+  const newestSaved = locationsToSave[locationsToSave.length - 1];
+  if (newestSaved && state.sessionId) {
+    await evaluateShiftReminder({
+      organizationId: state.organizationId,
+      sessionId: state.sessionId,
+      shiftStartedAt: state.startedAt,
+      latitude: newestSaved.latitude,
+      longitude: newestSaved.longitude,
+      recordedAt: newestSaved.recordedAt,
+    });
+  }
+
   // Step 5: Persist to the queue.
   //
   // The `usedFallback` signal + its `bg_fallback_locations` AsyncStorage
@@ -1289,6 +1309,12 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
     // here, and a lingering 'On shift' card after the shift ended is
     // worse than any teardown-ordering nicety.
     void endShiftStatus();
+
+    // Same reasoning for the end-shift reminder: the shift is over, so its
+    // yard-fence state is dead. Session-stamped, so a leftover copy would be
+    // re-armed rather than misapplied — but dropping it here keeps a
+    // reinstall-free device from carrying yesterday's anchor around.
+    void clearShiftReminder();
 
     // Stop sync interval and foreground polling
     stopSyncInterval();
@@ -2087,6 +2113,20 @@ async function startForegroundPolling(organizationId: string) {
             longitude: location.coords.longitude,
             time: now,
           };
+
+          // End-shift reminder — same fix stream the server evaluates, so
+          // the phone and the dispatcher timeline can't disagree about
+          // which side of the fence the driver is on.
+          if (state.sessionId) {
+            await evaluateShiftReminder({
+              organizationId,
+              sessionId: state.sessionId,
+              shiftStartedAt: state.startedAt,
+              latitude: location.coords.latitude,
+              longitude: location.coords.longitude,
+              recordedAt: location.timestamp,
+            });
+          }
 
           const reason = enoughDistance ? 'distance' : enoughTime ? 'time' : 'heartbeat';
           trackWatchLocationSaved({

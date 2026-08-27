@@ -1187,10 +1187,14 @@ export const cancelAssignment = mutation({
       });
     }
 
-    // Update load status back to Open
+    // Update load status back to Open. autoAssignOptOut for the same reason
+    // as dispatchLegs.unassignResource: the partnership may still be ACTIVE,
+    // so the sweep would re-award this load to the carrier whose assignment
+    // was just canceled.
     await ctx.db.patch(assignment.loadId, {
       status: 'Open',
       trackingStatus: 'Pending',
+      autoAssignOptOut: true,
       updatedAt: now,
     });
 

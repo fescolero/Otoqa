@@ -42,11 +42,24 @@ export const updateLastScheduledRunAt = internalMutation({
   args: {
     settingsId: v.id('autoAssignmentSettings'),
     lastScheduledRunAt: v.number(),
+    // Outcome of the run that just finished (R9). Overwrites the previous
+    // one — this is a "what happened last time" panel, not a log.
+    lastRun: v.optional(
+      v.object({
+        at: v.number(),
+        processed: v.number(),
+        assigned: v.number(),
+        skipped: v.number(),
+        errors: v.number(),
+        byAction: v.array(v.object({ action: v.string(), count: v.number() })),
+      }),
+    ),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
     await ctx.db.patch(args.settingsId, {
       lastScheduledRunAt: args.lastScheduledRunAt,
+      ...(args.lastRun ? { lastRun: args.lastRun } : {}),
     });
     return null;
   },
@@ -105,6 +118,14 @@ export const runScheduledAutoAssignment = internalAction({
         await ctx.runMutation(internal.autoAssignmentCron.updateLastScheduledRunAt, {
           settingsId: setting._id,
           lastScheduledRunAt: now,
+          lastRun: {
+            at: now,
+            processed: result.processed,
+            assigned: result.assigned,
+            skipped: result.skipped,
+            errors: result.errors,
+            byAction: result.byAction,
+          },
         });
 
         return result;

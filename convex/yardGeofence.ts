@@ -30,7 +30,22 @@ import {
  * evaluated; accuracy worse than GEOFENCE_MAX_ACCURACY_METERS is ignored;
  * a ping not newer than the last recorded event for the pair is ignored
  * (offline backlogs can't rewrite history).
+ *
+ * Second job: stamping `driverSessions.startYardId` — the fence the shift
+ * opened inside. That's the anchor for the end-shift reminder (returning to
+ * it is what nudges a driver who forgot to clock out), and it gives the
+ * dispatcher timeline a "started at Bay 4". See
+ * docs/end-shift-reminder-spec.md.
  */
+
+// How long after startedAt an ARRIVED can still claim the start-yard slot.
+// The first fix is captured within seconds of Start Shift (the foreground
+// watch has no previous point to rate-limit against) and `recordedAt` is
+// capture time, not sync time — so this survives a yard with no signal.
+// The window exists only to cover a cold GPS lock; it is deliberately far
+// shorter than any plausible drive between two yards, so a fence the driver
+// enters later in the shift can never claim the slot.
+const START_YARD_WINDOW_MS = 5 * 60_000;
 
 export async function evaluateYards(
   ctx: MutationCtx,
@@ -48,6 +63,11 @@ export async function evaluateYards(
     .query('yardLocations')
     .withIndex('by_org', (q) => q.eq('workosOrgId', args.organizationId).eq('isDeleted', false))
     .take(100);
+
+  // Loaded lazily on the first ARRIVED — nearly every ping fires nothing,
+  // and this is the only thing the evaluator needs the session doc for.
+  // `undefined` = not looked up yet; `null` = looked up and gone.
+  let session: Doc<'driverSessions'> | null | undefined;
 
   for (const yard of yards) {
     const entryRadius =
@@ -95,6 +115,28 @@ export async function evaluateYards(
       distanceMeters: distance,
       accuracy: ping.accuracy,
     });
+
+    if (eventType !== 'ARRIVED') continue;
+
+    // Start-yard anchor. At most one patch per session, ever: the window
+    // closes five minutes into the shift, so an ARRIVED later in the day
+    // can never claim the slot. The lookup itself still runs on each
+    // ARRIVED of a session that has no start yard — a handful of reads per
+    // shift, since crossing a yard boundary is a rare event, not a
+    // per-ping one. Overlapping fences race here: whichever the loop
+    // reaches first wins, which is arbitrary but stable.
+    //
+    // This is the evaluator's only write to `driverSessions`, a table read
+    // by dispatcher dashboards. Keep it one-shot: per-ping writes here
+    // would invalidate those subscriptions on every GPS batch, which is the
+    // exact reason ping-rate state lives on loadTrackingState instead.
+    if (session === undefined) session = await ctx.db.get(args.sessionId);
+    if (!session || session.startYardId) continue;
+    const sinceStart = ping.recordedAt - session.startedAt;
+    if (sinceStart < 0 || sinceStart > START_YARD_WINDOW_MS) continue;
+
+    await ctx.db.patch(session._id, { startYardId: yard._id });
+    session = { ...session, startYardId: yard._id };
   }
 
   return null;

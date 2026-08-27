@@ -43,7 +43,7 @@ import {
 } from '@/components/web';
 
 import { AutoAssignModal } from '@/components/route-assignments/auto-assign-modal';
-import type { CombinedAssignment } from '@/components/route-assignments/route-assignments-table';
+import type { CombinedAssignment } from '@/components/route-assignments/types';
 
 // ─── helpers ────────────────────────────────────────────────────────────
 
@@ -175,7 +175,20 @@ function AssigneeCell({
 
 function ScheduleCell({ row }: { row: Row }) {
   if (row.type === 'external') {
-    return <span className="text-[12px] text-[var(--text-tertiary)] truncate">On import</span>;
+    // A route assignment reacts to imported loads, so its "schedule" is the
+    // set of service days it will accept — matched against the load's pickup
+    // date. No days configured means it takes any day.
+    if (!row.schedule || row.schedule.length === 0) {
+      return <span className="text-[12px] text-[var(--text-tertiary)] truncate">On import</span>;
+    }
+    return (
+      <div className="min-w-0 overflow-hidden">
+        <div className="text-[12px] text-foreground truncate">{formatSchedule(row.schedule)}</div>
+        <div className="text-[11px] text-[var(--text-tertiary)] mt-px truncate">
+          On import
+        </div>
+      </div>
+    );
   }
   return (
     <div className="min-w-0 overflow-hidden">
@@ -296,6 +309,8 @@ export default function RouteAssignmentsPage() {
           isActive: a.isActive,
           createdAt: a.createdAt,
           routeAssignmentData: a,
+          // Absent = runs every day; ScheduleCell falls back to "On import".
+          schedule: a.activeDays,
         });
       });
     }

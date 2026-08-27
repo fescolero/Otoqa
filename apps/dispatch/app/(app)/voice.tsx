@@ -17,7 +17,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useAction, useConvex, useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
-import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { borderRadius, colors, typography } from '../../lib/theme';
 import {
   localDateStr,
   matchByRef,
@@ -630,7 +630,10 @@ export default function VoiceScreen() {
         const r = rows ?? [];
         const rolling = r.filter((x) => x.status === 'IN_PROGRESS').length;
         const awarded = r.filter((x) => x.status === 'AWARDED');
-        const unassigned = awarded.filter((x) => !x.assignedDriverId).length;
+        // Same predicate the Board renders with: open TMS loads carry no
+        // assignedDriverId at all, so keying off it would report a backlog
+        // of zero while the board shows work needing a driver.
+        const unassigned = awarded.filter((x) => !x.driver).length;
         const openOffers = (offers ?? []).filter((o) => o.status === 'OFFERED').length;
         let text = `${rolling} rolling, ${awarded.length} awarded (${unassigned} unassigned)`;
         if (openOffers) text += `, ${openOffers} open offer${openOffers === 1 ? '' : 's'}`;

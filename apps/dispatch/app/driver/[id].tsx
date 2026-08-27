@@ -8,8 +8,9 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
-import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { borderRadius, colors, typography } from '../../lib/theme';
 import { displayLoadId } from '../../lib/format';
+import { loadIdentity } from '../../lib/run-identity';
 import type { Id } from '@otoqa/convex-client';
 
 const DAY_MS = 86_400_000;
@@ -64,10 +65,10 @@ function LoadRow({
       </Text>
       <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
         <Text style={{ flex: 1, color: colors.foreground, fontSize: typography.base, fontWeight: typography.semibold }}>
-          {displayLoadId(load.internalId)}
-          {load.customerName ? (
-            <Text style={{ color: colors.foregroundMuted, fontWeight: typography.medium }}> {load.customerName}</Text>
-          ) : null}
+          {loadIdentity(load)}
+          <Text style={{ color: colors.foregroundMuted, fontWeight: typography.medium }}>
+            {load.customerName ? ` ${load.customerName}` : ''} · {displayLoadId(load.internalId)}
+          </Text>
         </Text>
         <Ionicons name="chevron-forward" size={16} color={colors.foregroundMuted} />
       </View>
@@ -227,8 +228,11 @@ export default function DriverDetailScreen() {
               style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 12, marginBottom: 8 }}
             >
               <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold }}>
-                  {displayLoadId(l.internalId)}
+                <Text
+                  numberOfLines={1}
+                  style={{ flex: 1, color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold }}
+                >
+                  {loadIdentity(l)}
                 </Text>
                 <Text style={{ color: l.status === 'IN_PROGRESS' ? colors.primary : colors.foregroundMuted, fontSize: typography.xs, fontWeight: typography.bold }}>
                   {statusWord(l.status)}
@@ -237,9 +241,8 @@ export default function DriverDetailScreen() {
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs, marginTop: 3 }}>
                 {[
                   l.customerName,
-                  l.tripNumber ? `Trip ${l.tripNumber}` : null,
-                  l.hcr ? `HCR ${l.hcr}` : null,
                   `${l.stopCount} stop${l.stopCount === 1 ? '' : 's'}`,
+                  displayLoadId(l.internalId),
                 ]
                   .filter(Boolean)
                   .join(' · ')}

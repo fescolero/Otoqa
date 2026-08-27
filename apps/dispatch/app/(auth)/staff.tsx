@@ -8,7 +8,9 @@
 import * as React from 'react';
 import { ActivityIndicator, Alert, Pressable, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { Ionicons } from '@expo/vector-icons';
+import { borderRadius, colors, typography } from '../../lib/theme';
+import { Brand } from '../../lib/ui';
 import { useActiveAuth } from '../../lib/convex';
 
 export default function StaffSignInScreen() {
@@ -41,8 +43,12 @@ export default function StaffSignInScreen() {
   return (
     <View style={s.screen}>
       <View style={s.body}>
-        <Text style={s.brand}>Company staff</Text>
-        <Text style={s.sub}>Sign in with your company Google Workspace account</Text>
+        {/* Same brand block as the phone step — one level deep shouldn't
+            look like a different app. */}
+        <Brand
+          title="Company staff"
+          sub="Sign in with your company Google Workspace account"
+        />
 
         {state === 'waiting' ? (
           <View style={s.waitCard}>
@@ -74,6 +80,7 @@ export default function StaffSignInScreen() {
         )}
 
         <Pressable style={s.back} onPress={() => router.back()}>
+          <Ionicons name="arrow-back" size={15} color={colors.foregroundMuted} />
           <Text style={s.backText}>Sign in with a phone number instead</Text>
         </Pressable>
       </View>
@@ -135,6 +142,12 @@ const s = {
   },
   errorTitle: { color: colors.destructive, fontSize: typography.sm, fontWeight: typography.bold },
   errorSub: { color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 4 },
-  back: { marginTop: 26, alignItems: 'center' as const },
+  back: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    gap: 7,
+    marginTop: 26,
+  },
   backText: { color: colors.foregroundMuted, fontSize: typography.sm },
 };

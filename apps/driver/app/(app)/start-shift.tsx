@@ -32,6 +32,7 @@ import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 import { useAppMode, useDriver } from './_layout';
 import { startSessionTracking } from '../../lib/location-tracking';
+import { refreshYardFences } from '../../lib/yard-fences';
 import { usePostHog } from 'posthog-react-native';
 import { Icon, type IconName } from '../../lib/design-icons';
 import {
@@ -117,6 +118,12 @@ export default function StartShiftScreen() {
         setIsStarting(false);
         return;
       }
+
+      // Pull the org's yard fences down for this shift. Deliberately not
+      // awaited: the driver is watching this button, the fences are only
+      // needed once they're back at the yard hours from now, and a stale
+      // cache from the last shift is a fine answer in the meantime.
+      void refreshYardFences(driverOrgId);
 
       const result = await startSessionTracking({
         driverId,

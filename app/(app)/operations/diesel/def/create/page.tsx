@@ -12,15 +12,17 @@
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
-import { useMutation } from 'convex/react';
+import { useConvex, useMutation } from 'convex/react';
 import { toast } from 'sonner';
 import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { CreateForm, bindUploaders } from '@/components/web/create-form';
 import {
   buildFuelEntrySchema,
   mapValsToFuelEntryArgs,
+  readLoadReference,
   FUEL_ENTRY_FIELD_IDS,
   type CarrierRow,
 } from '@/lib/forms/schemas/fuel-entry';
@@ -29,6 +31,7 @@ export default function CreateDefEntryPage() {
   const router = useRouter();
   const { user } = useAuth();
   const organizationId = useOrganizationId();
+  const convex = useConvex();
 
   const createDefEntry = useMutation(api.defEntries.create);
   const generateUploadUrl = useMutation(api.defEntries.generateUploadUrl);
@@ -84,6 +87,22 @@ export default function CreateDefEntryPage() {
           toast.error('Not signed in — please refresh and try again.');
           return;
         }
+        // "Linked load" is free text — the mutation wants a document
+        // id. Resolve it first; a typo shouldn't fail arg validation
+        // with a generic "please try again".
+        const loadRef = readLoadReference(vals);
+        let loadId: Id<'loadInformation'> | undefined;
+        if (loadRef) {
+          const match = await convex.query(api.loads.resolveReference, {
+            workosOrgId: organizationId,
+            reference: loadRef,
+          });
+          if (!match) {
+            toast.error(`No load found for “${loadRef}”. Check the load number or clear the field.`);
+            return;
+          }
+          loadId = match._id;
+        }
         try {
           // fuelType is a fuelEntries-only field — the DEF schema never
           // renders it, but strip defensively since the defEntries
@@ -91,6 +110,7 @@ export default function CreateDefEntryPage() {
           const { fuelType: _fuelType, ...args } = mapValsToFuelEntryArgs(vals);
           const id = await createDefEntry({
             ...args,
+            ...(loadId ? { loadId } : {}),
             organizationId,
             createdBy: user.id,
           });
@@ -99,7 +119,10 @@ export default function CreateDefEntryPage() {
               ? 'DEF entry saved. Ready for the next one.'
               : 'DEF entry saved.',
           );
-          if (!andNew) router.push(`/operations/diesel/${id}`);
+          // `?type=def` is load-bearing: the detail route defaults to
+          // `fuel` and would query `fuelEntries.get` with a defEntries
+          // id, which fails arg validation.
+          if (!andNew) router.push(`/operations/diesel/${id}?type=def`);
         } catch (err) {
           console.error('Failed to create DEF entry:', err);
           toast.error('Failed to create DEF entry. Please try again.');

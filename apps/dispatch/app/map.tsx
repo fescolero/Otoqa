@@ -10,7 +10,7 @@ import MapView, { Marker } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@otoqa/convex-client';
 import { useQuery } from 'convex/react';
-import { colors, typography } from '@otoqa/mobile-core';
+import { colors, typography } from '../lib/theme';
 import { displayLoadId } from '../lib/format';
 
 function fleetRegion(pins: { location: { latitude: number; longitude: number } }[]) {

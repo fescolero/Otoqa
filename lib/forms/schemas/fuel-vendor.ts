@@ -1,11 +1,12 @@
 /**
- * Fuel vendor create schema.
+ * Fuel vendor schema — drives both the create and edit flows.
  *
- * Maps 1:1 to `api.fuelVendors.create`. Short-form schema — single
- * Identity / Contact / Address / Notes layout. No draft persistence
- * because the create flow is fast (~30 seconds to fill in name +
- * fuel-card account number) and the abandonment rate is too low to
- * justify the table-row cost.
+ * Maps 1:1 to `api.fuelVendors.create`; `update` takes the same fields
+ * with everything optional, so one schema with a `mode` parameter
+ * covers both. Short-form — single Identity / Contact / Address /
+ * Notes layout. No draft persistence because the create flow is fast
+ * (~30 seconds to fill in name + fuel-card account number) and the
+ * abandonment rate is too low to justify the table-row cost.
  *
  * Sections:
  *   - Identity         — legal name + optional fleet-card code + account #
@@ -13,9 +14,10 @@
  *   - Address          — composite (optional)
  *   - Notes
  *
- * Country defaults to 'US' so the address composite stays valid even
- * when filled manually (Google Places autocomplete writes 'US' on
- * pick).
+ * Country is a real field defaulting to 'US' — new vendors get the
+ * common case for free, and it stays editable for the direct-billing
+ * chains that aren't US-based. On edit it seeds from the record, so a
+ * row with no country stays blank rather than being backfilled.
  */
 
 import type {
@@ -49,14 +51,51 @@ export const FUEL_VENDOR_FIELD_IDS = {
   notes: 'notes',
 } as const;
 
-export function buildFuelVendorSchema(): CreateFormSchema {
+export interface BuildFuelVendorSchemaArgs {
+  /**
+   * 'create' (default) → new-record title + breadcrumb.
+   * 'edit'             → edit title. Field layout is identical for both
+   *                      modes: `fuelVendors.update` accepts exactly the
+   *                      fields `create` does, all optional.
+   */
+  mode?: 'create' | 'edit';
+  /**
+   * The record's stored `discountProgram` when editing. The picker is a
+   * fixed six-option select, but the legacy hand-rolled edit form was a
+   * free-text input — so rows can hold values outside the list. Passing
+   * the current value appends it as an option instead of leaving the
+   * trigger showing a placeholder over a value the user never chose.
+   */
+  currentDiscountProgram?: string;
+}
+
+export function buildFuelVendorSchema(
+  args: BuildFuelVendorSchemaArgs = {},
+): CreateFormSchema {
   const ids = FUEL_VENDOR_FIELD_IDS;
+  const { mode = 'create', currentDiscountProgram } = args;
+  const isEdit = mode === 'edit';
+
+  const discountOptions: FieldOption[] =
+    currentDiscountProgram &&
+    !DISCOUNT_PROGRAM_OPTIONS.some((o) => o.value === currentDiscountProgram)
+      ? [
+          ...DISCOUNT_PROGRAM_OPTIONS,
+          { value: currentDiscountProgram, label: currentDiscountProgram },
+        ]
+      : DISCOUNT_PROGRAM_OPTIONS;
+
   return {
     entity: 'fuelVendor',
-    breadcrumb: ['Company Operations', 'Fuel Vendors', 'New vendor'],
-    title: 'New fuel vendor',
-    subtitle:
-      'A fuel-card processor (Comdata, EFS, WEX, etc.) or a direct-billing chain. Required: name. Everything else can be added later.',
+    breadcrumb: [
+      'Company Operations',
+      'Fuel Vendors',
+      isEdit ? 'Edit vendor' : 'New vendor',
+    ],
+    title: isEdit ? 'Edit fuel vendor' : 'New fuel vendor',
+    subtitle: isEdit
+      ? 'Update the vendor’s identity, contact, and billing address. Name is required; everything else can stay blank.'
+      : 'A fuel-card processor (Comdata, EFS, WEX, etc.) or a direct-billing chain. Required: name. Everything else can be added later.',
     sections: [
       {
         id: 'identity',
@@ -83,7 +122,7 @@ export function buildFuelVendorSchema(): CreateFormSchema {
             label: 'Discount program',
             kind: 'select',
             recommended: true,
-            options: DISCOUNT_PROGRAM_OPTIONS,
+            options: discountOptions,
             hint: 'Drives IFTA grouping + nightly discount reconciliation.',
           },
           {
@@ -143,6 +182,22 @@ export function buildFuelVendorSchema(): CreateFormSchema {
               state: ids.addrState,
               zip: ids.addrZip,
             },
+          },
+          {
+            // Sits outside the composite: the shared address control
+            // has no country slot, and adding one would change every
+            // schema that renders an address. The composite forces a
+            // full-width row, so this lands on its own line beneath it.
+            //
+            // No length validation on purpose — rows written by the
+            // legacy hand-rolled edit form can hold 'United States',
+            // and a 2-letter rule would block saving them until fixed.
+            id: ids.country,
+            label: 'Country',
+            kind: 'text',
+            default: 'US',
+            placeholder: 'US',
+            hint: 'Two-letter code. Blank on older records is left as-is.',
           },
         ],
       },
@@ -207,9 +262,75 @@ export function mapValsToFuelVendorArgs(
     city: optionalStr(vals[ids.addrCity]),
     state: optionalStr(vals[ids.addrState]),
     zip: optionalStr(vals[ids.addrZip]),
-    country: optionalStr(vals[ids.country]) ?? 'US',
+    country: optionalStr(vals[ids.country]),
     notes: optionalStr(vals[ids.notes]),
   };
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  Edit-mode helpers
+ *
+ *  `mapRecordToFuelVendorVals(record)` is the inverse of
+ *  `mapValsToFuelVendorArgs(vals)` — takes a stored fuelVendors row
+ *  and produces the flat `vals` object the shell seeds the form with.
+ *  Every column is already a flat string, so there's no translation
+ *  work beyond `undefined → ''`.
+ *
+ *  `country` seeds from the record rather than from the field's 'US'
+ *  default: `useFormState` only falls back to a field default when the
+ *  key is absent from `initialValues`, so seeding '' here is what keeps
+ *  an older row's blank country blank instead of backfilling it.
+ * ──────────────────────────────────────────────────────────────── */
+
+/** Subset of the persisted row the schema reads. Redeclared locally so
+ *  this file stays free of Convex imports, matching the fuel-entry
+ *  schema's convention. */
+export interface FuelVendorRecord {
+  name: string;
+  code?: string;
+  accountNumber?: string;
+  discountProgram?: string;
+  contactName?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  addressLine?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  country?: string;
+  notes?: string;
+}
+
+export function mapRecordToFuelVendorVals(
+  record: FuelVendorRecord,
+): Record<string, unknown> {
+  const ids = FUEL_VENDOR_FIELD_IDS;
+  return {
+    [ids.name]: record.name ?? '',
+    [ids.code]: record.code ?? '',
+    [ids.accountNumber]: record.accountNumber ?? '',
+    [ids.discountProgram]: record.discountProgram ?? '',
+    [ids.contactName]: record.contactName ?? '',
+    [ids.contactEmail]: record.contactEmail ?? '',
+    [ids.contactPhone]: record.contactPhone ?? '',
+    [ids.addrStreet]: record.addressLine ?? '',
+    [ids.addrCity]: record.city ?? '',
+    [ids.addrState]: record.state ?? '',
+    [ids.addrZip]: record.zip ?? '',
+    [ids.country]: record.country ?? '',
+    [ids.notes]: record.notes ?? '',
+  };
+}
+
+/** `fuelVendors.update` takes every field as optional, including
+ *  `name` — so the update args are just the create args with `name`
+ *  relaxed. Same translator; narrower return type. */
+export type FuelVendorUpdateArgs = Partial<FuelVendorCreateArgs>;
+
+export function mapValsToFuelVendorUpdateArgs(
+  vals: Record<string, unknown>,
+): FuelVendorUpdateArgs {
+  return mapValsToFuelVendorArgs(vals);
 }
 
 function optionalStr(v: unknown): string | undefined {
