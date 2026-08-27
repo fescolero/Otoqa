@@ -33,16 +33,3 @@ export function formatDate(dateString?: string) {
     day: 'numeric',
   });
 }
-
-/**
- * Formats a Unix timestamp (ms) to a readable date.
- * Uses local time components since timestamps represent real instants.
- */
-export function formatTimestamp(timestamp?: number) {
-  if (timestamp == null) return '';
-  return new Date(timestamp).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
-}
