@@ -36,9 +36,12 @@ export const consoleSelfCheck = query({
     const snapshots = await jobByName(SNAPSHOT_JOB);
     const allJobs = await ctx.db.query('cronHealth').collect();
 
+    // `e` is annotated because the Expo tsconfigs compile this file without
+    // Node types, where `process.env.X` widens to `any` and the callback
+    // parameter becomes an implicit any under `strict`.
     const staffAllowlistSize = (process.env.STAFF_EMAIL_ALLOWLIST ?? '')
       .split(',')
-      .map((e) => e.trim())
+      .map((e: string) => e.trim())
       .filter(Boolean).length;
 
     const jobStates = allJobs.map((j) => jobState(j, now));

@@ -34,6 +34,7 @@ import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { convexErrorMessage } from '@/lib/convex-error';
+import { useSeededRevision } from '@/lib/forms/use-seeded-revision';
 import { Button } from '@/components/ui/button';
 import { CreateForm, SaveAborted } from '@/components/web/create-form';
 import {
@@ -62,15 +63,10 @@ export function VendorEditContent({ vendorId }: { vendorId: string }) {
   // `useFormState` seeds `vals` once on mount and ignores later changes
   // to `initialValues`, so the <CreateForm> below is keyed on the
   // record id — see the comment at the key itself.
-  // The revision the form was SEEDED from. `vendor` comes from a
-  // reactive query, so reading `vendor.updatedAt` at save time would
-  // always equal the server's current value — the staleness check
-  // could never fire, which is exactly the bug it exists to catch.
-  // Latched once, alongside the values the form seeds from.
-  const seededUpdatedAt = React.useRef<number | undefined>(undefined);
-  if (vendor && seededUpdatedAt.current === undefined) {
-    seededUpdatedAt.current = vendor.updatedAt;
-  }
+  // The revision the form was SEEDED from, latched per record id for the
+  // same reason that key exists: this component is NOT remounted when the
+  // user moves between two vendors' edit pages. See use-seeded-revision.
+  const seededUpdatedAt = useSeededRevision(vendor);
 
   const initialValues = React.useMemo(() => {
     if (!vendor) return undefined;
@@ -122,7 +118,7 @@ export function VendorEditContent({ vendorId }: { vendorId: string }) {
             // Refuse to overwrite a revision we never showed the user
             // — the translator sends every field, so a blind save
             // would revert whoever wrote in between.
-            expectedUpdatedAt: seededUpdatedAt.current,
+            expectedUpdatedAt: seededUpdatedAt,
             updatedBy: user.id,
           });
           toast.success('Fuel vendor updated.');
