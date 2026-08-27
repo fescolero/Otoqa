@@ -27,6 +27,8 @@ export const get = query({
       latestBuild: v.number(),
       minSupportedBuild: v.number(),
       installUrl: v.string(),
+      latestVersion: v.union(v.string(), v.null()),
+      dispatchPhone: v.union(v.string(), v.null()),
       message: v.union(v.string(), v.null()),
     })
   ),
@@ -40,6 +42,8 @@ export const get = query({
       latestBuild: row.latestBuild,
       minSupportedBuild: row.minSupportedBuild,
       installUrl: row.installUrl,
+      latestVersion: row.latestVersion ?? null,
+      dispatchPhone: row.dispatchPhone ?? null,
       message: row.message ?? null,
     };
   },
@@ -51,6 +55,8 @@ export const setConfig = internalMutation({
     latestBuild: v.number(),
     minSupportedBuild: v.number(),
     installUrl: v.string(),
+    latestVersion: v.optional(v.string()),
+    dispatchPhone: v.optional(v.string()),
     message: v.optional(v.string()),
   },
   returns: v.null(),
@@ -78,6 +84,8 @@ export const setConfig = internalMutation({
       latestBuild: args.latestBuild,
       minSupportedBuild: args.minSupportedBuild,
       installUrl: args.installUrl,
+      latestVersion: args.latestVersion,
+      dispatchPhone: args.dispatchPhone,
       message: args.message,
       updatedAt: Date.now(),
     };

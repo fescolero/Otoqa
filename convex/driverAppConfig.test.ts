@@ -36,6 +36,8 @@ describe('driverAppConfig', () => {
       latestBuild: 19,
       minSupportedBuild: 18,
       installUrl: ANDROID.installUrl,
+      latestVersion: null,
+      dispatchPhone: null,
       message: null, // replace, not patch — dropping the message clears it
     });
 

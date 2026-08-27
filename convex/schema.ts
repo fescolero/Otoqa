@@ -4522,6 +4522,13 @@ export default defineSchema({
     latestBuild: v.number(),
     minSupportedBuild: v.number(),
     installUrl: v.string(),
+    // Display label for the target version, e.g. "1.8.0" — shown in the
+    // gate's "current → new" chip and on the update button. Falls back to
+    // "build {latestBuild}" in the app when absent.
+    latestVersion: v.optional(v.string()),
+    // Fallback contact shown when the install link won't open on the
+    // driver's phone ("Try again, or call dispatch at …").
+    dispatchPhone: v.optional(v.string()),
     message: v.optional(v.string()),
     updatedAt: v.number(),
   }).index('by_platform', ['platform']),
