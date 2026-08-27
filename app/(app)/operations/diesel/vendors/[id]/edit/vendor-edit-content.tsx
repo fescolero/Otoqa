@@ -62,6 +62,16 @@ export function VendorEditContent({ vendorId }: { vendorId: string }) {
   // `useFormState` seeds `vals` once on mount and ignores later changes
   // to `initialValues`, so the <CreateForm> below is keyed on the
   // record id — see the comment at the key itself.
+  // The revision the form was SEEDED from. `vendor` comes from a
+  // reactive query, so reading `vendor.updatedAt` at save time would
+  // always equal the server's current value — the staleness check
+  // could never fire, which is exactly the bug it exists to catch.
+  // Latched once, alongside the values the form seeds from.
+  const seededUpdatedAt = React.useRef<number | undefined>(undefined);
+  if (vendor && seededUpdatedAt.current === undefined) {
+    seededUpdatedAt.current = vendor.updatedAt;
+  }
+
   const initialValues = React.useMemo(() => {
     if (!vendor) return undefined;
     return mapRecordToFuelVendorVals(vendor);
@@ -112,7 +122,7 @@ export function VendorEditContent({ vendorId }: { vendorId: string }) {
             // Refuse to overwrite a revision we never showed the user
             // — the translator sends every field, so a blind save
             // would revert whoever wrote in between.
-            expectedUpdatedAt: vendor.updatedAt,
+            expectedUpdatedAt: seededUpdatedAt.current,
             updatedBy: user.id,
           });
           toast.success('Fuel vendor updated.');
