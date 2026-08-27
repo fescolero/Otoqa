@@ -25,6 +25,7 @@ import {
   type AddressData,
 } from '@/components/ui/address-autocomplete';
 import { Input } from '@/components/ui/input';
+import { toCountryCode } from '@/lib/format-country';
 import type { FormValues } from '../schema-types';
 
 interface AddressIdMap {
@@ -35,28 +36,6 @@ interface AddressIdMap {
   zip: string;
   /** Optional — see the note on `FormField.ids.country`. */
   country?: string;
-}
-
-/**
- * Google returns the country as a long name ("United States",
- * "Canada"), while `state` already comes through as a short code.
- * Schemas that store a country expect the two-letter form, so
- * normalize the North American set this app actually operates in and
- * pass anything else through unchanged rather than guessing.
- */
-const COUNTRY_CODES: Record<string, string> = {
-  'united states': 'US',
-  usa: 'US',
-  canada: 'CA',
-  mexico: 'MX',
-  méxico: 'MX',
-};
-
-function toCountryCode(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) return '';
-  if (/^[A-Za-z]{2}$/.test(trimmed)) return trimmed.toUpperCase();
-  return COUNTRY_CODES[trimmed.toLowerCase()] ?? trimmed;
 }
 
 export interface AddressControlProps {

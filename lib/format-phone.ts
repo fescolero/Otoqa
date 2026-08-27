@@ -58,3 +58,39 @@ export function getPhoneLink(phoneNumber: string | undefined): string {
 
   return phoneNumber;
 }
+
+/**
+ * The canonical STORAGE form: digits only.
+ *
+ * The column holds two encodings today — the retired hand-rolled forms
+ * persisted `PhoneInput`'s digits-only hidden value, while the
+ * create-form schemas persist the display string their `phone-us`
+ * formatter produces. Normalizing on write, and formatting only at
+ * display via `formatPhoneNumber` (which tolerates either), collapses
+ * that back to one representation as rows are edited.
+ *
+ * A leading US/Canada country code is dropped so a number is stored
+ * the same way whether it was typed as +1 555… or 555…. Anything that
+ * isn't a recognizable NANP length passes through as digits rather
+ * than being truncated.
+ */
+export function toPhoneDigits(phoneNumber: string | undefined): string {
+  const digits = (phoneNumber ?? '').replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+  return digits;
+}
+
+/**
+ * Progressively format a string as a US phone number. Strips non-
+ * digits, caps at 10 (NANP), and renders as `(XXX) XXX-XXXX` with
+ * separators appearing as the user crosses each boundary. Idempotent
+ * — passing an already-formatted value back through returns the same
+ * string (modulo trailing separators).
+ */
+export function formatUsPhone(input: string): string {
+  const digits = input.replace(/\D/g, '').slice(0, 10);
+  if (digits.length === 0) return '';
+  if (digits.length <= 3) return `(${digits}`;
+  if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+}

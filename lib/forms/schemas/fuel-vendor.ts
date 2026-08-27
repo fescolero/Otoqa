@@ -21,6 +21,8 @@
  */
 
 import type { Doc } from '@/convex/_generated/dataModel';
+import { toCountryCode } from '@/lib/format-country';
+import { formatUsPhone, toPhoneDigits } from '@/lib/format-phone';
 import type {
   CreateFormSchema,
   FieldOption,
@@ -282,12 +284,14 @@ export function mapValsToFuelVendorArgs(
     discountProgram: optionalStr(vals[ids.discountProgram]),
     contactName: optionalStr(vals[ids.contactName]),
     contactEmail: optionalStr(vals[ids.contactEmail]),
-    contactPhone: optionalStr(vals[ids.contactPhone]),
+    // Digits are the canonical storage form; formatting is a display
+    // concern (lib/format-phone.ts). The column currently holds both.
+    contactPhone: optionalStr(toPhoneDigits(String(vals[ids.contactPhone] ?? ''))),
     addressLine: optionalStr(vals[ids.addrStreet]),
     city: optionalStr(vals[ids.addrCity]),
     state: optionalStr(vals[ids.addrState]),
     zip: optionalStr(vals[ids.addrZip]),
-    country: optionalStr(vals[ids.country]),
+    country: optionalStr(toCountryCode(String(vals[ids.country] ?? ''))),
     notes: optionalStr(vals[ids.notes]),
   };
 }
@@ -350,12 +354,16 @@ export function mapRecordToFuelVendorVals(
       : '',
     [ids.contactName]: record.contactName ?? '',
     [ids.contactEmail]: record.contactEmail ?? '',
-    [ids.contactPhone]: record.contactPhone ?? '',
+    // Seeded formatted so a digits-only legacy row renders as a phone
+    // number instead of a bare 10-digit run; stored back as digits.
+    [ids.contactPhone]: formatUsPhone(record.contactPhone ?? ''),
     [ids.addrStreet]: record.addressLine ?? '',
     [ids.addrCity]: record.city ?? '',
     [ids.addrState]: record.state ?? '',
     [ids.addrZip]: record.zip ?? '',
-    [ids.country]: record.country ?? '',
+    // Canonicalized on seed so a legacy 'USA' converges to 'US' the
+    // next time this vendor is saved — no migration needed.
+    [ids.country]: toCountryCode(record.country),
     [ids.notes]: record.notes ?? '',
   };
 }

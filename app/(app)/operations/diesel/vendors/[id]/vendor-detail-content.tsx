@@ -36,6 +36,9 @@ import {
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { formatPhoneNumber, toPhoneDigits } from '@/lib/format-phone';
+import { toCountryCode } from '@/lib/format-country';
+import { canonicalDiscountProgram } from '@/lib/forms/schemas/fuel-vendor';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { VendorBrandBadge } from '@/components/diesel/vendor-brand-badge';
@@ -116,9 +119,23 @@ export function VendorDetailContent({ vendorId }: { vendorId: string }) {
     ]),
     [],
   );
+  // Inline edits write the same columns the edit form does, so they
+  // have to agree on the canonical shape — otherwise a value the form
+  // just normalized gets written straight back the other way from
+  // here. This is also what keeps the free-text Program editor from
+  // reintroducing off-list values.
+  const NORMALIZERS: Record<string, (v: string) => string> = React.useMemo(
+    () => ({
+      contactPhone: toPhoneDigits,
+      country: toCountryCode,
+      discountProgram: canonicalDiscountProgram,
+    }),
+    [],
+  );
   const commitField = React.useCallback(async (key: string, next: string | string[]) => {
     if (!ALLOWED_FIELDS.has(key) || !user) return;
-    const value = Array.isArray(next) ? next.join(', ') : next;
+    const raw = Array.isArray(next) ? next.join(', ') : next;
+    const value = NORMALIZERS[key] ? NORMALIZERS[key](raw) : raw;
     try {
       await updateVendor({ vendorId: vid, updatedBy: user.id, [key]: value } as never);
       toast.success('Saved');
@@ -126,7 +143,7 @@ export function VendorDetailContent({ vendorId }: { vendorId: string }) {
       console.error(e);
       toast.error('Failed to save change');
     }
-  }, [ALLOWED_FIELDS, user, updateVendor, vid]);
+  }, [ALLOWED_FIELDS, NORMALIZERS, user, updateVendor, vid]);
 
   // ─── Derive analytics + table rows from real fuel entries ─────────────
   const entries: FuelEntryRecord[] = React.useMemo(() => {
@@ -348,7 +365,7 @@ export function VendorDetailContent({ vendorId }: { vendorId: string }) {
       label: 'Phone',
       value: vendor.contactPhone ?? '',
       display: vendor.contactPhone
-        ? <span className="num">{vendor.contactPhone}</span>
+        ? <span className="num">{formatPhoneNumber(vendor.contactPhone)}</span>
         : undefined,
       editor: { type: 'phone' },
       placeholder: 'Phone',

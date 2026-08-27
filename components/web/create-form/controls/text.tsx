@@ -15,21 +15,7 @@
 import * as React from 'react';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
-
-/**
- * Progressively format a string as a US phone number. Strips non-
- * digits, caps at 10 (NANP), and renders as `(XXX) XXX-XXXX` with
- * separators appearing as the user crosses each boundary. Idempotent
- * — passing an already-formatted value back through returns the same
- * string (modulo trailing separators).
- */
-export function formatUsPhone(input: string): string {
-  const digits = input.replace(/\D/g, '').slice(0, 10);
-  if (digits.length === 0) return '';
-  if (digits.length <= 3) return `(${digits}`;
-  if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
-  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
-}
+import { formatUsPhone } from '@/lib/format-phone';
 
 export interface TextControlProps {
   id: string;

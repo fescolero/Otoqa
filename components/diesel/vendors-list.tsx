@@ -44,6 +44,7 @@ import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useUserPreferences } from '@/components/web/shell/use-user-preferences';
 import { VendorBrandBadge } from './vendor-brand-badge';
+import { formatPhoneNumber } from '@/lib/format-phone';
 
 const FLEET_AVG_PPG = 4.21;
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -305,7 +306,7 @@ export function VendorsList({ workosOrgId }: VendorsListProps) {
               <span className="text-[11.5px] text-[var(--text-tertiary)] truncate">{r.contactEmail}</span>
             )}
             {!r.contactName && !r.contactEmail && r.contactPhone && (
-              <span className="num text-[12.5px] text-foreground truncate">{r.contactPhone}</span>
+              <span className="num text-[12.5px] text-foreground truncate">{formatPhoneNumber(r.contactPhone)}</span>
             )}
             {!r.contactName && !r.contactEmail && !r.contactPhone && (
               <span className="text-[12.5px] text-[var(--text-tertiary)]">—</span>

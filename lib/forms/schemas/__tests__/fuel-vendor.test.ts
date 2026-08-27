@@ -29,7 +29,7 @@ const FULL_RECORD: FuelVendorRecord = {
   discountProgram: 'COMDATA',
   contactName: 'Dana Reyes',
   contactEmail: 'support@loves.example',
-  contactPhone: '(555) 555-0123',
+  contactPhone: '5555550123',
   addressLine: '1200 W Memorial Rd',
   city: 'Oklahoma City',
   state: 'OK',
@@ -100,6 +100,38 @@ describe('fuel-vendor edit mode', () => {
     // suite input would collect a value and silently drop it on save.
     const composite = fieldById(buildFuelVendorSchema(), 'addressComposite');
     expect(composite?.ids?.suite).toBeUndefined();
+  });
+
+  it("converges a legacy 'USA' country to the two-letter code", () => {
+    // 6 of 7 dev rows hold 'USA' against a field that asks for a code.
+    // Normalizing on seed means the next save fixes the row.
+    const vals = mapRecordToFuelVendorVals({ name: 'Legacy', country: 'USA' });
+    expect(vals.country).toBe('US');
+    expect(mapValsToFuelVendorUpdateArgs(vals).country).toBe('US');
+  });
+
+  it('leaves an unrecognized country alone rather than guessing', () => {
+    const vals = mapRecordToFuelVendorVals({ name: 'Intl', country: 'Belgium' });
+    expect(mapValsToFuelVendorUpdateArgs(vals).country).toBe('Belgium');
+  });
+
+  it('stores the phone as digits but seeds the box formatted', () => {
+    // The column holds both encodings: the retired form wrote digits,
+    // the create schema wrote the formatted display string.
+    const vals = mapRecordToFuelVendorVals({
+      name: 'Harbor',
+      contactPhone: '5307138445',
+    });
+    expect(vals.contactPhone).toBe('(530) 713-8445');
+    expect(mapValsToFuelVendorUpdateArgs(vals).contactPhone).toBe('5307138445');
+  });
+
+  it('normalizes an already-formatted phone to the same digits', () => {
+    const vals = mapRecordToFuelVendorVals({
+      name: 'Loves',
+      contactPhone: '(555) 555-0123',
+    });
+    expect(mapValsToFuelVendorUpdateArgs(vals).contactPhone).toBe('5555550123');
   });
 
   it('renders country inside the address section', () => {
