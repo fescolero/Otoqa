@@ -30,6 +30,15 @@ interface AFieldProps {
   span?: 1 | 2;
   /** Forces grid-column: 1 / -1 — used by composite kinds. */
   full?: boolean;
+  /**
+   * The control renders several inputs rather than one (address,
+   * stops-list, lane-stops). `htmlFor` has nothing single to point at
+   * in that case — it pointed at an id no element carried, so the
+   * label was announced against nothing and the inputs were left
+   * unlabelled. Render it as a group label instead and let the sub-
+   * inputs carry their own `aria-label`.
+   */
+  grouped?: boolean;
   children: React.ReactNode;
   /** Content rendered after the control (e.g. DuplicateAlert). */
   after?: React.ReactNode;
@@ -44,9 +53,36 @@ export function AField({
   recommended,
   span,
   full,
+  grouped,
   children,
   after,
 }: AFieldProps) {
+  const labelId = `${id}-label`;
+  const labelStyle: React.CSSProperties = {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 7,
+    flexWrap: 'wrap',
+    marginBottom: 5,
+  };
+  const labelContent = (
+    <>
+      <span
+        style={{
+          fontSize: 11.5,
+          fontWeight: 500,
+          color: 'var(--text-secondary)',
+        }}
+      >
+        {label}
+      </span>
+      {required === 'tier1' && <TierTag tone="required">Required</TierTag>}
+      {recommended && required !== 'tier1' && (
+        <TierTag tone="recommended">Recommended</TierTag>
+      )}
+      {/* 'Optional' tag intentionally omitted — it's the default state. */}
+    </>
+  );
   return (
     <div
       data-field={id}
@@ -56,33 +92,23 @@ export function AField({
         scrollMarginTop: 24,
       }}
     >
-      <label
-        htmlFor={id}
-        style={{
-          display: 'flex',
-          alignItems: 'baseline',
-          gap: 7,
-          flexWrap: 'wrap',
-          marginBottom: 5,
-        }}
-      >
-        <span
-          style={{
-            fontSize: 11.5,
-            fontWeight: 500,
-            color: 'var(--text-secondary)',
-          }}
-        >
-          {label}
-        </span>
-        {required === 'tier1' && <TierTag tone="required">Required</TierTag>}
-        {recommended && required !== 'tier1' && (
-          <TierTag tone="recommended">Recommended</TierTag>
-        )}
-        {/* 'Optional' tag intentionally omitted — it's the default state. */}
-      </label>
+      {grouped ? (
+        <div id={labelId} style={labelStyle}>
+          {labelContent}
+        </div>
+      ) : (
+        <label htmlFor={id} style={labelStyle}>
+          {labelContent}
+        </label>
+      )}
 
-      {children}
+      {grouped ? (
+        <div role="group" aria-labelledby={labelId}>
+          {children}
+        </div>
+      ) : (
+        children
+      )}
       {after}
 
       {hint && !error && (

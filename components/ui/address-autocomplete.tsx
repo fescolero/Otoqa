@@ -19,6 +19,10 @@ export interface AddressData {
 }
 
 interface AddressAutocompleteProps {
+  /** DOM id for the inner input, so a label can point at it. */
+  id?: string;
+  /** Accessible name — the input has only a placeholder otherwise. */
+  'aria-label'?: string;
   value?: string;
   onSelect: (data: AddressData) => void;
   onChange?: (value: string) => void;
@@ -28,6 +32,8 @@ interface AddressAutocompleteProps {
 }
 
 export function AddressAutocomplete({
+  id,
+  'aria-label': ariaLabel,
   value = '',
   onSelect,
   onChange,
@@ -188,6 +194,8 @@ export function AddressAutocomplete({
         </InputGroupAddon>
         <InputGroupInput
           ref={inputRef}
+          id={id}
+          aria-label={ariaLabel}
           type="text"
           placeholder={placeholder}
           value={inputValue}

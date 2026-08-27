@@ -279,6 +279,7 @@ export function renderField({
       recommended={field.recommended}
       span={field.span}
       full={composite}
+      grouped={composite}
       after={after}
     >
       {control}

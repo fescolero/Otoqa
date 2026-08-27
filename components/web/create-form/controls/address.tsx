@@ -81,6 +81,8 @@ export function AddressControl({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
         <AddressAutocomplete
+          id={ids.street}
+          aria-label="Street address"
           value={streetVal}
           onChange={(v) => set(ids.street, v)}
           onSelect={handleSelect}
@@ -92,6 +94,7 @@ export function AddressControl({
             id={ids.suite}
             value={suiteVal}
             onChange={(e) => set(ids.suite!, e.target.value)}
+            aria-label="Suite or apartment"
             placeholder="Suite / Apt (optional)"
             disabled={disabled}
           />
@@ -102,6 +105,7 @@ export function AddressControl({
           id={ids.city}
           value={cityVal}
           onChange={(e) => set(ids.city, e.target.value)}
+          aria-label="City"
           placeholder="City"
           disabled={disabled}
           aria-invalid={errors[ids.city] ? true : undefined}
@@ -110,6 +114,7 @@ export function AddressControl({
           id={ids.state}
           value={stateVal}
           onChange={(e) => set(ids.state, e.target.value)}
+          aria-label="State"
           placeholder="State"
           disabled={disabled}
           aria-invalid={errors[ids.state] ? true : undefined}
@@ -118,6 +123,7 @@ export function AddressControl({
           id={ids.zip}
           value={zipVal}
           onChange={(e) => set(ids.zip, e.target.value)}
+          aria-label="ZIP code"
           placeholder="ZIP"
           disabled={disabled}
           aria-invalid={errors[ids.zip] ? true : undefined}
