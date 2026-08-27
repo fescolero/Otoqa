@@ -27,6 +27,7 @@
 'use client';
 
 import * as React from 'react';
+import { toast } from 'sonner';
 import { CreateHeader } from './header';
 import { TocSidebar } from './rail';
 import { ASectionCard } from './section-card';
@@ -45,6 +46,24 @@ import type {
   CreateFormSchema,
   FormValues,
 } from './schema-types';
+
+/**
+ * Thrown from `onSaved` to abort a save the wrapper has already
+ * explained to the user (a reference that didn't resolve, a
+ * precondition that failed). The shell treats it as a failure — it
+ * suppresses its own generic toast and, critically, does NOT reset
+ * the form — so the user keeps everything they typed.
+ *
+ * A bare `return` cannot express this: it is indistinguishable from a
+ * successful save, so `Save & new` would clear the form after a save
+ * that never happened.
+ */
+export class SaveAborted extends Error {
+  constructor(message = 'Save aborted by the form wrapper') {
+    super(message);
+    this.name = 'SaveAborted';
+  }
+}
 
 /**
  * A draft loaded from the server-side `createDrafts` table. Pass this
@@ -192,7 +211,20 @@ export function CreateForm({
       }
       setSubmitting(true);
       try {
-        await onSaved(form.vals, andNew);
+        try {
+          await onSaved(form.vals, andNew);
+        } catch (err) {
+          // A save that threw did NOT happen: never reset the form, or
+          // the user loses everything they typed. `SaveAborted` means
+          // the wrapper already told them why; anything else is
+          // unexpected and would otherwise surface only as an
+          // unhandled rejection, since callers discard this promise.
+          if (!(err instanceof SaveAborted)) {
+            console.error('[create-form] save failed', err);
+            toast.error('Could not save. Please try again.');
+          }
+          return;
+        }
         // Draft is now redundant — the form is a real record. Fire and
         // forget; if the discard fails the 30-day cron sweeps it up.
         if (onDraftDiscard) {
@@ -238,6 +270,7 @@ export function CreateForm({
         schema={schema}
         savingState={form.savingState}
         savedAt={form.savedAt}
+        draftsEnabled={Boolean(onAutosave)}
       />
 
       <div

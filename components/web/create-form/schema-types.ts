@@ -137,6 +137,14 @@ export interface FormField {
     city: string;
     state: string;
     zip: string;
+    /**
+     * Optional, like `suite`. The composite renders no country input
+     * of its own, but when this is wired the autocomplete writes the
+     * resolved country into that field — otherwise picking a
+     * non-US address leaves a sibling country field showing whatever
+     * default it was seeded with.
+     */
+    country?: string;
   };
   /** file: MIME / extension hint for the picker. */
   accept?: string;

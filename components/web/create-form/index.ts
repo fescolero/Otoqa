@@ -4,7 +4,7 @@
  * controls.
  */
 
-export { CreateForm } from './create-form';
+export { CreateForm, SaveAborted } from './create-form';
 export type { CreateFormDraft } from './create-form';
 export { useFormState } from './use-form-state';
 export { bindUploaders } from './bind-uploaders';

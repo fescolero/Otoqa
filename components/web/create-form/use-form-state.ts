@@ -167,6 +167,11 @@ export function useFormState(
   // visibility matters more than the corner pulse.
   React.useEffect(() => {
     if (!dirty) return;
+    // No autosave wired → nothing is persisted, so don't drive the
+    // indicator through 'saving' → 'saved'. The header hides it in
+    // that case; running the machine anyway would just re-render the
+    // form twice per edit for a state nobody reads.
+    if (!onAutosaveRef.current) return;
     setSavingState('saving');
     const t = setTimeout(async () => {
       try {

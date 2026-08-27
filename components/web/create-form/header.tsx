@@ -23,9 +23,21 @@ interface CreateHeaderProps {
   schema: CreateFormSchema;
   savingState: SavingState;
   savedAt: number;
+  /**
+   * Whether this form actually persists drafts. False on edit flows,
+   * which load from a real record and wire no `onAutosave` — showing
+   * them "Draft saved" would promise a recovery point that does not
+   * exist, so the indicator is hidden entirely.
+   */
+  draftsEnabled: boolean;
 }
 
-export function CreateHeader({ schema, savingState, savedAt }: CreateHeaderProps) {
+export function CreateHeader({
+  schema,
+  savingState,
+  savedAt,
+  draftsEnabled,
+}: CreateHeaderProps) {
   return (
     <div
       style={{
@@ -73,7 +85,9 @@ export function CreateHeader({ schema, savingState, savedAt }: CreateHeaderProps
           >
             {schema.title}
           </h1>
-          <SaveIndicator state={savingState} savedAt={savedAt} />
+          {draftsEnabled && (
+            <SaveIndicator state={savingState} savedAt={savedAt} />
+          )}
         </div>
 
         {schema.subtitle && (
