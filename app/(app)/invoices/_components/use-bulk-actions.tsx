@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { trackError } from '@/lib/posthog';
 import { bulkDownloadPdfs } from '@/lib/bulk-pdf';
 import { runChunkedBulk } from '@/lib/chunked-bulk';
+import { countryDisplayName } from '@/lib/format-country';
 
 /** Statuses an invoice can be restored to when a bulk action is undone. */
 export type UndoableStatus = 'DRAFT' | 'PENDING_PAYMENT' | 'PAID';
@@ -284,7 +285,7 @@ export function useBulkActions(
             email: orgSettings.billingEmail || 'billing@company.com',
             phone: formatPhone(orgSettings.billingPhone || ''),
             address: orgSettings.billingAddress
-              ? `${orgSettings.billingAddress.addressLine1}${orgSettings.billingAddress.addressLine2 ? '\n' + orgSettings.billingAddress.addressLine2 : ''}\n${orgSettings.billingAddress.city}, ${orgSettings.billingAddress.state} ${orgSettings.billingAddress.zip}\n${orgSettings.billingAddress.country}`
+              ? `${orgSettings.billingAddress.addressLine1}${orgSettings.billingAddress.addressLine2 ? '\n' + orgSettings.billingAddress.addressLine2 : ''}\n${orgSettings.billingAddress.city}, ${orgSettings.billingAddress.state} ${orgSettings.billingAddress.zip}\n${countryDisplayName(orgSettings.billingAddress.country)}`
               : 'Address not available',
             logoUrl: orgSettings.logoUrl || undefined,
           }

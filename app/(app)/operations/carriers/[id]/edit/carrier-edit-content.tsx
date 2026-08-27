@@ -18,6 +18,7 @@ import { PhoneInput } from '@/components/ui/phone-input';
 import { AddressAutocomplete, AddressData } from '@/components/ui/address-autocomplete';
 import { Id } from '@/convex/_generated/dataModel';
 import { Badge } from '@/components/ui/badge';
+import { toCountryCode } from '@/lib/format-country';
 
 export function CarrierEditContent({ carrierId }: { carrierId: string }) {
   const router = useRouter();
@@ -49,7 +50,8 @@ export function CarrierEditContent({ carrierId }: { carrierId: string }) {
       setCity(partnership.city || '');
       setState(partnership.state || '');
       setZip(partnership.zip || '');
-      setCountry(partnership.country || '');
+      // Normalized on seed — see toCountryCode.
+      setCountry(toCountryCode(partnership.country));
       setIsOwnerOperator(partnership.isOwnerOperator || false);
       setTrackFuelConsumption(partnership.trackFuelConsumption || false);
     }
@@ -62,7 +64,7 @@ export function CarrierEditContent({ carrierId }: { carrierId: string }) {
       setCity(addressData.city);
       setState(addressData.state);
       setZip(addressData.postalCode);
-      setCountry(addressData.country);
+      setCountry(toCountryCode(addressData.country));
     }
   }, [addressData]);
 

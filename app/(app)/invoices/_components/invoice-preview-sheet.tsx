@@ -12,6 +12,7 @@ import { RecordPaymentDialog } from "./record-payment-dialog";
 import { Download, Printer, ExternalLink, Loader2, X, ChevronLeft, ChevronRight, Receipt, DollarSign } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
+import { countryDisplayName } from '@/lib/format-country';
 
 interface InvoicePreviewSheetProps {
   invoiceId: Id<"loadInvoices"> | null;
@@ -113,7 +114,7 @@ export function InvoicePreviewSheet({
           email: orgSettings.billingEmail || "billing@company.com",
           phone: formatPhoneNumber(orgSettings.billingPhone || ""),
           address: orgSettings.billingAddress
-            ? `${orgSettings.billingAddress.addressLine1}${orgSettings.billingAddress.addressLine2 ? '\n' + orgSettings.billingAddress.addressLine2 : ''}\n${orgSettings.billingAddress.city}, ${orgSettings.billingAddress.state} ${orgSettings.billingAddress.zip}\n${orgSettings.billingAddress.country}`
+            ? `${orgSettings.billingAddress.addressLine1}${orgSettings.billingAddress.addressLine2 ? '\n' + orgSettings.billingAddress.addressLine2 : ''}\n${orgSettings.billingAddress.city}, ${orgSettings.billingAddress.state} ${orgSettings.billingAddress.zip}\n${countryDisplayName(orgSettings.billingAddress.country)}`
             : "Address not available",
           logoUrl: orgSettings.logoUrl || undefined,
         }

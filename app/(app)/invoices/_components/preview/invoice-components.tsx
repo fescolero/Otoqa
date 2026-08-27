@@ -2,6 +2,7 @@ import React from "react";
 import { formatCurrency } from "@/lib/utils/invoice";
 import { cn } from "@/lib/utils";
 import { Separator } from "@/components/ui/separator";
+import { countryDisplayName } from '@/lib/format-country';
 
 // --- Types based on Convex Schema ---
 export type InvoiceLineItem = {
@@ -82,7 +83,7 @@ export function BillTo({ customer }: { customer: Customer }) {
       <p className="mt-2">{customer.addressLine1}</p>
       {customer.addressLine2 && <p>{customer.addressLine2}</p>}
       <p>{customer.city}, {customer.state} {customer.zip}</p>
-      <p>{customer.country}</p>
+      <p>{countryDisplayName(customer.country)}</p>
     </div>
   );
 }

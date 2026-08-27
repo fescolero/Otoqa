@@ -1,3 +1,5 @@
+import { toCountryCode } from './format-country';
+
 let autocompleteService: google.maps.places.AutocompleteService | null = null;
 let placesService: google.maps.places.PlacesService | null = null;
 let geocoder: google.maps.Geocoder | null = null;
@@ -236,7 +238,12 @@ export async function getPlaceDetails(
                 postalCode = component.long_name;
               }
               if (types.includes('country')) {
-                country = component.long_name;
+                // short_name is the ISO 3166-1 alpha-2 code, matching
+                // how `state` is read above. Reading long_name here was
+                // the source of "United States" landing in a column
+                // every other writer fills with "US". Display sites
+                // spell it back out via countryDisplayName().
+                country = component.short_name;
               }
             });
 
@@ -245,10 +252,11 @@ export async function getPlaceDetails(
               const parts = place.formatted_address.split(',');
               if (parts.length > 0) {
                 const lastPart = parts[parts.length - 1].trim();
-                if (lastPart === 'USA' || lastPart.includes('United States')) {
-                  country = 'United States';
-                } else if (lastPart.length <= 50) {
-                  country = lastPart;
+                // Normalized so this fallback agrees with the
+                // address_components path above; an unrecognized
+                // country passes through as written.
+                if (lastPart.length <= 50) {
+                  country = toCountryCode(lastPart);
                 }
               }
             }

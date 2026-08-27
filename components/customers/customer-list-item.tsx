@@ -8,6 +8,7 @@ import { Pencil, Eye, Building2, Mail, Phone } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { formatPhoneNumber, getPhoneLink } from '@/lib/format-phone';
 import { getCustomerStatusColor } from '@/lib/status-colors';
+import { countryDisplayName } from '@/lib/format-country';
 
 type Customer = Doc<'customers'>;
 
@@ -90,7 +91,7 @@ export function CustomerListItem({ customer, isSelected, onSelectionChange }: Cu
         <p className="text-sm font-medium">
           {customer.city}, {customer.state}
         </p>
-        <p className="text-xs text-muted-foreground">{customer.country}</p>
+        <p className="text-xs text-muted-foreground">{countryDisplayName(customer.country)}</p>
       </div>
 
       {/* Column 4: Primary Contact */}

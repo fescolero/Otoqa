@@ -59,6 +59,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { formatDate } from '@/lib/utils/format';
 import { analyzeLogoBlob } from '@/lib/logo-analysis';
+import { toCountryCode } from '@/lib/format-country';
 
 type OrgSettings = NonNullable<FunctionReturnType<typeof api.settings.getOrgSettings>>;
 type OrgUpdates = FunctionArgs<typeof api.settings.updateOrgSettings>['updates'];
@@ -438,7 +439,9 @@ function addressItems(
               city: data.city,
               state: data.state,
               zip: data.postalCode,
-              country: data.country,
+              // Stored as the two-letter code; the invoice templates
+              // spell it back out via countryDisplayName().
+              country: toCountryCode(data.country),
             })
           }
           ariaLabel="Street address"

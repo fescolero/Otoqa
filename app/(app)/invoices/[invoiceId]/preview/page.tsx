@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { ArrowLeft, Printer, Download, DollarSign, Receipt } from "lucide-react";
 import { toast } from "sonner";
 import Link from "next/link";
+import { countryDisplayName } from '@/lib/format-country';
 
 export default function InvoicePreviewPage() {
   const params = useParams();
@@ -56,7 +57,7 @@ export default function InvoicePreviewPage() {
         email: orgSettings.billingEmail || "billing@company.com",
         phone: formatPhoneNumber(orgSettings.billingPhone || ""),
         address: orgSettings.billingAddress
-          ? `${orgSettings.billingAddress.addressLine1}${orgSettings.billingAddress.addressLine2 ? '\n' + orgSettings.billingAddress.addressLine2 : ''}\n${orgSettings.billingAddress.city}, ${orgSettings.billingAddress.state} ${orgSettings.billingAddress.zip}\n${orgSettings.billingAddress.country}`
+          ? `${orgSettings.billingAddress.addressLine1}${orgSettings.billingAddress.addressLine2 ? '\n' + orgSettings.billingAddress.addressLine2 : ''}\n${orgSettings.billingAddress.city}, ${orgSettings.billingAddress.state} ${orgSettings.billingAddress.zip}\n${countryDisplayName(orgSettings.billingAddress.country)}`
           : "Address not available",
         logoUrl: orgSettings.logoUrl || undefined,
       }

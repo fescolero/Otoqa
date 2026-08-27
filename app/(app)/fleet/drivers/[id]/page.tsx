@@ -62,6 +62,7 @@ import {
   getDocStatus,
   type DocStatus,
 } from '@/components/web/drivers/build-driver-details';
+import { toCountryCode } from '@/lib/format-country';
 
 const formatDate = (s?: string): string => {
   if (!s) return '—';
@@ -325,7 +326,7 @@ export default function DriverDetailPage() {
         city: data.city,
         state: data.state,
         zipCode: data.postalCode,
-        country: data.country,
+        country: toCountryCode(data.country),
       });
       toast.success('Address saved');
     } catch (e) {

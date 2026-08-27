@@ -15,6 +15,7 @@ import { useState, useEffect, FormEvent, useRef } from 'react';
 import { Loader2 } from 'lucide-react';
 import { PhoneInput } from '@/components/ui/phone-input';
 import { AddressAutocomplete, AddressData } from '@/components/ui/address-autocomplete';
+import { toCountryCode } from '@/lib/format-country';
 
 export function CustomerEditContent({ customerId }: { customerId: string }) {
   const { user } = useAuth();
@@ -37,7 +38,9 @@ export function CustomerEditContent({ customerId }: { customerId: string }) {
       setCity(customer.city);
       setState(customer.state);
       setZip(customer.zip);
-      setCountry(customer.country);
+      // Normalized on seed so a legacy 'United States' / 'USA' row
+      // converges to the code the next time this customer is saved.
+      setCountry(toCountryCode(customer.country));
     }
   }, [customer]);
 
@@ -48,7 +51,7 @@ export function CustomerEditContent({ customerId }: { customerId: string }) {
       setCity(addressData.city);
       setState(addressData.state);
       setZip(addressData.postalCode);
-      setCountry(addressData.country);
+      setCountry(toCountryCode(addressData.country));
     }
   }, [addressData]);
 

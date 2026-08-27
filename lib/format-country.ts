@@ -32,3 +32,27 @@ export function toCountryCode(raw: string | undefined): string {
   if (!trimmed) return '';
   return COUNTRY_CODES[trimmed.toLowerCase()] ?? trimmed;
 }
+
+/** Reverse of `toCountryCode`, for the long form. */
+const COUNTRY_NAMES: Record<string, string> = {
+  US: 'United States',
+  CA: 'Canada',
+  MX: 'Mexico',
+};
+
+/**
+ * The spelled-out country, for postal address blocks.
+ *
+ * Invoices and address panels print this line, and a bare "US" reads
+ * wrong there. Storage is the two-letter code, so the display side
+ * needs the inverse.
+ *
+ * Tolerant on purpose: a row still holding the long name from before
+ * the code was canonical passes through unchanged, so callers do not
+ * have to know which encoding a given row has.
+ */
+export function countryDisplayName(raw: string | undefined): string {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return '';
+  return COUNTRY_NAMES[toCountryCode(trimmed)] ?? trimmed;
+}

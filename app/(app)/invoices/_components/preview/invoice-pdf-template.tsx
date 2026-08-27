@@ -1,5 +1,6 @@
 import React from 'react';
 import { Document, Page, Text, View, StyleSheet, Image } from '@react-pdf/renderer';
+import { countryDisplayName } from '@/lib/format-country';
 
 // Register fonts (optional - can use defaults)
 // Font.register({
@@ -344,7 +345,7 @@ export const InvoicePDFTemplate: React.FC<InvoicePDFTemplateProps> = ({
   const showPaymentHistory = paymentRows.length > 1;
   const paymentsTotal = paymentRows.reduce((s, r) => s + r.amount, 0);
   const customerAddress = customer.officeLocation
-    ? `${customer.officeLocation.address}\n${customer.officeLocation.city}, ${customer.officeLocation.state} ${customer.officeLocation.zip}\n${customer.officeLocation.country || 'United States'}`
+    ? `${customer.officeLocation.address}\n${customer.officeLocation.city}, ${customer.officeLocation.state} ${customer.officeLocation.zip}\n${countryDisplayName(customer.officeLocation.country) || 'United States'}`
     : 'Address not available';
 
   return (

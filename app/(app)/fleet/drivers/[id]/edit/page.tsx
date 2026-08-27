@@ -19,6 +19,7 @@ import { DateInput } from '@/components/ui/date-input';
 import { AddressAutocomplete, AddressData } from '@/components/ui/address-autocomplete';
 import { Id } from '@/convex/_generated/dataModel';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { toCountryCode } from '@/lib/format-country';
 
 export default function EditDriverPage() {
   const { user } = useAuth();
@@ -54,7 +55,8 @@ export default function EditDriverPage() {
       setCity(driver.city || '');
       setState(driver.state || '');
       setZipCode(driver.zipCode || '');
-      setCountry(driver.country || '');
+      // Normalized on seed — see toCountryCode.
+      setCountry(toCountryCode(driver.country));
       // Initialize pay plan state
       setPayPlanId(driver.payPlanId);
       setOriginalPayPlanId(driver.payPlanId);
@@ -77,7 +79,7 @@ export default function EditDriverPage() {
       setCity(addressData.city);
       setState(addressData.state);
       setZipCode(addressData.postalCode);
-      setCountry(addressData.country);
+      setCountry(toCountryCode(addressData.country));
     }
   }, [addressData]);
 
