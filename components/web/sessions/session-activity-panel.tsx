@@ -208,7 +208,16 @@ export function SessionActivityPanel(props: Props) {
         <SummaryStat
           label="Shift"
           value={formatDuration(elapsedMs)}
-          sub={`Started ${formatHHMM(session.startedAt)}`}
+          sub={[
+            `Started ${formatHHMM(session.startedAt)}`,
+            session.startMethod === 'auto_checkin' ? 'auto-start' : null,
+            session.truckScannedAt != null &&
+            session.startedAt - session.truckScannedAt >= 10 * 60_000
+              ? `QR +${Math.round((session.startedAt - session.truckScannedAt) / 60_000)}m`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
         />
         <SummaryStat
           label="Distance"

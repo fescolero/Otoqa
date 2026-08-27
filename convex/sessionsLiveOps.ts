@@ -171,6 +171,11 @@ export type LiveSession = {
 
   /** Next pending leg when nothing is ACTIVE (see UpNextLeg). */
   upNext: UpNextLeg | null;
+
+  /** How the session started; auto_checkin = no Start Shift tap. */
+  startMethod: 'driver_tap' | 'auto_checkin' | null;
+  /** Truck QR scan that paired this shift's truck (scan→start gap). */
+  truckScannedAt: number | null;
 };
 
 function deriveStatus(
@@ -464,6 +469,8 @@ export const listLiveSessions = query({
         trips,
         incidents,
         upNext,
+        startMethod: session.startMethod ?? null,
+        truckScannedAt: session.truckScannedAt ?? null,
       });
     }
 
@@ -590,6 +597,11 @@ export type PastSessionRow = {
     | null;
   endedByReasonCode: 'emergency' | 'unreachable_driver' | 'phone_issues' | null;
 
+  /** How the session started; auto_checkin = no Start Shift tap. */
+  startMethod: 'driver_tap' | 'auto_checkin' | null;
+  /** Truck QR scan that paired this shift's truck (scan→start gap). */
+  truckScannedAt: number | null;
+
   /** Crude distance estimate from successive pings via Haversine. */
   distanceKm: number;
   /** Total pings recorded under this session. */
@@ -701,6 +713,8 @@ export const listSessionsForDay = query({
         endLocation: endLoc,
         endReason: session.endReason ?? null,
         endedByReasonCode: session.endedByReasonCode ?? null,
+        startMethod: session.startMethod ?? null,
+        truckScannedAt: session.truckScannedAt ?? null,
         // Distance + ping count are derived client-side once the user
         // selects the driver and `listSessionPingsPage` paginates in.
         // Left as 0 here so the sidebar row + header stats still render

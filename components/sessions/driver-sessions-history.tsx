@@ -173,7 +173,27 @@ export function DriverSessionsHistory({ driverId }: { driverId: Id<'drivers'> })
                         {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                       </Button>
                     </TableCell>
-                    <TableCell className="text-sm">{formatTime(s.startedAt, true)}</TableCell>
+                    <TableCell className="text-sm">
+                      {formatTime(s.startedAt, true)}
+                      {s.startMethod === 'auto_checkin' && (
+                        <Badge
+                          variant="outline"
+                          className="ml-1.5 text-xs"
+                          title="No Start Shift tap — session auto-created at first check-in"
+                        >
+                          Auto-start
+                        </Badge>
+                      )}
+                      {s.truckScannedAt != null &&
+                        s.startedAt - s.truckScannedAt >= 10 * 60_000 && (
+                          <span
+                            className="ml-1.5 text-xs text-muted-foreground"
+                            title={`Truck QR scanned ${formatTime(s.truckScannedAt)} — shift started ${Math.round((s.startedAt - s.truckScannedAt) / 60_000)} min after the scan`}
+                          >
+                            QR +{Math.round((s.startedAt - s.truckScannedAt) / 60_000)}m
+                          </span>
+                        )}
+                    </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {formatTime(s.endedAt ?? null)}
                     </TableCell>

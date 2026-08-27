@@ -1871,6 +1871,10 @@ export const switchTruck = mutation({
   args: {
     driverId: v.id('drivers'),
     truckId: v.id('trucks'),
+    // Client-side scan time (ms). Offline scans queue and sync later, so
+    // the client clock is closer to the truth than server receipt time;
+    // clamped below against skew.
+    scannedAt: v.optional(v.number()),
   },
   returns: v.object({
     success: v.boolean(),
@@ -1916,8 +1920,20 @@ export const switchTruck = mutation({
       };
     }
 
-    // Check if already assigned to this truck
+    // Scan timestamp: trust the client clock within a sane window (offline
+    // scans sync late), else fall back to server time.
+    const nowMs = Date.now();
+    const scanAt =
+      args.scannedAt !== undefined &&
+      args.scannedAt <= nowMs + 5 * 60_000 &&
+      args.scannedAt >= nowMs - 24 * 60 * 60_000
+        ? args.scannedAt
+        : nowMs;
+
+    // Check if already assigned to this truck. A re-scan is still a scan —
+    // record it so the session's scan→start gap stays honest.
     if (driver.currentTruckId === args.truckId) {
+      await ctx.db.patch(args.driverId, { lastTruckScanAt: scanAt, updatedAt: nowMs });
       return {
         success: true,
         message: 'You are already assigned to this truck',
@@ -1934,7 +1950,8 @@ export const switchTruck = mutation({
     // Update driver's current truck assignment
     await ctx.db.patch(args.driverId, {
       currentTruckId: args.truckId,
-      updatedAt: Date.now(),
+      lastTruckScanAt: scanAt,
+      updatedAt: nowMs,
     });
 
     return {

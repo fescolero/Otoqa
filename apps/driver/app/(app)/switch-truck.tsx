@@ -9,6 +9,7 @@
  * into /start-shift) is preserved verbatim from the previous version.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { usePostHog } from 'posthog-react-native';
 import {
   Alert,
   Animated,
@@ -74,6 +75,7 @@ export default function SwitchTruckScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
   const [torch, setTorch] = useState(false);
+  const posthog = usePostHog();
   const [manualOpen, setManualOpen] = useState(false);
   const [manualCode, setManualCode] = useState('');
   const [isSwitching, setIsSwitching] = useState(false);
@@ -139,9 +141,19 @@ export default function SwitchTruckScreen() {
     }
     setIsSwitching(true);
 
+    // Scan moment, recorded client-side so offline-queued pairings keep
+    // the true scan time; the server clamps against clock skew. The
+    // telemetry event makes scan→start gaps visible in PostHog.
+    const scannedAt = Date.now();
+    posthog?.capture('truck_scanned', {
+      truckUnitId: data.unitId ?? null,
+      connection: connectionQuality,
+    });
+
     const mutationArgs = {
       driverId: profile._id,
       truckId: data.truckId as Id<'trucks'>,
+      scannedAt,
     };
 
     // Advance the driver to start-shift after either (a) a confirmed

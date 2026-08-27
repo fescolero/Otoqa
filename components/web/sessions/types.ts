@@ -82,6 +82,11 @@ export interface LiveSessionRow {
   trips: TripInfo[];
   incidents: number;
 
+  /** How the session started; auto_checkin = no Start Shift tap. */
+  startMethod: 'driver_tap' | 'auto_checkin' | null;
+  /** Truck QR scan that paired this shift's truck. */
+  truckScannedAt: number | null;
+
   /** Next pending leg when nothing is ACTIVE — what the geofence
    *  pre-trip arming is watching. Mirrors UpNextLeg server-side. */
   upNext: {
@@ -130,6 +135,11 @@ export interface PastSessionRow {
     | 'role_switch'
     | null;
   endedByReasonCode: 'emergency' | 'unreachable_driver' | 'phone_issues' | null;
+
+  /** How the session started; auto_checkin = no Start Shift tap. */
+  startMethod: 'driver_tap' | 'auto_checkin' | null;
+  /** Truck QR scan that paired this shift's truck. */
+  truckScannedAt: number | null;
 
   distanceKm: number;
   pingCount: number;

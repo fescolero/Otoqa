@@ -205,6 +205,17 @@ export async function endSessionInternal(
   }
 }
 
+// A scan older than this isn't "this shift's scan" — don't copy it onto
+// the session (prevents a giant bogus scan→start gap from yesterday's
+// pairing when lastTruckScanAt survives across shifts).
+const SCAN_FRESHNESS_MS = 6 * 60 * 60 * 1000;
+
+function sessionScanStamp(driver: Doc<'drivers'>, now: number): number | undefined {
+  return driver.lastTruckScanAt !== undefined && now - driver.lastTruckScanAt <= SCAN_FRESHNESS_MS
+    ? driver.lastTruckScanAt
+    : undefined;
+}
+
 // ============================================================================
 // PUBLIC MUTATIONS (driver-facing)
 // ============================================================================
@@ -249,6 +260,8 @@ export const startSession = mutation({
       organizationId: driver.organizationId,
       startedAt: now,
       status: 'active',
+      startMethod: 'driver_tap',
+      truckScannedAt: sessionScanStamp(driver, now),
     });
 
     // Same-driver rollover: any tracking row still waiting on a final
@@ -374,6 +387,10 @@ export const getOrCreateActiveSession = mutation({
       organizationId: driver.organizationId,
       startedAt: now,
       status: 'active',
+      // No Start Shift tap happened — the server is bootstrapping the
+      // session from the first check-in (scan done, tap skipped).
+      startMethod: 'auto_checkin',
+      truckScannedAt: sessionScanStamp(driver, now),
     });
     return { sessionId, created: true };
   },
@@ -476,6 +493,8 @@ export const listForDriver = query({
           softCap14hAt: session.softCap14hAt,
           truckUnitId: truck?.unitId ?? null,
           legCount,
+          startMethod: session.startMethod ?? null,
+          truckScannedAt: session.truckScannedAt ?? null,
         };
       })
     );

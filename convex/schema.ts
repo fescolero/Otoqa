@@ -753,6 +753,10 @@ export default defineSchema({
 
     // Current Equipment Assignment (for dispatch planning)
     currentTruckId: v.optional(v.id('trucks')),
+    // When the driver last scanned a truck QR (client scan time, server
+    // clamped). Copied onto sessions at start so the scan→start gap is
+    // auditable per shift.
+    lastTruckScanAt: v.optional(v.float64()),
 
     // Pay Plan Assignment (for payroll timing/schedule)
     payPlanId: v.optional(v.id('payPlans')),
@@ -3069,6 +3073,17 @@ export default defineSchema({
 
     startedAt: v.float64(),
     endedAt: v.optional(v.float64()),
+
+    // How the session came to exist: the driver explicitly tapped Start
+    // Shift, or the server auto-created it at first check-in because the
+    // driver scanned the truck but skipped the tap (bootstrap grace).
+    // Absent on rows from before this field shipped.
+    startMethod: v.optional(v.union(v.literal('driver_tap'), v.literal('auto_checkin'))),
+    // The truck QR scan that paired the truck for this shift (copied from
+    // drivers.lastTruckScanAt when recent). startedAt − truckScannedAt is
+    // the scan→start gap: a large gap means the driver scanned at the
+    // yard but started the shift much later (often from the road).
+    truckScannedAt: v.optional(v.float64()),
 
     endReason: v.optional(
       v.union(
