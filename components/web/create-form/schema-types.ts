@@ -130,6 +130,12 @@ export interface FormField {
   toggleLabel?: string;
   /** select / segmented options. */
   options?: FieldOption[];
+  /**
+   * select: render a "— None —" item so an already-set value can be
+   * un-assigned. Off by default — a field whose value is required, or
+   * whose mutation has no way to clear the column, should not offer it.
+   */
+  clearable?: boolean;
   /** address composite — sub-field id mapping. */
   ids?: {
     street: string;

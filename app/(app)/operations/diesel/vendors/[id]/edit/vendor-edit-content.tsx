@@ -33,8 +33,9 @@ import { Loader2 } from 'lucide-react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { convexErrorMessage } from '@/lib/convex-error';
 import { Button } from '@/components/ui/button';
-import { CreateForm } from '@/components/web/create-form';
+import { CreateForm, SaveAborted } from '@/components/web/create-form';
 import {
   buildFuelVendorSchema,
   mapRecordToFuelVendorVals,
@@ -101,20 +102,33 @@ export function VendorEditContent({ vendorId }: { vendorId: string }) {
       onSaved={async (vals) => {
         if (!user) {
           toast.error('Not signed in — please refresh and try again.');
-          return;
+          throw new SaveAborted();
         }
         try {
           const args = mapValsToFuelVendorUpdateArgs(vals);
           await updateVendor({
             vendorId: typedVendorId,
             ...args,
+            // Refuse to overwrite a revision we never showed the user
+            // — the translator sends every field, so a blind save
+            // would revert whoever wrote in between.
+            expectedUpdatedAt: vendor.updatedAt,
             updatedBy: user.id,
           });
           toast.success('Fuel vendor updated.');
           router.push(`/operations/diesel/vendors/${vendorId}`);
         } catch (err) {
           console.error('Failed to update fuel vendor:', err);
-          toast.error('Failed to update fuel vendor. Please try again.');
+          // A stale-write rejection needs its own copy — "please try
+          // again" is wrong advice when a retry re-sends the same
+          // stale revision.
+          toast.error(
+            convexErrorMessage(err) ??
+              'Failed to update fuel vendor. Please try again.',
+          );
+          // Already explained — abort so the shell neither re-toasts
+          // nor treats the failed save as a success.
+          throw new SaveAborted();
         }
       }}
     />

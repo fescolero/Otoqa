@@ -35,6 +35,28 @@ const DISCOUNT_PROGRAM_OPTIONS: FieldOption[] = [
   { value: 'OTHER', label: 'Other' },
 ];
 
+/**
+ * Fold a stored discount program onto the canonical option value when
+ * it differs only by casing.
+ *
+ * The picker matches options by exact value, so a legacy row holding
+ * 'Comdata' would neither select the 'COMDATA' option nor compare
+ * equal to it — it would be appended as a second, visually identical
+ * entry. Normalizing on seed means the canonical option is selected
+ * and the next save rewrites the row to the canonical value, so rows
+ * converge as they are edited instead of needing a migration.
+ *
+ * A genuinely off-list value ('Comdata network') is returned
+ * unchanged and still gets appended as an option, so nothing the user
+ * never chose is silently discarded.
+ */
+export function canonicalDiscountProgram(raw: string): string {
+  const match = DISCOUNT_PROGRAM_OPTIONS.find(
+    (o) => o.value.toLowerCase() === raw.trim().toLowerCase(),
+  );
+  return match ? match.value : raw;
+}
+
 export const FUEL_VENDOR_FIELD_IDS = {
   name: 'name',
   code: 'code',
@@ -76,13 +98,12 @@ export function buildFuelVendorSchema(
   const { mode = 'create', currentDiscountProgram } = args;
   const isEdit = mode === 'edit';
 
+  const canonical = currentDiscountProgram
+    ? canonicalDiscountProgram(currentDiscountProgram)
+    : undefined;
   const discountOptions: FieldOption[] =
-    currentDiscountProgram &&
-    !DISCOUNT_PROGRAM_OPTIONS.some((o) => o.value === currentDiscountProgram)
-      ? [
-          ...DISCOUNT_PROGRAM_OPTIONS,
-          { value: currentDiscountProgram, label: currentDiscountProgram },
-        ]
+    canonical && !DISCOUNT_PROGRAM_OPTIONS.some((o) => o.value === canonical)
+      ? [...DISCOUNT_PROGRAM_OPTIONS, { value: canonical, label: canonical }]
       : DISCOUNT_PROGRAM_OPTIONS;
 
   return {
@@ -322,7 +343,11 @@ export function mapRecordToFuelVendorVals(
     [ids.name]: record.name ?? '',
     [ids.code]: record.code ?? '',
     [ids.accountNumber]: record.accountNumber ?? '',
-    [ids.discountProgram]: record.discountProgram ?? '',
+    // Normalized so a legacy 'Comdata' selects the COMDATA option and
+    // the next save converges the row — see canonicalDiscountProgram.
+    [ids.discountProgram]: record.discountProgram
+      ? canonicalDiscountProgram(record.discountProgram)
+      : '',
     [ids.contactName]: record.contactName ?? '',
     [ids.contactEmail]: record.contactEmail ?? '',
     [ids.contactPhone]: record.contactPhone ?? '',

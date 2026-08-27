@@ -23,6 +23,7 @@ import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { convexErrorMessage } from '@/lib/convex-error';
 import { Button } from '@/components/ui/button';
 import { CreateForm, SaveAborted, bindUploaders } from '@/components/web/create-form';
 import {
@@ -204,12 +205,17 @@ export function FuelEntryEditContent({ id }: { id: string }) {
             await updateDefEntry({
               entryId: id as Id<'defEntries'>,
               ...defArgs,
+              // Refuse to overwrite a revision we never showed the
+              // user — the translator sends every field, so a blind
+              // save would revert whoever wrote in between.
+              expectedUpdatedAt: entry.updatedAt,
               updatedBy: user.id,
             });
           } else {
             await updateFuelEntry({
               entryId: id as Id<'fuelEntries'>,
               ...args,
+              expectedUpdatedAt: entry.updatedAt,
               updatedBy: user.id,
             });
           }
@@ -217,7 +223,13 @@ export function FuelEntryEditContent({ id }: { id: string }) {
           router.push(`/operations/diesel/${id}?type=${type}`);
         } catch (err) {
           console.error(`Failed to update ${typeLabel} entry:`, err);
-          toast.error(`Failed to update ${typeLabel} entry. Please try again.`);
+          // A stale-write rejection needs its own copy — "please try
+          // again" is wrong advice when a retry re-sends the same
+          // stale revision.
+          toast.error(
+            convexErrorMessage(err) ??
+              `Failed to update ${typeLabel} entry. Please try again.`,
+          );
           // Already explained — abort so the shell neither re-toasts
           // nor treats the failed save as a success.
           throw new SaveAborted();

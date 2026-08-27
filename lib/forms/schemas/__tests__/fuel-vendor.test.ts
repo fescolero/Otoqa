@@ -112,6 +112,24 @@ describe('fuel-vendor edit mode', () => {
     expect(mapValsToFuelVendorUpdateArgs(vals).country).toBe('CA');
   });
 
+  it('folds a legacy discount program onto the canonical casing', () => {
+    // Seeded normalized, so the COMDATA option is actually selected and
+    // the next save converges the row — no migration needed.
+    const vals = mapRecordToFuelVendorVals({
+      name: 'Legacy',
+      discountProgram: 'Comdata',
+    });
+    expect(vals.discountProgram).toBe('COMDATA');
+
+    // ...and it is not appended as a second, identically-labelled entry.
+    const schema = buildFuelVendorSchema({
+      mode: 'edit',
+      currentDiscountProgram: 'Comdata',
+    });
+    const opts = fieldById(schema, 'discountProgram')?.options ?? [];
+    expect(opts.filter((o) => o.label === 'Comdata')).toHaveLength(1);
+  });
+
   it('offers a stored discount program that predates the option list', () => {
     // The legacy hand-rolled edit form wrote this field as free text.
     const schema = buildFuelVendorSchema({

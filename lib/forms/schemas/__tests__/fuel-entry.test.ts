@@ -58,6 +58,24 @@ describe('fuel-entry edit mode', () => {
     expect(readLoadReference(vals)).toBe('FK-96073365');
   });
 
+  it('sends null, not undefined, for a cleared assignment', () => {
+    const vals = mapRecordToFuelEntryVals({ ...RECORD, driverId: 'driver_1' });
+    const args = mapValsToFuelEntryUpdateArgs(
+      { ...vals, [IDS.driverId]: '' },
+      RECORD,
+    );
+
+    // undefined would be stripped from the mutation args and read
+    // server-side as "not submitted", leaving the old driver assigned.
+    expect(args.driverId).toBeNull();
+    expect(Object.keys(JSON.parse(JSON.stringify(args)))).toContain('driverId');
+  });
+
+  it('keeps an assignment that was not cleared', () => {
+    const vals = mapRecordToFuelEntryVals({ ...RECORD, driverId: 'driver_1' });
+    expect(mapValsToFuelEntryUpdateArgs(vals, RECORD).driverId).toBe('driver_1');
+  });
+
   it('reports a blanked linked-load box as "no reference"', () => {
     // The page turns this into an explicit `loadId: null` for the
     // mutation — `undefined` would be stripped from the args and read

@@ -145,6 +145,7 @@ export function renderField({
           onChange={(next) => set(field.id, next)}
           options={field.options ?? []}
           placeholder={field.placeholder}
+          clearable={field.clearable}
           hasError={!!error}
         />
       );

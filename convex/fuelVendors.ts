@@ -3,6 +3,10 @@ import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
 
+/** Surfaced verbatim to the user, so keep it actionable. */
+const STALE_WRITE_MESSAGE =
+  'This record changed since you opened it. Reload to see the latest, then reapply your edit.';
+
 export const list = query({
   args: {
     organizationId: v.string(),
@@ -112,6 +116,9 @@ export const update = mutation({
     zip: v.optional(v.string()),
     country: v.optional(v.string()),
     notes: v.optional(v.string()),
+    /** The `updatedAt` the client rendered from; rejects a stale
+     *  overwrite. Omit to keep last-write-wins. */
+    expectedUpdatedAt: v.optional(v.number()),
     updatedBy: v.string(),
   },
   handler: async (ctx, args) => {
@@ -119,7 +126,21 @@ export const update = mutation({
     const existing = await ctx.db.get(args.vendorId);
     if (!existing || existing.organizationId !== callerOrgId) throw new ConvexError('Vendor not found');
 
-    const { vendorId, updatedBy: _updatedBy, ...updates } = args;
+
+    // Optimistic concurrency. The form seeds once on mount and its
+    // translator emits EVERY field, not just the ones the user
+    // touched — so a blind patch silently reverts anyone who wrote in
+    // between. When the client tells us which revision it rendered,
+    // refuse to overwrite a newer one. Optional so callers that don't
+    // send it (mobile, bulk paths) keep last-write-wins.
+    if (
+      args.expectedUpdatedAt !== undefined &&
+      existing.updatedAt !== args.expectedUpdatedAt
+    ) {
+      throw new ConvexError(STALE_WRITE_MESSAGE);
+    }
+
+    const { vendorId, updatedBy: _updatedBy, expectedUpdatedAt: _expected, ...updates } = args;
     const changedFields: Array<string> = [];
     const before: Record<string, unknown> = {};
     const after: Record<string, unknown> = {};

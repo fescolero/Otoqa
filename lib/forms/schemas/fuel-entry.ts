@@ -287,6 +287,7 @@ export function buildFuelEntrySchema(
             id: ids.driverId,
             label: 'Driver',
             kind: 'select',
+            clearable: true,
             recommended: true,
             placeholder:
               driverOptions.length === 0 ? 'No drivers loaded' : '— None —',
@@ -296,6 +297,7 @@ export function buildFuelEntrySchema(
             id: ids.truckId,
             label: 'Truck',
             kind: 'select',
+            clearable: true,
             recommended: true,
             placeholder:
               truckOptions.length === 0 ? 'No trucks loaded' : '— None —',
@@ -305,6 +307,7 @@ export function buildFuelEntrySchema(
             id: ids.carrierId,
             label: 'Carrier',
             kind: 'select',
+            clearable: true,
             placeholder: '— None —',
             options: carrierOptions,
             hint: 'Only set when the fill-up was for an outside carrier.',
@@ -559,8 +562,12 @@ export function mapRecordToFuelEntryVals(
  *  accepts all fields as optional. We just narrow the create translator's
  *  return type so the page wrapper can spread it into the update call. */
 export type FuelEntryUpdateArgs = Partial<
-  Omit<FuelEntryCreateArgs, 'loadId'>
+  Omit<FuelEntryCreateArgs, 'loadId' | 'driverId' | 'truckId' | 'carrierId'>
 > & {
+  /** `null` un-assigns. See `clearableId` for why not `undefined`. */
+  driverId?: Id<'drivers'> | null;
+  truckId?: Id<'trucks'> | null;
+  carrierId?: Id<'carrierPartnerships'> | null;
   /**
    * `null` unlinks the load. It cannot be `undefined`: Convex strips
    * undefined-valued keys out of mutation args, so `undefined` reads
@@ -569,13 +576,31 @@ export type FuelEntryUpdateArgs = Partial<
   loadId?: Id<'loadInformation'> | null;
 };
 
+/**
+ * An assignment the user can un-set. Blank means "clear it", which has
+ * to reach the mutation as `null` — `undefined` is stripped from the
+ * args and reads server-side as "not submitted". Sending `null` for a
+ * field that was already empty is a harmless no-op.
+ */
+function clearableId<T extends string>(v: unknown): T | null {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return s ? (s as T) : null;
+}
+
 export function mapValsToFuelEntryUpdateArgs(
   vals: Record<string, unknown>,
   previous?: Pick<FuelEntryRecord, 'entryDate'>,
 ): FuelEntryUpdateArgs {
   // Same shape; update mutation just doesn't require the
   // organizationId / createdBy that create needs.
-  const args = mapValsToFuelEntryArgs(vals);
+  const ids = FUEL_ENTRY_FIELD_IDS;
+  const base = mapValsToFuelEntryArgs(vals);
+  const args: FuelEntryUpdateArgs = {
+    ...base,
+    driverId: clearableId<Id<'drivers'>>(vals[ids.driverId]),
+    truckId: clearableId<Id<'trucks'>>(vals[ids.truckId]),
+    carrierId: clearableId<Id<'carrierPartnerships'>>(vals[ids.carrierId]),
+  };
 
   // The date control carries a calendar day only, so a plain round
   // trip rewrites a stored timestamp's time-of-day to local midnight
@@ -584,7 +609,7 @@ export function mapValsToFuelEntryUpdateArgs(
   // original timestamp whenever the calendar day is unchanged.
   if (
     previous &&
-    unixMsToYmd(previous.entryDate) === unixMsToYmd(args.entryDate)
+    unixMsToYmd(previous.entryDate) === unixMsToYmd(base.entryDate)
   ) {
     return { ...args, entryDate: previous.entryDate };
   }

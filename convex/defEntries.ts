@@ -131,6 +131,10 @@ async function enrichDefEntry(ctx: any, entry: any) {
   };
 }
 
+/** Surfaced verbatim to the user, so keep it actionable. */
+const STALE_WRITE_MESSAGE =
+  'This record changed since you opened it. Reload to see the latest, then reapply your edit.';
+
 export const list = query({
   args: {
     ...listArgs,
@@ -268,9 +272,9 @@ export const update = mutation({
   args: {
     entryId: v.id('defEntries'),
     entryDate: v.optional(v.number()),
-    driverId: v.optional(v.id('drivers')),
-    carrierId: v.optional(v.id('carrierPartnerships')),
-    truckId: v.optional(v.id('trucks')),
+    driverId: v.optional(v.union(v.id('drivers'), v.null())),
+    carrierId: v.optional(v.union(v.id('carrierPartnerships'), v.null())),
+    truckId: v.optional(v.union(v.id('trucks'), v.null())),
     vendorId: v.optional(v.id('fuelVendors')),
     gallons: v.optional(v.number()),
     pricePerGallon: v.optional(v.number()),
@@ -288,6 +292,9 @@ export const update = mutation({
     paymentMethod: paymentMethodValidator,
     notes: v.optional(v.string()),
     receiptStorageId: v.optional(v.id('_storage')),
+    /** The `updatedAt` the client rendered from; rejects a stale
+     *  overwrite. Omit to keep last-write-wins. */
+    expectedUpdatedAt: v.optional(v.number()),
     updatedBy: v.string(),
   },
   handler: async (ctx, args) => {
@@ -295,7 +302,21 @@ export const update = mutation({
     const existing = await ctx.db.get(args.entryId);
     if (!existing || existing.organizationId !== callerOrgId) throw new ConvexError('DEF entry not found');
 
-    const { entryId, updatedBy: _updatedBy, ...updates } = args;
+
+    // Optimistic concurrency. The form seeds once on mount and its
+    // translator emits EVERY field, not just the ones the user
+    // touched — so a blind patch silently reverts anyone who wrote in
+    // between. When the client tells us which revision it rendered,
+    // refuse to overwrite a newer one. Optional so callers that don't
+    // send it (mobile, bulk paths) keep last-write-wins.
+    if (
+      args.expectedUpdatedAt !== undefined &&
+      existing.updatedAt !== args.expectedUpdatedAt
+    ) {
+      throw new ConvexError(STALE_WRITE_MESSAGE);
+    }
+
+    const { entryId, updatedBy: _updatedBy, expectedUpdatedAt: _expected, ...updates } = args;
     const changedFields: Array<string> = [];
     const before: Record<string, unknown> = {};
     const after: Record<string, unknown> = {};
@@ -324,17 +345,20 @@ export const update = mutation({
     const pricePerGallon = updates.pricePerGallon ?? existing.pricePerGallon;
     const totalCost = Math.round(gallons * pricePerGallon * 100) / 100;
 
-    // Unlinking a load has to travel as `null`: Convex strips
+    // Clearing an assignment has to travel as `null`: Convex strips
     // undefined-valued keys out of mutation args before they reach the
-    // server, so `loadId: undefined` is indistinguishable from "the
-    // client never submitted this field" and would silently leave the
-    // old link in place. `ctx.db.patch` deletes a field whose value is
+    // server, so `undefined` is indistinguishable from "the client
+    // never submitted this field" and would silently leave the old
+    // value in place. `ctx.db.patch` deletes a field whose value is
     // `undefined`, so translate the signal here — and leave the key
     // out entirely when the client didn't send it.
-    const { loadId: loadIdArg, ...patchable } = updates;
+    const { driverId, carrierId, truckId, loadId, ...patchable } = updates;
     await ctx.db.patch(args.entryId, {
       ...patchable,
-      ...(loadIdArg !== undefined ? { loadId: loadIdArg ?? undefined } : {}),
+      ...(driverId !== undefined ? { driverId: driverId ?? undefined } : {}),
+      ...(carrierId !== undefined ? { carrierId: carrierId ?? undefined } : {}),
+      ...(truckId !== undefined ? { truckId: truckId ?? undefined } : {}),
+      ...(loadId !== undefined ? { loadId: loadId ?? undefined } : {}),
       totalCost,
       updatedAt: Date.now(),
     });
