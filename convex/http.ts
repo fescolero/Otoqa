@@ -218,6 +218,118 @@ http.route({
 });
 
 // ============================================
+// EAS BUILD WEBHOOK
+// ============================================
+
+/**
+ * HMAC-SHA1 hex digest, Web Crypto only (V8 runtime). EAS signs each
+ * webhook body with the shared secret and sends `sha1=<hex>` in the
+ * `expo-signature` header.
+ */
+async function hmacSha1Hex(secret: string, body: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-1' },
+    false,
+    ['sign'],
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(body));
+  return Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/** Constant-time string equality (both sides hex, same alphabet). */
+function timingSafeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+// The driver app's EAS project (apps/driver/app.json extra.eas.projectId).
+// Builds of any other project that shares the webhook secret are ignored.
+const DRIVER_EAS_PROJECT_ID = '6449e793-4e00-49e3-be2f-586c9ffc4dd2';
+
+/**
+ * Auto-advance the driver-app release channel when an EAS build finishes.
+ * Registered once with `eas webhook:create --event BUILD` pointing at
+ * https://<deployment>.convex.site/eas/build-webhook with the same secret
+ * as the EAS_WEBHOOK_SECRET Convex env var.
+ *
+ * Only `latestBuild` / `latestVersion` / `installUrl` move (see
+ * driverAppConfig.recordBuild); the mandatory floor stays human-set. Skips
+ * anything that is not a finished driver-project build on a shipping
+ * profile. Benign skips return 200 so EAS doesn't retry them.
+ */
+http.route({
+  path: '/eas/build-webhook',
+  method: 'POST',
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.EAS_WEBHOOK_SECRET;
+    if (!secret) return new Response('EAS webhook not configured', { status: 501 });
+
+    const body = await request.text();
+    const header = request.headers.get('expo-signature') ?? '';
+    const expected = `sha1=${await hmacSha1Hex(secret, body)}`;
+    if (!timingSafeEqualHex(header, expected)) {
+      return new Response('Invalid signature', { status: 401 });
+    }
+
+    let payload: {
+      appId?: string;
+      platform?: string;
+      status?: string;
+      buildDetailsPageUrl?: string;
+      artifacts?: { buildUrl?: string };
+      metadata?: { appVersion?: string; appBuildVersion?: string; buildProfile?: string };
+    };
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return new Response('Malformed payload', { status: 400 });
+    }
+
+    if (payload.appId !== DRIVER_EAS_PROJECT_ID) return new Response('ignored: project', { status: 200 });
+    if (payload.status !== 'finished') return new Response('ignored: status', { status: 200 });
+    if (payload.platform !== 'android' && payload.platform !== 'ios') {
+      return new Response('ignored: platform', { status: 200 });
+    }
+
+    // Development-client builds never ship to drivers.
+    const profile = payload.metadata?.buildProfile;
+    if (profile === 'development') return new Response('ignored: profile', { status: 200 });
+
+    const buildNumber = Number(payload.metadata?.appBuildVersion);
+    if (!Number.isInteger(buildNumber) || buildNumber <= 0) {
+      return new Response('ignored: no build number', { status: 200 });
+    }
+
+    // Android: the artifact IS the installable APK. iOS: the artifact is an
+    // IPA a phone can't install directly — the build page (which hands off
+    // to TestFlight/ad-hoc install) is the useful link.
+    const installUrl =
+      payload.platform === 'android'
+        ? (payload.artifacts?.buildUrl ?? payload.buildDetailsPageUrl)
+        : (payload.buildDetailsPageUrl ?? payload.artifacts?.buildUrl);
+    if (!installUrl || !/^https:\/\//.test(installUrl)) {
+      return new Response('ignored: no install url', { status: 200 });
+    }
+
+    const appVersion = payload.metadata?.appVersion;
+    const outcome = await ctx.runMutation(internal.driverAppConfig.recordBuild, {
+      platform: payload.platform,
+      latestBuild: buildNumber,
+      installUrl,
+      latestVersion: appVersion ? `${appVersion} (${buildNumber})` : undefined,
+    });
+    return new Response(outcome, { status: 200 });
+  }),
+});
+
+// ============================================
 // HEALTH CHECK
 // ============================================
 

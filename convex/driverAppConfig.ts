@@ -49,6 +49,62 @@ export const get = query({
   },
 });
 
+/**
+ * Webhook-driven half of the release channel: EAS calls
+ * /eas/build-webhook (convex/http.ts) when a build finishes, and that
+ * route records it here. Merge semantics, not replace: the fields a
+ * human owns — minSupportedBuild (the mandatory-update floor),
+ * dispatchPhone, message — survive untouched; only what the build
+ * pipeline knows (latestBuild, its display label, the install link)
+ * moves. A stale or re-delivered webhook can never roll the channel
+ * back: builds below the current latestBuild are dropped.
+ */
+export const recordBuild = internalMutation({
+  args: {
+    platform: platformValidator,
+    latestBuild: v.number(),
+    installUrl: v.string(),
+    latestVersion: v.optional(v.string()),
+  },
+  returns: v.union(v.literal('recorded'), v.literal('ignored_stale')),
+  handler: async (ctx, args) => {
+    if (!Number.isInteger(args.latestBuild) || args.latestBuild <= 0) {
+      throw new ConvexError('latestBuild must be a positive integer');
+    }
+    if (!/^https:\/\//.test(args.installUrl)) {
+      throw new ConvexError('installUrl must be an https URL');
+    }
+
+    const existing = await ctx.db
+      .query('driverAppConfig')
+      .withIndex('by_platform', (q) => q.eq('platform', args.platform))
+      .unique();
+
+    if (existing && args.latestBuild < existing.latestBuild) return 'ignored_stale';
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        latestBuild: args.latestBuild,
+        installUrl: args.installUrl,
+        latestVersion: args.latestVersion,
+        updatedAt: Date.now(),
+      });
+    } else {
+      await ctx.db.insert('driverAppConfig', {
+        platform: args.platform,
+        latestBuild: args.latestBuild,
+        // Permissive floor until a human raises it — a webhook must never
+        // lock drivers out on its own.
+        minSupportedBuild: 1,
+        installUrl: args.installUrl,
+        latestVersion: args.latestVersion,
+        updatedAt: Date.now(),
+      });
+    }
+    return 'recorded';
+  },
+});
+
 export const setConfig = internalMutation({
   args: {
     platform: platformValidator,
