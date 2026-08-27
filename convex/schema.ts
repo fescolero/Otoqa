@@ -4511,6 +4511,21 @@ export default defineSchema({
     .index('by_dedupe', ['dedupeKey', 'status'])
     .index('by_status_time', ['status', 'lastSeenAt']),
 
+  // Driver-app release channel: the newest native build per platform and the
+  // oldest build still allowed to run. Read (unauthenticated) by the driver
+  // app's UpdateGate, which shows a dismissible "update available" banner when
+  // the phone's build is behind `latestBuild` and a blocking screen when it's
+  // below `minSupportedBuild`. One row per platform; written via the
+  // driverAppConfig.setConfig internal mutation (CLI) after each `eas build`.
+  driverAppConfig: defineTable({
+    platform: v.union(v.literal('android'), v.literal('ios')),
+    latestBuild: v.number(),
+    minSupportedBuild: v.number(),
+    installUrl: v.string(),
+    message: v.optional(v.string()),
+    updatedAt: v.number(),
+  }).index('by_platform', ['platform']),
+
   systemEvents: defineTable({
     severity: v.union(
       v.literal('info'),

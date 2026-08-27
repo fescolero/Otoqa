@@ -30,6 +30,7 @@ import { uploadPODPhoto } from '../lib/s3-upload';
 import { configureQuietChannels } from 'otoqa-shift-status';
 import { LanguageProvider } from '../lib/LanguageContext';
 import { ThemeProvider } from '../lib/ThemeContext';
+import { UpdateGate } from '../components/UpdateGate';
 import { setPostHogClient, trackErrorBoundary, captureAppException, trackOtaUpdateCheck, getAppVersionContext, trackConvexAuthEvent } from '../lib/analytics';
 
 // ============================================
@@ -557,6 +558,10 @@ export default function RootLayout() {
                             <Stack.Screen name="(app)" options={{ headerShown: false }} />
                           </Stack>
                           <StatusBar style="light" />
+                          {/* Native-build update banner / block. Sits above
+                              both the (auth) and (app) stacks so a driver on
+                              a dead build sees it even signed out. */}
+                          <UpdateGate />
                         </ConvexInitializer>
                       </QueryClientProvider>
                     </ConvexAuthProvider>

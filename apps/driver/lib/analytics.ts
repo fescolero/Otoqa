@@ -315,6 +315,17 @@ export function trackAutoUpdateSkipped(context: {
   capture('auto_update_skipped', { ...context, ...getAppVersionContext() });
 }
 
+// Convex-driven native-build gate (components/UpdateGate.tsx) — distinct
+// from the OTA events above, which cover JS bundles. `banner_*` is the
+// dismissible "update available" nudge; `blocked_*` is the hard wall shown
+// below minSupportedBuild.
+export function trackUpdateGate(
+  kind: 'banner_shown' | 'banner_tapped' | 'banner_dismissed' | 'blocked_shown' | 'blocked_tapped',
+  context: { latestBuild: number; minSupportedBuild: number }
+) {
+  capture('update_gate', { kind, ...context, ...getAppVersionContext() });
+}
+
 export function trackWeatherFetchFailed(error: string) {
   capture('weather_fetch_failed', { error });
 }
