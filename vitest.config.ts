@@ -3,7 +3,25 @@ import react from '@vitejs/plugin-react';
 import path from 'node:path';
 
 /**
- * Three test projects:
+ * Pin the timezone so a run means the same thing everywhere — a
+ * developer in Los Angeles, one in Tokyo, and CI all agree. Assigned
+ * at module scope so it is in `process.env` before Vitest forks its
+ * workers, which inherit it; setting it inside a setup file is too
+ * late for some environments.
+ *
+ * This buys reproducibility, NOT permission to assume UTC. Pinning
+ * hides zone-dependent bugs as easily as it prevents flakes: the
+ * `formatTimestamp` test passed on UTC CI for the life of the repo
+ * while failing for anyone west of Greenwich, precisely because
+ * nothing ever ran it in another zone. Tests that touch calendar
+ * dates should still be written to hold in ANY zone — build inputs
+ * in local time, or assert against the same formatter — so that a
+ * genuine bug is not masked by the pin.
+ */
+process.env.TZ = 'UTC';
+
+/**
+ * Four test projects:
  *   - convex: edge-runtime (existing, untouched behavior)
  *   - web: jsdom + React Testing Library for components/web/* primitives
  *   - dispatch: node, pure logic under apps/dispatch/lib (voice parser)
