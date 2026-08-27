@@ -3291,49 +3291,96 @@ export const autoExpireStaleLoads = internalMutation({
  * typed text has to be translated before the create/update mutation
  * sees it — passing the raw string through fails arg validation.
  *
- * Lookup order mirrors `invoices`' matcher: internalId, the FK-
- * prefixed internalId, then orderNumber. All three are index reads.
- * Returns `null` when nothing matches so the caller can surface a
- * field-level "not found" instead of a generic save failure.
+ * Lookup order mirrors `invoices`' matcher (convex/invoices.ts,
+ * `recordBulkPayments`) rung for rung, so a reference that resolves
+ * in the payment importer resolves here too: orderNumber, internalId,
+ * the FK-prefixed internalId, then the FourKites externalLoadId in
+ * both casing variants. All are index reads.
+ *
+ * Each rung takes two rows rather than one. `internalId` and
+ * `orderNumber` carry no uniqueness constraint — nothing on the write
+ * path enforces one — so a reference matching several loads is
+ * reported as `ambiguous` rather than silently resolving to whichever
+ * row the index happened to return first.
  */
+type ResolvedReference =
+  | { status: 'not_found' }
+  | { status: 'ambiguous'; count: number }
+  | {
+      status: 'ok';
+      loadId: Id<'loadInformation'>;
+      internalId: string;
+      orderNumber?: string;
+    };
+
 export const resolveReference = query({
-  args: { workosOrgId: v.string(), reference: v.string() },
-  handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+  args: { reference: v.string() },
+  handler: async (ctx, args): Promise<ResolvedReference> => {
+    const callerOrgId = await requireCallerOrgId(ctx);
 
     const val = args.reference.trim();
-    if (!val) return null;
+    if (!val) return { status: 'not_found' };
 
-    const byInternal = await ctx.db
-      .query('loadInformation')
-      .withIndex('by_internal_id', (q) =>
-        q.eq('workosOrgId', args.workosOrgId).eq('internalId', val),
-      )
-      .first();
-
-    const byFk =
-      byInternal ??
-      (await ctx.db
-        .query('loadInformation')
-        .withIndex('by_internal_id', (q) =>
-          q.eq('workosOrgId', args.workosOrgId).eq('internalId', `FK-${val}`),
-        )
-        .first());
-
-    const match =
-      byFk ??
-      (await ctx.db
+    // Every rung takes 2 rows so a duplicate is visible instead of
+    // being collapsed by `.first()`.
+    const byOrderNumber = (value: string) =>
+      ctx.db
         .query('loadInformation')
         .withIndex('by_order_number', (q) =>
-          q.eq('workosOrgId', args.workosOrgId).eq('orderNumber', val),
+          q.eq('workosOrgId', callerOrgId).eq('orderNumber', value),
         )
-        .first());
+        .take(2);
 
-    if (!match) return null;
-    return {
-      _id: match._id,
-      internalId: match.internalId,
-      orderNumber: match.orderNumber,
+    const byInternalId = (value: string) =>
+      ctx.db
+        .query('loadInformation')
+        .withIndex('by_internal_id', (q) =>
+          q.eq('workosOrgId', callerOrgId).eq('internalId', value),
+        )
+        .take(2);
+
+    // The FourKites shipment id is a different number from internalId,
+    // and `by_external_id` is not org-scoped, so filter afterwards.
+    const byExternalLoadId = async (value: string) => {
+      const hits: Array<Doc<'loadInformation'>> = [];
+      for (const source of ['FourKites', 'FOURKITES']) {
+        const rows = await ctx.db
+          .query('loadInformation')
+          .withIndex('by_external_id', (q) =>
+            q.eq('externalSource', source).eq('externalLoadId', value),
+          )
+          .take(2);
+        hits.push(...rows.filter((r) => r.workosOrgId === callerOrgId));
+      }
+      return hits;
     };
+
+    const rungs: Array<() => Promise<Array<Doc<'loadInformation'>>>> = [
+      // 1. orderNumber (e.g. "96073365")
+      () => byOrderNumber(val),
+      // 2. internalId directly (e.g. "96073365")
+      () => byInternalId(val),
+      // 3. internalId with the FK- prefix (e.g. "FK-96073365")
+      () => byInternalId(`FK-${val}`),
+      // 4. FourKites shipment id (e.g. "663929530")
+      () => byExternalLoadId(val),
+    ];
+
+    for (const rung of rungs) {
+      const matches = await rung();
+      if (matches.length === 0) continue;
+      if (matches.length > 1) {
+        return { status: 'ambiguous', count: matches.length };
+      }
+      const match = matches[0];
+      return {
+        status: 'ok',
+        loadId: match._id,
+        internalId: match.internalId,
+        orderNumber: match.orderNumber,
+      };
+    }
+
+    return { status: 'not_found' };
   },
 });

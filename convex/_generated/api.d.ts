@@ -118,6 +118,7 @@ import type * as lib_geo from "../lib/geo.js";
 import type * as lib_hos from "../lib/hos.js";
 import type * as lib_legTracking from "../lib/legTracking.js";
 import type * as lib_loadFacets from "../lib/loadFacets.js";
+import type * as lib_loadReference from "../lib/loadReference.js";
 import type * as lib_money from "../lib/money.js";
 import type * as lib_permissions from "../lib/permissions.js";
 import type * as lib_platformAudit from "../lib/platformAudit.js";
@@ -360,6 +361,7 @@ declare const fullApi: ApiFromModules<{
   "lib/hos": typeof lib_hos;
   "lib/legTracking": typeof lib_legTracking;
   "lib/loadFacets": typeof lib_loadFacets;
+  "lib/loadReference": typeof lib_loadReference;
   "lib/money": typeof lib_money;
   "lib/permissions": typeof lib_permissions;
   "lib/platformAudit": typeof lib_platformAudit;

@@ -20,6 +20,7 @@
  * row with no country stays blank rather than being backfilled.
  */
 
+import type { Doc } from '@/convex/_generated/dataModel';
 import type {
   CreateFormSchema,
   FieldOption,
@@ -43,7 +44,6 @@ export const FUEL_VENDOR_FIELD_IDS = {
   contactEmail: 'contactEmail',
   contactPhone: 'contactPhone',
   addrStreet: 'addressLine',
-  addrSuite: 'addrSuite', // UI-only — vendor table has no addressLine2
   addrCity: 'city',
   addrState: 'state',
   addrZip: 'zip',
@@ -177,17 +177,20 @@ export function buildFuelVendorSchema(
             kind: 'address',
             ids: {
               street: ids.addrStreet,
-              suite: ids.addrSuite,
               city: ids.addrCity,
               state: ids.addrState,
               zip: ids.addrZip,
+              // Wired so picking a non-US address from the
+              // autocomplete fills the country field below instead of
+              // leaving it on its 'US' default.
+              country: ids.country,
             },
           },
           {
-            // Sits outside the composite: the shared address control
-            // has no country slot, and adding one would change every
-            // schema that renders an address. The composite forces a
-            // full-width row, so this lands on its own line beneath it.
+            // Rendered outside the composite because the composite
+            // forces a full-width row, so this lands on its own line
+            // beneath it. The composite still WRITES here on
+            // autocomplete via its optional `country` id slot.
             //
             // No length validation on purpose — rows written by the
             // legacy hand-rolled edit form can hold 'United States',
@@ -223,11 +226,12 @@ export function buildFuelVendorSchema(
 /* ────────────────────────────────────────────────────────────────────
  *  Value-shape translator
  *
- *  No special-case fields here — every entry is a flat scalar. The
- *  vendor table has no `addressLine2` column, so the UI-only Suite
- *  field (`addrSuite`) is silently dropped. If we ever add suite
- *  support to the schema, surface it by promoting addrSuite to a real
- *  Convex field.
+ *  No special-case fields here — every entry is a flat scalar.
+ *
+ *  The composite is deliberately wired without a `suite` id: the
+ *  vendor table has no `addressLine2` column, so rendering that input
+ *  would collect a value with nowhere to store it and drop it on
+ *  save. Add the column first if suite support is ever wanted.
  * ──────────────────────────────────────────────────────────────── */
 
 export interface FuelVendorCreateArgs {
@@ -282,24 +286,33 @@ export function mapValsToFuelVendorArgs(
  *  an older row's blank country blank instead of backfilling it.
  * ──────────────────────────────────────────────────────────────── */
 
-/** Subset of the persisted row the schema reads. Redeclared locally so
- *  this file stays free of Convex imports, matching the fuel-entry
- *  schema's convention. */
-export interface FuelVendorRecord {
-  name: string;
-  code?: string;
-  accountNumber?: string;
-  discountProgram?: string;
-  contactName?: string;
-  contactEmail?: string;
-  contactPhone?: string;
-  addressLine?: string;
-  city?: string;
-  state?: string;
-  zip?: string;
-  country?: string;
-  notes?: string;
-}
+/**
+ * Subset of the persisted row the schema reads.
+ *
+ * Derived from the generated `Doc<'fuelVendors'>` rather than
+ * hand-redeclared: a hand-written copy lets a column rename in
+ * convex/schema.ts compile cleanly here, and the mapper would then
+ * seed a blank field that the next save writes back over the real
+ * value. `Pick` turns that into a build error. (`fuel-entry.ts`
+ * already imports from `_generated/dataModel`, so this is the file's
+ * existing convention, not a new dependency.)
+ */
+export type FuelVendorRecord = Pick<
+  Doc<'fuelVendors'>,
+  | 'name'
+  | 'code'
+  | 'accountNumber'
+  | 'discountProgram'
+  | 'contactName'
+  | 'contactEmail'
+  | 'contactPhone'
+  | 'addressLine'
+  | 'city'
+  | 'state'
+  | 'zip'
+  | 'country'
+  | 'notes'
+>;
 
 export function mapRecordToFuelVendorVals(
   record: FuelVendorRecord,

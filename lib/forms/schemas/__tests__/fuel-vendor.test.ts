@@ -41,7 +41,10 @@ const FULL_RECORD: FuelVendorRecord = {
 describe('fuel-vendor edit mode', () => {
   it('round-trips every persisted column through vals and back', () => {
     const vals = mapRecordToFuelVendorVals(FULL_RECORD);
-    expect(mapValsToFuelVendorUpdateArgs(vals)).toEqual(FULL_RECORD);
+    // toStrictEqual, not toEqual: toEqual ignores keys whose value is
+    // `undefined`, so it cannot tell "mapped correctly" from "dropped
+    // on the floor" — the exact drift this file exists to catch.
+    expect(mapValsToFuelVendorUpdateArgs(vals)).toStrictEqual(FULL_RECORD);
   });
 
   it('maps absent optional columns to undefined, not empty strings', () => {
@@ -66,9 +69,37 @@ describe('fuel-vendor edit mode', () => {
     expect(mapValsToFuelVendorUpdateArgs(vals).country).toBeUndefined();
   });
 
-  it('clears country when the user empties the field', () => {
+  it('emits undefined for an emptied field — which the wire then drops', () => {
     const vals = mapRecordToFuelVendorVals({ name: 'Petro-Canada', country: 'CA' });
-    expect(mapValsToFuelVendorUpdateArgs({ ...vals, country: '' }).country).toBeUndefined();
+    const args = mapValsToFuelVendorUpdateArgs({ ...vals, country: '' });
+
+    // The translator's half of the contract.
+    expect(args.country).toBeUndefined();
+
+    // And the half that makes clearing impossible today: Convex strips
+    // undefined-valued keys out of mutation args, so `country` never
+    // reaches `ctx.db.patch` and the stored 'CA' survives the save.
+    // Asserting on the serialized payload is the only way to see it —
+    // `toBeUndefined` alone reads as "clearing works", which it does
+    // not. Clearing an optional vendor column needs an explicit null
+    // signal, the way `fuelEntries.update` handles `loadId`.
+    expect(Object.keys(JSON.parse(JSON.stringify(args)))).not.toContain(
+      'country',
+    );
+  });
+
+  it('wires the country field into the address composite', () => {
+    // Without this the autocomplete resolves a country and throws it
+    // away, so picking a Toronto address still saves the vendor as US.
+    const composite = fieldById(buildFuelVendorSchema(), 'addressComposite');
+    expect(composite?.ids?.country).toBe('country');
+  });
+
+  it('does not render a suite input the vendor table cannot store', () => {
+    // fuelVendors has no addressLine2 column; rendering the composite's
+    // suite input would collect a value and silently drop it on save.
+    const composite = fieldById(buildFuelVendorSchema(), 'addressComposite');
+    expect(composite?.ids?.suite).toBeUndefined();
   });
 
   it('renders country inside the address section', () => {

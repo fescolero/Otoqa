@@ -39,7 +39,6 @@ import {
   buildFuelVendorSchema,
   mapRecordToFuelVendorVals,
   mapValsToFuelVendorUpdateArgs,
-  type FuelVendorRecord,
 } from '@/lib/forms/schemas/fuel-vendor';
 
 export function VendorEditContent({ vendorId }: { vendorId: string }) {
@@ -64,7 +63,7 @@ export function VendorEditContent({ vendorId }: { vendorId: string }) {
   // record id — see the comment at the key itself.
   const initialValues = React.useMemo(() => {
     if (!vendor) return undefined;
-    return mapRecordToFuelVendorVals(vendor as FuelVendorRecord);
+    return mapRecordToFuelVendorVals(vendor);
   }, [vendor]);
 
   // ── Render gates — same loading / not-found fallbacks the diesel

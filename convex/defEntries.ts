@@ -4,6 +4,7 @@ import { paginationOptsValidator } from 'convex/server';
 import type { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
+import { loadReferenceOf } from './lib/loadReference';
 
 const paymentMethodValidator = v.optional(
   v.union(
@@ -109,11 +110,12 @@ function matchesDefSearch(entry: any, search: string | undefined) {
 }
 
 async function enrichDefEntry(ctx: any, entry: any) {
-  const [vendor, driver, carrier, truck] = (await Promise.all([
+  const [vendor, driver, carrier, truck, load] = (await Promise.all([
     ctx.db.get(entry.vendorId),
     entry.driverId ? ctx.db.get(entry.driverId) : null,
     entry.carrierId ? ctx.db.get(entry.carrierId) : null,
     entry.truckId ? ctx.db.get(entry.truckId) : null,
+    entry.loadId ? ctx.db.get(entry.loadId) : null,
   ])) as any[];
 
   return {
@@ -122,6 +124,10 @@ async function enrichDefEntry(ctx: any, entry: any) {
     driverName: driver ? `${driver.firstName} ${driver.lastName}` : undefined,
     carrierName: carrier?.carrierName ?? undefined,
     truckUnitId: truck?.unitId ?? undefined,
+    // List rows carry the load number too — without it the reports and
+    // the vendor detail table fall back to printing a slice of the raw
+    // document id.
+    loadReference: loadReferenceOf(load),
   };
 }
 
@@ -186,12 +192,10 @@ export const get = query({
       driverName: driver ? `${driver.firstName} ${driver.lastName}` : undefined,
       carrierName: carrier?.carrierName ?? undefined,
       truckUnitId: truck?.unitId ?? undefined,
-      // `loadInformation` has no `referenceNumber` column — the
-      // human-facing load number is `internalId` (`orderNumber` is
-      // the fallback for rows that predate it). Reading the missing
-      // field made this always-undefined, so every consumer fell
-      // back to printing the raw document id.
-      loadReference: load ? (load.internalId ?? load.orderNumber) : undefined,
+      // `loadInformation` has no `referenceNumber` column — reading
+      // that missing field made this always-undefined, so every
+      // consumer fell back to printing the raw document id.
+      loadReference: loadReferenceOf(load),
       receiptUrl,
     };
   },
@@ -274,7 +278,13 @@ export const update = mutation({
     location: locationValidator,
     fuelCardNumber: v.optional(v.string()),
     receiptNumber: v.optional(v.string()),
-    loadId: v.optional(v.id('loadInformation')),
+    /**
+     * `null` clears the link. Convex strips undefined-valued keys out
+     * of mutation args, so `undefined` here means "not submitted" and
+     * leaves the existing link untouched — an explicit clear needs its
+     * own value.
+     */
+    loadId: v.optional(v.union(v.id('loadInformation'), v.null())),
     paymentMethod: paymentMethodValidator,
     notes: v.optional(v.string()),
     receiptStorageId: v.optional(v.id('_storage')),
@@ -291,9 +301,21 @@ export const update = mutation({
     const after: Record<string, unknown> = {};
 
     for (const [key, value] of Object.entries(updates)) {
-      if (value !== undefined && JSON.stringify((existing as Record<string, unknown>)[key]) !== JSON.stringify(value)) {
+      const prev = (existing as Record<string, unknown>)[key];
+      // `null` is the explicit "clear this field" signal — see the
+      // patch below. It only counts as a change when there was
+      // actually a value to clear, otherwise every save of an
+      // already-blank field would log a phantom edit.
+      if (value === null) {
+        if (prev === undefined) continue;
         changedFields.push(key);
-        before[key] = (existing as Record<string, unknown>)[key];
+        before[key] = prev;
+        after[key] = null;
+        continue;
+      }
+      if (value !== undefined && JSON.stringify(prev) !== JSON.stringify(value)) {
+        changedFields.push(key);
+        before[key] = prev;
         after[key] = value;
       }
     }
@@ -302,8 +324,17 @@ export const update = mutation({
     const pricePerGallon = updates.pricePerGallon ?? existing.pricePerGallon;
     const totalCost = Math.round(gallons * pricePerGallon * 100) / 100;
 
+    // Unlinking a load has to travel as `null`: Convex strips
+    // undefined-valued keys out of mutation args before they reach the
+    // server, so `loadId: undefined` is indistinguishable from "the
+    // client never submitted this field" and would silently leave the
+    // old link in place. `ctx.db.patch` deletes a field whose value is
+    // `undefined`, so translate the signal here — and leave the key
+    // out entirely when the client didn't send it.
+    const { loadId: loadIdArg, ...patchable } = updates;
     await ctx.db.patch(args.entryId, {
-      ...updates,
+      ...patchable,
+      ...(loadIdArg !== undefined ? { loadId: loadIdArg ?? undefined } : {}),
       totalCost,
       updatedAt: Date.now(),
     });

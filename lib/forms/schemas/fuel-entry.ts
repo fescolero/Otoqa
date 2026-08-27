@@ -558,14 +558,37 @@ export function mapRecordToFuelEntryVals(
  *  `pricePerGallon` being required — Convex's `update` validator
  *  accepts all fields as optional. We just narrow the create translator's
  *  return type so the page wrapper can spread it into the update call. */
-export type FuelEntryUpdateArgs = Partial<FuelEntryCreateArgs>;
+export type FuelEntryUpdateArgs = Partial<
+  Omit<FuelEntryCreateArgs, 'loadId'>
+> & {
+  /**
+   * `null` unlinks the load. It cannot be `undefined`: Convex strips
+   * undefined-valued keys out of mutation args, so `undefined` reads
+   * as "not submitted" server-side and leaves the old link in place.
+   */
+  loadId?: Id<'loadInformation'> | null;
+};
 
 export function mapValsToFuelEntryUpdateArgs(
   vals: Record<string, unknown>,
+  previous?: Pick<FuelEntryRecord, 'entryDate'>,
 ): FuelEntryUpdateArgs {
   // Same shape; update mutation just doesn't require the
   // organizationId / createdBy that create needs.
-  return mapValsToFuelEntryArgs(vals);
+  const args = mapValsToFuelEntryArgs(vals);
+
+  // The date control carries a calendar day only, so a plain round
+  // trip rewrites a stored timestamp's time-of-day to local midnight
+  // — silently moving `entryDate` and logging a phantom "changed the
+  // date" audit row on a save that never touched it. Hand back the
+  // original timestamp whenever the calendar day is unchanged.
+  if (
+    previous &&
+    unixMsToYmd(previous.entryDate) === unixMsToYmd(args.entryDate)
+  ) {
+    return { ...args, entryDate: previous.entryDate };
+  }
+  return args;
 }
 
 function unixMsToYmd(ms: number): string {

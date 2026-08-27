@@ -29,7 +29,7 @@ import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { useAuthQuery } from '@/hooks/use-auth-query';
-import { CreateForm, bindUploaders } from '@/components/web/create-form';
+import { CreateForm, SaveAborted, bindUploaders } from '@/components/web/create-form';
 import {
   buildFuelEntrySchema,
   mapValsToFuelEntryArgs,
@@ -104,7 +104,7 @@ export default function CreateFuelEntryPage() {
       onSaved={async (vals, andNew) => {
         if (!organizationId || !user) {
           toast.error('Not signed in — please refresh and try again.');
-          return;
+          throw new SaveAborted();
         }
         // "Linked load" is free text — the mutation wants a document
         // id. Resolve it first; a typo shouldn't fail arg validation
@@ -112,15 +112,28 @@ export default function CreateFuelEntryPage() {
         const loadRef = readLoadReference(vals);
         let loadId: Id<'loadInformation'> | undefined;
         if (loadRef) {
-          const match = await convex.query(api.loads.resolveReference, {
-            workosOrgId: organizationId,
-            reference: loadRef,
-          });
-          if (!match) {
-            toast.error(`No load found for “${loadRef}”. Check the load number or clear the field.`);
-            return;
+          let match;
+          try {
+            match = await convex.query(api.loads.resolveReference, {
+              reference: loadRef,
+            });
+          } catch (err) {
+            console.error('Failed to resolve the linked load:', err);
+            toast.error('Could not look up that load number. Please try again.');
+            throw new SaveAborted();
           }
-          loadId = match._id;
+          if (match.status === 'ambiguous') {
+            toast.error(`“${loadRef}” matches ${match.count} loads. Use the internal load ID instead.`);
+            throw new SaveAborted();
+          }
+          if (match.status === 'not_found') {
+            toast.error(`No load found for “${loadRef}”. Check the load number or clear the field.`);
+            // Abort rather than return: a bare return reads as a
+            // successful save, and "Save & new" would then reset the
+            // form and discard everything the user typed.
+            throw new SaveAborted();
+          }
+          loadId = match.loadId;
         }
         try {
           const args = mapValsToFuelEntryArgs(vals);
@@ -139,6 +152,9 @@ export default function CreateFuelEntryPage() {
         } catch (err) {
           console.error('Failed to create fuel entry:', err);
           toast.error('Failed to create fuel entry. Please try again.');
+          // Already explained — abort so the shell neither re-toasts
+          // nor treats the failed save as a success.
+          throw new SaveAborted();
         }
       }}
     />
