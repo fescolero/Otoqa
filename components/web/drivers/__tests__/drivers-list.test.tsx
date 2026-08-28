@@ -25,8 +25,15 @@ vi.mock('@/components/web/comments-thread', () => ({
 // DriversList queries api.savedViews.listForEntity for persisted views and
 // the SavedViewCreatePopover uses a mutation to insert one. Stub both so
 // the page renders deterministically with no persisted views.
+//
+// `useConvexAuth` is stubbed as already-authenticated because the list now
+// reads through useAuthQuery, which gates the subscription on it — without
+// this the hook would hold at 'skip' and the saved-views assertions below
+// would exercise the signed-out path instead of the loaded one.
 vi.mock('convex/react', () => ({
+  useConvexAuth: () => ({ isAuthenticated: true, isLoading: false }),
   useQuery: () => ({ user: [], org: [] }),
+  usePaginatedQuery: () => ({ results: [], status: 'Exhausted', loadMore: vi.fn() }),
   useMutation: () => vi.fn(),
 }));
 
