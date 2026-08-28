@@ -36,7 +36,10 @@ export const consoleSelfCheck = query({
     const snapshots = await jobByName(SNAPSHOT_JOB);
     const allJobs = await ctx.db.query('cronHealth').collect();
 
-    const staffAllowlistSize = (process.env.STAFF_EMAIL_ALLOWLIST ?? '')
+    // Typed for the same reason as `requireCallerStaff` in lib/auth.ts — the
+    // Expo tsconfigs compile convex/ without @types/node.
+    const staffAllowlistRaw: string = process.env.STAFF_EMAIL_ALLOWLIST ?? '';
+    const staffAllowlistSize = staffAllowlistRaw
       .split(',')
       .map((e) => e.trim())
       .filter(Boolean).length;
