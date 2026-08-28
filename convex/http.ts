@@ -318,12 +318,13 @@ http.route({
       return new Response('ignored: no install url', { status: 200 });
     }
 
-    const appVersion = payload.metadata?.appVersion;
+    // Display label is the plain marketing version ("1.8.0") — drivers never
+    // see build numbers; latestBuild carries the machine-comparable identity.
     const outcome = await ctx.runMutation(internal.driverAppConfig.recordBuild, {
       platform: payload.platform,
       latestBuild: buildNumber,
       installUrl,
-      latestVersion: appVersion ? `${appVersion} (${buildNumber})` : undefined,
+      latestVersion: payload.metadata?.appVersion || undefined,
     });
     return new Response(outcome, { status: 200 });
   }),

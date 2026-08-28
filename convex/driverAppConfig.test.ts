@@ -174,7 +174,7 @@ describe('EAS build webhook (/eas/build-webhook)', () => {
     const config = await t.query(api.driverAppConfig.get, { platform: 'android' });
     expect(config).toMatchObject({
       latestBuild: 18,
-      latestVersion: '1.0.0 (18)',
+      latestVersion: '1.0.0',
       installUrl: 'https://expo.dev/artifacts/eas/app.apk', // APK, not the build page
       minSupportedBuild: 1,
     });

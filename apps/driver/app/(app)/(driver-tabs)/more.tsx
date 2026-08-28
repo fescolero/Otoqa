@@ -360,9 +360,9 @@ export default function MoreScreen() {
         <View style={styles.rowCard}>
           <View style={styles.infoRow}>
             <Text style={styles.infoKey}>Version</Text>
-            <Text style={styles.infoValue}>
-              v{appVersion} ({buildNumber})
-            </Text>
+            {/* Build number stays out of the driver-facing row — it lives in
+                the About alert for support calls. */}
+            <Text style={styles.infoValue}>v{appVersion}</Text>
           </View>
           {!isEmbeddedLaunch && otaShortId && (
             <>

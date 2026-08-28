@@ -65,9 +65,7 @@ export function UpdateGate() {
   if (!config || !behind) return null;
 
   const newLabel = config.latestVersion ?? `build ${config.latestBuild}`;
-  const currentLabel = Application.nativeApplicationVersion
-    ? `${Application.nativeApplicationVersion} (${build})`
-    : `build ${build}`;
+  const currentLabel = Application.nativeApplicationVersion ?? `build ${build}`;
 
   const openInstall = async (kind: 'banner_tapped' | 'blocked_tapped') => {
     trackUpdateGate(kind, {
