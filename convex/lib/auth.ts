@@ -162,9 +162,12 @@ export async function requirePlatformStaff(ctx: AnyCtx): Promise<PlatformStaffId
     );
   }
 
+  // `e` is annotated because the Expo tsconfigs compile this file without
+  // Node types, where `process.env.X` widens to `any` and the callback
+  // parameter becomes an implicit any under `strict`.
   const allowlist = (process.env.STAFF_EMAIL_ALLOWLIST ?? '')
     .split(',')
-    .map((e) => e.trim().toLowerCase())
+    .map((e: string) => e.trim().toLowerCase())
     .filter(Boolean);
   if (!allowlist.includes(email)) {
     throw new ConvexError('Not platform staff (email is not on STAFF_EMAIL_ALLOWLIST)');

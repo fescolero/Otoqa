@@ -24,6 +24,7 @@ import type { Id } from '@/convex/_generated/dataModel';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { convexErrorMessage } from '@/lib/convex-error';
+import { useSeededRevision } from '@/lib/forms/use-seeded-revision';
 import { Button } from '@/components/ui/button';
 import { CreateForm, SaveAborted, bindUploaders } from '@/components/web/create-form';
 import {
@@ -118,15 +119,11 @@ export function FuelEntryEditContent({ id }: { id: string }) {
   // form when the record changes — usually only happens once on first
   // load, but covers the edge case where the record updates server-side
   // mid-session.
-  // The revision the form was SEEDED from. `entry` comes from a
-  // reactive query, so reading `entry.updatedAt` at save time would
-  // always equal the server's current value — the staleness check
-  // could never fire, which is exactly the bug it exists to catch.
-  // Latched once, alongside the values the form seeds from.
-  const seededUpdatedAt = React.useRef<number | undefined>(undefined);
-  if (entry && seededUpdatedAt.current === undefined) {
-    seededUpdatedAt.current = entry.updatedAt;
-  }
+  // The revision the form was SEEDED from, latched per record id for the
+  // same reason the <CreateForm> below is keyed: this component is NOT
+  // remounted when the user moves between two entries' edit pages. See
+  // use-seeded-revision.
+  const seededUpdatedAt = useSeededRevision(entry);
 
   const initialValues = React.useMemo(() => {
     if (!entry) return undefined;
@@ -218,14 +215,14 @@ export function FuelEntryEditContent({ id }: { id: string }) {
               // Refuse to overwrite a revision we never showed the
               // user — the translator sends every field, so a blind
               // save would revert whoever wrote in between.
-              expectedUpdatedAt: seededUpdatedAt.current,
+              expectedUpdatedAt: seededUpdatedAt,
               updatedBy: user.id,
             });
           } else {
             await updateFuelEntry({
               entryId: id as Id<'fuelEntries'>,
               ...args,
-              expectedUpdatedAt: seededUpdatedAt.current,
+              expectedUpdatedAt: seededUpdatedAt,
               updatedBy: user.id,
             });
           }
