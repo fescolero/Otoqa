@@ -1,10 +1,9 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
-import { useQuery, useMutation, usePaginatedQuery, useConvexAuth } from 'convex/react';
+import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { useAuthQuery } from '@/hooks/use-auth-query';
+import { useAuthQuery, useAuthPaginatedQuery } from '@/hooks/use-auth-query';
 import { Id } from '@/convex/_generated/dataModel';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
@@ -159,35 +158,33 @@ export function MobileDispatchPlanner({
     workosOrgId: organizationId,
   });
 
-  // Infinite-scroll the load list. usePaginatedQuery injects `paginationOpts`
-  // and accumulates pages, so the list is no longer capped at the first 100.
-  const { isAuthenticated } = useConvexAuth();
+  // Infinite-scroll the load list. useAuthPaginatedQuery injects
+  // `paginationOpts` and accumulates pages, so the list is no longer capped at
+  // the first 100.
   const {
     results: loads,
     status: loadsStatus,
     loadMore: loadMoreLoads,
-  } = usePaginatedQuery(
+  } = useAuthPaginatedQuery(
     api.loads.getLoads,
-    isAuthenticated
-      ? {
-          workosOrgId: organizationId,
-          status: statusFilter as 'Open' | 'Assigned' | 'Completed' | 'Canceled',
-          search: filters.search || undefined,
-          hcr: filters.hcr || undefined,
-          tripNumber: filters.tripNumber || undefined,
-          startDate: filters.startDate || undefined,
-          endDate: filters.endDate || undefined,
-        }
-      : 'skip',
+    {
+      workosOrgId: organizationId,
+      status: statusFilter as 'Open' | 'Assigned' | 'Completed' | 'Canceled',
+      search: filters.search || undefined,
+      hcr: filters.hcr || undefined,
+      tripNumber: filters.tripNumber || undefined,
+      startDate: filters.startDate || undefined,
+      endDate: filters.endDate || undefined,
+    },
     { initialNumItems: 100 },
   );
 
-  const loadDetails = useQuery(
+  const loadDetails = useAuthQuery(
     api.loads.getByIdWithRange,
     selectedLoadId ? { loadId: selectedLoadId } : 'skip'
   );
 
-  const availableDrivers = useQuery(
+  const availableDrivers = useAuthQuery(
     api.dispatchLegs.getAvailableDrivers,
     loadDetails?.startTime
       ? {
