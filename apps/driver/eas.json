@@ -24,6 +24,7 @@
     "preview": {
       "distribution": "internal",
       "channel": "preview",
+      "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_CONVEX_URL": "https://greedy-vole-262.convex.cloud",
         "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Z2xvd2luZy1zaGVlcGRvZy05Ny5jbGVyay5hY2NvdW50cy5kZXYk",
