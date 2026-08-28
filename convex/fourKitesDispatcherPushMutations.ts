@@ -162,6 +162,13 @@ export const getPushPayloadInputsForLoad = internalQuery({
  * Result rides on the by_org_tracking_status index for both branches.
  * Each row carries its companion fourKitesPushState cursor (if any) so the
  * action can dedup without a second N+1 query.
+ *
+ * Read shape is three indexed reads, flat in the number of loads: the two
+ * tracking-status branches plus the org's cursor rows, joined by loadId in
+ * memory. It must stay that way — a per-load cursor lookup here is what
+ * exhausted the query's system-operation budget once the org grew past a
+ * few hundred active loads, and the cron cannot make progress when this
+ * query dies.
  */
 export const listFourKitesPushCandidates = internalQuery({
   args: { workosOrgId: v.string() },
@@ -179,7 +186,7 @@ export const listFourKitesPushCandidates = internalQuery({
     }),
   ),
   handler: async (ctx, args) => {
-    const branches = await Promise.all([
+    const [inTransit, pending, pushStates] = await Promise.all([
       ctx.db
         .query('loadInformation')
         .withIndex('by_org_tracking_status', (q) =>
@@ -192,7 +199,30 @@ export const listFourKitesPushCandidates = internalQuery({
           q.eq('workosOrgId', args.workosOrgId).eq('trackingStatus', 'Pending'),
         )
         .collect(),
+      // The org's whole cursor set in ONE indexed read, joined in memory
+      // below. This used to be a `by_load` lookup inside the candidate loop:
+      // one database operation per In Transit / Pending load, awaited in
+      // series. At this org's load count that is >1,500 sequential
+      // operations in a single query, which is what tripped Convex's
+      // "too many system operations" limit and killed the 60s push tick.
+      // fourKitesPushState holds at most one row per FK load, so this read
+      // is bounded by the same load count the branches above already scan.
+      ctx.db
+        .query('fourKitesPushState')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+        .collect(),
     ]);
+
+    // First-write-wins reproduces the old `.first()` semantics exactly: the
+    // by_org index yields rows in _creationTime order, so the row kept here
+    // is the same one a `by_load` `.first()` would have returned had a
+    // racing tick ever inserted a duplicate cursor for a load.
+    const pushStateByLoadId = new Map<Id<'loadInformation'>, (typeof pushStates)[number]>();
+    for (const pushState of pushStates) {
+      if (!pushStateByLoadId.has(pushState.loadId)) {
+        pushStateByLoadId.set(pushState.loadId, pushState);
+      }
+    }
 
     const candidates: Array<{
       loadId: any;
@@ -203,14 +233,11 @@ export const listFourKitesPushCandidates = internalQuery({
       pushStateId?: any;
     }> = [];
 
-    for (const load of [...branches[0], ...branches[1]]) {
+    for (const load of [...inTransit, ...pending]) {
       if (!isFourKitesSource(load.externalSource)) continue;
       if (!load.externalLoadId) continue;
 
-      const pushState = await ctx.db
-        .query('fourKitesPushState')
-        .withIndex('by_load', (q) => q.eq('loadId', load._id))
-        .first();
+      const pushState = pushStateByLoadId.get(load._id);
 
       candidates.push({
         loadId: load._id,
