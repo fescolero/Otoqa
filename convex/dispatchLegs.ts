@@ -1567,69 +1567,113 @@ export const getOrgSchedule = query({
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
-    const legs = await ctx.db
-      .query('dispatchLegs')
-      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
-      .collect();
+    // 1. Stream the org's legs, excluding CANCELED at the index. They never
+    //    render on the schedule, so there's no reason to spend reads on them.
+    const legs = (
+      await Promise.all(
+        (['PENDING', 'ACTIVE', 'COMPLETED'] as const).map((status) =>
+          ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_org_status', (q) =>
+              q.eq('workosOrgId', args.workosOrgId).eq('status', status)
+            )
+            .collect()
+        )
+      )
+    ).flat();
 
-    const enriched = await Promise.all(
-      legs.map(async (leg) => {
-        // Skip canceled — they shouldn't render on a forward-looking schedule.
-        if (leg.status === 'CANCELED') return null;
-
-        // Prefer the denormalized window; fall back to live stop reads for
-        // legs that haven't been backfilled yet.
-        let start = leg.scheduledStartMs ?? null;
-        let end = leg.scheduledEndMs ?? null;
-        if (start === null || end === null) {
-          const range = await getLegTimeRange(ctx, leg);
-          if (!range) return null;
-          start = range.start;
-          end = range.end;
-        }
-
-        // Overlap test against the requested window.
-        if (end < args.startMs || start > args.endMs) return null;
-
-        const [load, startStop, endStop, facets] = await Promise.all([
-          ctx.db.get(leg.loadId),
-          ctx.db.get(leg.startStopId),
-          ctx.db.get(leg.endStopId),
-          getLoadFacets(ctx, leg.loadId),
-        ]);
-
-        return {
-          _id: leg._id,
-          driverId: leg.driverId ?? null,
-          carrierPartnershipId: leg.carrierPartnershipId ?? null,
-          status: leg.status,
-          startMs: start,
-          endMs: end,
-          startedAt: leg.startedAt ?? null,
-          endedAt: leg.endedAt ?? null,
-          load: load
-            ? {
-                _id: load._id,
-                orderNumber: load.orderNumber,
-                internalId: load.internalId,
-                status: load.status,
-              }
-            : null,
-          hcr: facets.hcr ?? null,
-          tripNumber: facets.trip ?? null,
-          startCity: startStop?.city ?? null,
-          startState: startStop?.state ?? null,
-          startCheckedInAt: startStop?.checkedInAt ?? null,
-          startCheckedOutAt: startStop?.checkedOutAt ?? null,
-          endCity: endStop?.city ?? null,
-          endState: endStop?.state ?? null,
-          endCheckedInAt: endStop?.checkedInAt ?? null,
-          endCheckedOutAt: endStop?.checkedOutAt ?? null,
-        };
-      })
+    // 2. Legs carrying the denormalized window cost zero reads to place.
+    //    The rest need live stop times — fetch those stops once per unique
+    //    stop id rather than two db.gets per leg (getLegTimeRange's per-leg
+    //    idiom), since consecutive legs on a load share a stop.
+    const needsStopFallback = legs.filter(
+      (leg) => (leg.scheduledStartMs ?? null) === null || (leg.scheduledEndMs ?? null) === null
+    );
+    const fallbackStopsById = await getManyByIds(
+      ctx,
+      needsStopFallback.flatMap((leg) => [leg.startStopId, leg.endStopId])
     );
 
-    return enriched.filter((x): x is NonNullable<typeof x> => x !== null);
+    // 3. Resolve each leg's window and keep only the ones intersecting the
+    //    requested range. Everything after this point is paid per *surviving*
+    //    leg, not per leg in the org's entire history.
+    const inWindow: Array<{ leg: Doc<'dispatchLegs'>; start: number; end: number }> = [];
+    for (const leg of legs) {
+      let start = leg.scheduledStartMs ?? null;
+      let end = leg.scheduledEndMs ?? null;
+      if (start === null || end === null) {
+        // Mirrors getLegTimeRange: windowBeginTime for BOTH stops (actual
+        // appointment times), and drop the leg if either stop is missing or
+        // its window doesn't parse.
+        const startStop = fallbackStopsById.get(leg.startStopId);
+        const endStop = fallbackStopsById.get(leg.endStopId);
+        if (!startStop || !endStop) continue;
+        start = parseStopDateTime(startStop.windowBeginDate, startStop.windowBeginTime);
+        end = parseStopDateTime(endStop.windowBeginDate, endStop.windowBeginTime);
+        if (start === null || end === null) continue;
+      }
+
+      // Overlap test against the requested window.
+      if (end < args.startMs || start > args.endMs) continue;
+
+      inWindow.push({ leg, start, end });
+    }
+
+    // 4. Enrich the survivors with one read per unique referenced document.
+    //    A load routinely has several legs on the same board, so deduping the
+    //    load doc + its facet tags is where the read budget is won: the old
+    //    code spent 4 operations per leg (load, 2 stops, facet index scan),
+    //    which is what tripped "too many system operations" on large orgs.
+    const stopIdsToFetch = inWindow
+      .flatMap(({ leg }) => [leg.startStopId, leg.endStopId])
+      .filter((id) => !fallbackStopsById.has(id));
+    const uniqueLoadIds = Array.from(new Set(inWindow.map(({ leg }) => leg.loadId)));
+
+    const [loadsById, extraStopsById, facetsByLoadId] = await Promise.all([
+      getManyByIds(ctx, uniqueLoadIds),
+      getManyByIds(ctx, stopIdsToFetch),
+      Promise.all(uniqueLoadIds.map((id) => getLoadFacets(ctx, id))).then(
+        (facets) => new Map(uniqueLoadIds.map((id, i) => [id, facets[i]]))
+      ),
+    ]);
+    const getStop = (id: Id<'loadStops'>) =>
+      extraStopsById.get(id) ?? fallbackStopsById.get(id) ?? null;
+
+    return inWindow.map(({ leg, start, end }) => {
+      const load = loadsById.get(leg.loadId) ?? null;
+      const startStop = getStop(leg.startStopId);
+      const endStop = getStop(leg.endStopId);
+      const facets = facetsByLoadId.get(leg.loadId);
+
+      return {
+        _id: leg._id,
+        driverId: leg.driverId ?? null,
+        carrierPartnershipId: leg.carrierPartnershipId ?? null,
+        status: leg.status,
+        startMs: start,
+        endMs: end,
+        startedAt: leg.startedAt ?? null,
+        endedAt: leg.endedAt ?? null,
+        load: load
+          ? {
+              _id: load._id,
+              orderNumber: load.orderNumber,
+              internalId: load.internalId,
+              status: load.status,
+            }
+          : null,
+        hcr: facets?.hcr ?? null,
+        tripNumber: facets?.trip ?? null,
+        startCity: startStop?.city ?? null,
+        startState: startStop?.state ?? null,
+        startCheckedInAt: startStop?.checkedInAt ?? null,
+        startCheckedOutAt: startStop?.checkedOutAt ?? null,
+        endCity: endStop?.city ?? null,
+        endState: endStop?.state ?? null,
+        endCheckedInAt: endStop?.checkedInAt ?? null,
+        endCheckedOutAt: endStop?.checkedOutAt ?? null,
+      };
+    });
   },
 });
 
