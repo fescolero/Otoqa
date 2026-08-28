@@ -4,6 +4,7 @@ import { ReactNode, useCallback, useRef, useState } from 'react';
 import { ConvexReactClient } from 'convex/react';
 import { ConvexProviderWithAuth } from 'convex/react';
 import { AuthKitProvider, useAuth, useAccessToken } from '@workos-inc/authkit-nextjs/components';
+import { fetchConvexAccessToken } from '@/lib/convex-access-token';
 
 export function ConvexClientProvider({ children }: { children: ReactNode }) {
   const [convex] = useState(() => {
@@ -35,29 +36,16 @@ function useAuthFromAuthKit() {
   // object is hydrated on the client.
   const isLoading = loading || (!isAuthenticated && !hasResolved.current);
 
+  // Policy lives in lib/convex-access-token.ts — see the header there for why
+  // returning `null` on a transient failure tears down every live query.
   const fetchAccessToken = useCallback(
-    async ({ forceRefreshToken }: { forceRefreshToken?: boolean } = {}): Promise<string | null> => {
-      if (!user) return null;
-
-      const MAX_RETRIES = 3;
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        try {
-          const token = forceRefreshToken
-            ? ((await refresh()) ?? null)
-            : ((await getAccessToken()) ?? null);
-
-          if (token) return token;
-        } catch {
-          // Transient failure — fall through to retry
-        }
-
-        if (attempt < MAX_RETRIES) {
-          await new Promise((r) => setTimeout(r, 100 * (attempt + 1)));
-        }
-      }
-
-      return null;
-    },
+    ({ forceRefreshToken }: { forceRefreshToken?: boolean } = {}): Promise<string | null> =>
+      fetchConvexAccessToken({
+        hasUser: !!user,
+        forceRefreshToken,
+        refresh,
+        getAccessToken,
+      }),
     [user, refresh, getAccessToken],
   );
 
