@@ -3,7 +3,7 @@
  *
  * Ports lib/more-screen.jsx from the design bundle. Shows shift status
  * (hero), current truck, and drill-in rows for App settings / Help /
- * About. Sign-out lives as the header kebab per design.
+ * About. Sign-out is the last row on the page, below everything else.
  *
  * Data sources (real, not mock):
  *   - Active session + elapsed time: useMyLoads(driverId).activeSession
@@ -183,13 +183,7 @@ export default function MoreScreen() {
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
       <View style={styles.header}>
-        <Pressable
-          accessibilityLabel="Sign out"
-          onPress={() => setSignOutOpen(true)}
-          style={({ pressed }) => [styles.headerBtn, pressed && { opacity: 0.7 }]}
-        >
-          <Icon name="logout" size={22} color={palette.danger} />
-        </Pressable>
+        <Text style={styles.headerTitle}>More</Text>
       </View>
 
       <ScrollView
@@ -374,6 +368,29 @@ export default function MoreScreen() {
             </>
           )}
         </View>
+
+        {/* Sign out — last thing on the page, and the only destructive one.
+            It was the header kebab until the design moved it here; a
+            full-width row is easier to hit with gloves on, and putting it
+            below everything else means it can't be brushed on the way to
+            a settings row. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Sign out"
+          onPress={() => setSignOutOpen(true)}
+          style={({ pressed }) => [
+            styles.drillRow,
+            { marginTop: 24 },
+            pressed && { opacity: 0.85 },
+          ]}
+        >
+          {/* Same 12% danger wash the SignOutSheet's icon uses — there is no
+              dangerTint token, and this file already spells it out. */}
+          <View style={[styles.drillIcon, { backgroundColor: 'rgba(239, 68, 68, 0.12)' }]}>
+            <Icon name="logout" size={18} color={palette.danger} />
+          </View>
+          <Text style={[styles.drillLabel, { color: palette.danger }]}>Sign out</Text>
+        </Pressable>
       </ScrollView>
 
       <SignOutSheet
@@ -1029,17 +1046,15 @@ const makeStyles = (palette: Palette, sp: Sp) =>
     },
     header: {
       height: 52,
-      paddingHorizontal: 8,
+      paddingHorizontal: sp.screenPx,
       flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'flex-end',
     },
-    headerBtn: {
-      width: 44,
-      height: 44,
-      borderRadius: radii.full,
-      alignItems: 'center',
-      justifyContent: 'center',
+    headerTitle: {
+      fontSize: 28,
+      fontWeight: '700',
+      letterSpacing: -0.5,
+      color: palette.textPrimary,
     },
     scroll: {
       flex: 1,
