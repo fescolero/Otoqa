@@ -36,6 +36,8 @@ yarn-error.log*
 # dispatch app env is public EXPO_PUBLIC_* client config, committed so
 # eas update bundles it from any machine (see the file's header comment)
 !apps/dispatch/.env
+# Same reasoning for the driver app — see the header in the file itself.
+!apps/driver/.env
 
 # vercel
 .vercel

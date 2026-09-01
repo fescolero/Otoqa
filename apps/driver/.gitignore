@@ -32,6 +32,11 @@ yarn-error.*
 # Local env files
 .env*.local
 .env
+# ...except the committed public client config. Every value in it is
+# EXPO_PUBLIC_* and ships in the bundle anyway; committing it is what stops
+# `eas update` from publishing a bundle that throws at launch. See the
+# header in apps/driver/.env.
+!.env
 
 # TypeScript
 *.tsbuildinfo
