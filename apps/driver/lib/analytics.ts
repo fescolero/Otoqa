@@ -310,9 +310,22 @@ export function trackAutoUpdateReload(context: {
 }
 
 export function trackAutoUpdateSkipped(context: {
-  reason: 'active_tracking' | 'app_not_active';
+  reason: 'active_tracking' | 'app_not_active' | 'budget_spent' | 'backoff';
 }) {
   capture('auto_update_skipped', { ...context, ...getAppVersionContext() });
+}
+
+/**
+ * A bundle burned its whole reload budget without ever coming up. Fires once
+ * per stuck update, not once per attempt — the point is one actionable signal
+ * saying "this bundle does not launch", the same shape as the auth path's
+ * `recovery_exhausted`.
+ */
+export function trackAutoUpdateExhausted(context: {
+  pendingUpdateId: string;
+  attempts: number;
+}) {
+  capture('auto_update_exhausted', { ...context, ...getAppVersionContext() });
 }
 
 // Convex-driven native-build gate (components/UpdateGate.tsx) — distinct
