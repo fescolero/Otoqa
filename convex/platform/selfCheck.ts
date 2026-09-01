@@ -38,7 +38,7 @@ export const consoleSelfCheck = query({
 
     const staffAllowlistSize = (process.env.STAFF_EMAIL_ALLOWLIST ?? '')
       .split(',')
-      .map((e) => e.trim())
+      .map((e: string) => e.trim())
       .filter(Boolean).length;
 
     const jobStates = allJobs.map((j) => jobState(j, now));
