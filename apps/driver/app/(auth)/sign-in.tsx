@@ -14,7 +14,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
-  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -38,6 +37,7 @@ import {
   trackStaleSessionCleared,
 } from '../../lib/analytics';
 import { performSignOut } from '../../lib/logout';
+import { openExternalUrl } from '../../lib/external-link';
 
 /**
  * Clerk nests its machine-stable error code under `errors[0].code`. Read it
@@ -275,14 +275,16 @@ export default function SignInScreen() {
             By continuing you agree to Otoqa&apos;s{' '}
             <Text
               style={styles.legalLink}
-              onPress={() => Linking.openURL('https://otoqa.com/terms')}
+              onPress={() => void openExternalUrl('https://otoqa.com/terms', 'Terms')}
             >
               Terms
             </Text>{' '}
             and{' '}
             <Text
               style={styles.legalLink}
-              onPress={() => Linking.openURL('https://otoqa.com/privacy')}
+              onPress={() =>
+                void openExternalUrl('https://otoqa.com/privacy', 'Privacy Policy')
+              }
             >
               Privacy Policy
             </Text>

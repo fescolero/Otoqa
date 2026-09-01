@@ -164,7 +164,7 @@ export async function requirePlatformStaff(ctx: AnyCtx): Promise<PlatformStaffId
 
   const allowlist = (process.env.STAFF_EMAIL_ALLOWLIST ?? '')
     .split(',')
-    .map((e) => e.trim().toLowerCase())
+    .map((e: string) => e.trim().toLowerCase())
     .filter(Boolean);
   if (!allowlist.includes(email)) {
     throw new ConvexError('Not platform staff (email is not on STAFF_EMAIL_ALLOWLIST)');
