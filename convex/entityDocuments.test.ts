@@ -11,7 +11,7 @@ import { api, internal } from './_generated/api';
 import { permissionsForLevel } from '../lib/team-rbac';
 import type { MutationCtx } from './_generated/server';
 import type { Id } from './_generated/dataModel';
-import { PENDING_TTL_MS } from './entityDocuments';
+import { PENDING_TTL_MS, startCursor } from './entityDocuments';
 
 const ORG_A = 'org_workos_docs_A';
 const ORG_B = 'org_workos_docs_B';
@@ -462,6 +462,21 @@ describe('maintenance', () => {
       const d = await t.run((ctx) => ctx.db.get(id));
       expect(d?.missingDocTypeKeys).toContain('cdl');
     }
+  });
+
+  // The backfill page token is normalized before it reaches `paginate`.
+  // This is asserted on the helper rather than through the mutations because
+  // convex-test's in-memory `paginate` accepts a blank cursor that the real
+  // backend rejects with "Failed to parse cursor".
+  it('startCursor maps operator-supplied blanks to a first page', () => {
+    expect(startCursor(undefined)).toBeNull();
+    expect(startCursor('')).toBeNull();
+    expect(startCursor('   ')).toBeNull();
+  });
+
+  it('startCursor strips whitespace off a copied cursor', () => {
+    expect(startCursor(' abc123 \n')).toBe('abc123');
+    expect(startCursor('abc123')).toBe('abc123');
   });
 });
 

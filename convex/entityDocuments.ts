@@ -1231,6 +1231,15 @@ export const recomputeSummariesForOrg = internalMutation({
   },
 });
 
+/** Normalize an operator-supplied page token. `npx convex run` and the shell
+ *  wrappers around it hand back `""` for "start from the beginning" and can
+ *  leave a trailing newline on a copied cursor; only a non-blank token is a
+ *  real cursor, and anything else makes `paginate` throw "Failed to parse
+ *  cursor" instead of starting a fresh page. */
+export function startCursor(cursor: string | undefined): string | null {
+  return cursor?.trim() || null;
+}
+
 /**
  * One-time backfill after deploy: stamp `missingDocTypeKeys` on every
  * driver so list pages stop relying on the "undefined = all missing"
@@ -1244,7 +1253,7 @@ export const backfillDriverSummaries = internalMutation({
   handler: async (ctx, args) => {
     const page = await ctx.db
       .query('drivers')
-      .paginate({ cursor: args.cursor ?? null, numItems: args.batch ?? 100 });
+      .paginate({ cursor: startCursor(args.cursor), numItems: args.batch ?? 100 });
     const catalogs = new Map<string, EffectiveDocumentType[]>();
     let processed = 0;
     for (const d of page.page) {
@@ -1273,7 +1282,7 @@ export const backfillPartnershipSummaries = internalMutation({
   handler: async (ctx, args) => {
     const page = await ctx.db
       .query('carrierPartnerships')
-      .paginate({ cursor: args.cursor ?? null, numItems: args.batch ?? 50 });
+      .paginate({ cursor: startCursor(args.cursor), numItems: args.batch ?? 50 });
     const catalogs = new Map<string, EffectiveDocumentType[]>();
     let processed = 0;
     for (const p of page.page) {
