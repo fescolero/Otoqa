@@ -104,9 +104,39 @@ applied before the web upload path is enabled in that environment.
    objects if any. This is the orphan story for a closed tab. `pending`
    rows are excluded from every listing and from status.
 
-Limits: 25 MB per file. Web allowlist: PDF, JPEG, PNG, WebP. HEIC is not
-accepted from the web because the preview modal cannot render it and
-nothing in the web app converts it.
+Limits: 25 MB per file. Stored formats: PDF, JPEG, PNG, WebP. Nothing
+else is ever written to the bucket; the finalize `HEAD` check rejects
+anything outside this list.
+
+### Image normalization (HEIC and friends)
+
+Every image is converted to a renderable format **before** it is
+uploaded, and the converted file is what gets stored. Nothing downstream
+(preview modal, signed downloads, Save a copy, export) ever has to handle
+a camera-native format.
+
+- **Driver app.** All four capture paths are camera captures, which emit
+  JPEG, and each runs `prepareImageForUpload`. That helper only re-encodes
+  when the long edge exceeds 2000px and returns the original file
+  untouched otherwise or on any error, and the upload hard-codes
+  `image/jpeg` as the content type regardless of the bytes. Harden it:
+  always re-encode to JPEG when the source is not already JPEG (by
+  extension or reported mime), keep the resize skip as a format-only
+  pass, and never fall through with a non-JPEG file. This closes the hole
+  before a photo-library picker or a HEIC-emitting device ever appears.
+- **Web app.** A HEIC reaches the web when ops uploads a photo a driver
+  sent them. Convert it in the browser before presign using a lazily
+  loaded libheif WebAssembly build (`heic2any`), output JPEG, and present
+  the converted file's name and type to the presign call. The library is
+  loaded only when a HEIC/HEIF file is selected, so nobody else pays for
+  it. Conversion takes a few seconds on large files; show progress.
+  Server-side conversion is not viable: Convex Node actions cannot run
+  native image libraries, hosted `sharp` builds lack HEVC decoding, and
+  Cloudflare's image transforms cannot read a private bucket.
+- **Enforcement.** The web file picker accepts PDF, JPEG, PNG, WebP, HEIC,
+  and HEIF; the presign action accepts only the stored formats. If a HEIC
+  ever bypasses conversion, presign refuses it with a clear error and
+  nothing is written.
 
 ### Deletion
 
@@ -460,8 +490,9 @@ generated-API type cycle this avoids; new files follow the same pattern.
    `licenseExpiration` optional and fabricated dates removed (§5.4),
    driver presign/finalize/archive, driver Documents tab wired (upload
    with date, archive, Missing, mirrors, live counts), Settings ›
-   Documents page, audit actions, pending sweep cron. CORS applied to the
-   dev bucket first, then prod.
+   Documents page, audit actions, pending sweep cron, browser HEIC
+   conversion, driver-app `prepareImageForUpload` hardening. CORS applied
+   to the dev bucket first, then prod.
 2. **Carriers.** Partnership documents, organization documents, sharing
    join, per-document share toggle, effective status, insurance and
    owner-driver mirrors, carrier Documents tab wired, missing summary on
