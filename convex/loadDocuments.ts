@@ -1,8 +1,9 @@
 import { ConvexError, v } from 'convex/values';
-import { internalQuery, mutation, query } from './_generated/server';
+import { internalMutation, internalQuery, mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
-import { getCallerOrgId, requireCallerIdentity, requireCallerOrgId } from './lib/auth';
-import { keyFromExternalUrl } from './lib/r2';
+import { assertOrgPermission, getCallerOrgId, requireCallerIdentity, requireCallerOrgId } from './lib/auth';
+import { logAudit } from './lib/audit';
+import { isStoredContentType, keyFromExternalUrl } from './lib/r2';
 import { resolveAuthenticatedDriver } from './driverMobile';
 
 /**
@@ -12,9 +13,10 @@ import { resolveAuthenticatedDriver } from './driverMobile';
  * documents (POD, receipts, accident reports, etc.) go through
  * driverMobile.uploadLoadDocument + s3Upload.getLoadDocumentUploadUrl
  * instead, since those require GPS + stop-inference metadata the web
- * UI doesn't have.
- *
- * Both paths write to the same `loadDocuments` table.
+ * UI doesn't have. Web/ops uploads go through loadDocumentsWeb
+ * (presign → PUT → HEAD-verified finalize) and land here via
+ * createFromWeb. Both paths write to the same `loadDocuments` table and
+ * the same R2 prefix (documents-storage-spec.md §1, §9).
  */
 
 // Shared type union — mirrors schema.ts. `EXTRA_DOC` retained as a
@@ -29,53 +31,85 @@ const docType = v.union(
   v.literal('EXTRA_DOC'), // DEPRECATED
 );
 
+/** Types a web/ops user may upload (no deprecated alias). */
+const webDocType = v.union(
+  v.literal('POD'),
+  v.literal('Receipt'),
+  v.literal('Cargo'),
+  v.literal('Damage'),
+  v.literal('Accident'),
+  v.literal('Other'),
+);
+
 /**
- * Generate a signed upload URL for load documents.
- * Client uploads directly to this URL, then calls create() with storageId.
+ * Web/ops upload — step 1 (called by loadDocumentsWeb.getUploadUrl).
+ * Resolves the owning org from the load row and checks loads:edit.
  */
-export const generateUploadUrl = mutation({
-  handler: async (ctx) => {
-    await requireCallerOrgId(ctx);
-    return await ctx.storage.generateUploadUrl();
+export const resolveLoadForWebUpload = internalQuery({
+  args: { loadId: v.id('loadInformation') },
+  returns: v.object({ orgId: v.string(), orderNumber: v.optional(v.string()) }),
+  handler: async (ctx, args) => {
+    const load = await ctx.db.get(args.loadId);
+    if (!load) throw new ConvexError('Load not found');
+    try {
+      await assertOrgPermission(ctx, load.workosOrgId, 'loads:edit');
+    } catch (e) {
+      const msg = e instanceof ConvexError ? String(e.data) : '';
+      if (msg.includes('Not authorized')) throw new ConvexError('Load not found');
+      throw e;
+    }
+    return { orgId: load.workosOrgId, orderNumber: load.orderNumber };
   },
 });
 
 /**
- * Create a load document record after upload (web/ops caller).
- * Drivers use driverMobile.uploadLoadDocument instead.
+ * Web/ops upload — step 3 (called by loadDocumentsWeb.finalizeUpload after
+ * the object was HEAD-verified). Stores the R2 key only — never a URL
+ * (documents-storage-spec.md §1). The key MUST sit under the load's own
+ * prefix so a client cannot register an arbitrary object.
  */
-export const create = mutation({
+export const createFromWeb = internalMutation({
   args: {
     loadId: v.id('loadInformation'),
-    storageId: v.id('_storage'),
-    type: docType,
-    fileName: v.optional(v.string()),
-    contentType: v.optional(v.string()),
+    type: webDocType,
+    externalKey: v.string(),
+    fileName: v.string(),
+    contentType: v.string(),
+    note: v.optional(v.string()),
   },
-  returns: v.object({
-    _id: v.id('loadDocuments'),
-  }),
+  returns: v.object({ _id: v.id('loadDocuments') }),
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId: subject } = await requireCallerIdentity(ctx);
-
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new ConvexError('Load not found');
-    if (load.workosOrgId !== callerOrgId) {
-      throw new ConvexError('Load not found');
-    }
+    const who = await assertOrgPermission(ctx, load.workosOrgId, 'loads:edit');
+    const prefix = `orgs/${load.workosOrgId}/loads/${args.loadId}/${args.type}/`;
+    if (!args.externalKey.startsWith(prefix)) throw new ConvexError('Invalid document key');
+    if (!isStoredContentType(args.contentType)) throw new ConvexError('Unsupported file type');
 
     const now = Date.now();
     const docId = await ctx.db.insert('loadDocuments', {
       loadId: args.loadId,
+      workosOrgId: load.workosOrgId,
       type: args.type,
-      storageId: args.storageId,
+      externalKey: args.externalKey,
       fileName: args.fileName,
       contentType: args.contentType,
+      note: args.note?.trim() || undefined,
+      uploadedBy: who.userId,
       uploadedAt: now,
-      uploadedBy: subject,
-      workosOrgId: load.workosOrgId,
     });
-
+    await logAudit(ctx, {
+      organizationId: load.workosOrgId,
+      entityType: 'load',
+      entityId: args.loadId,
+      entityName: load.orderNumber,
+      action: 'document_uploaded',
+      performedBy: who.userId,
+      performedByName: who.userName,
+      performedByEmail: who.userEmail,
+      description: `Added ${args.type} document${args.fileName ? ` (${args.fileName})` : ''}`,
+      changesAfter: JSON.stringify({ documentId: docId, type: args.type, fileName: args.fileName }),
+    });
     return { _id: docId };
   },
 });
@@ -181,6 +215,7 @@ export const remove = mutation({
     if (!doc || doc.workosOrgId !== orgId) {
       throw new ConvexError('Document not found');
     }
+    await assertOrgPermission(ctx, orgId, 'loads:edit');
 
     await ctx.db.delete(args.documentId);
 
@@ -280,15 +315,12 @@ export const listForLoad = query({
         inferredStopSequence: doc.inferredStopSequence,
         inferredContext: doc.inferredContext,
         note: doc.note,
-        // Prefer Convex `_storage` URL (web uploads) — fall back to the
-        // externalUrl (S3/R2) for driver-captured docs that came through
-        // the presigned-URL path. The externalUrl fallback only renders
-        // while the R2 bucket is public; once it's flipped private,
-        // consumers must exchange the row for a short-lived URL via
-        // s3Upload.getDocumentDownloadUrl instead.
-        url: doc.storageId
-          ? await ctx.storage.getUrl(doc.storageId)
-          : (doc.externalUrl ?? null),
+        // Only legacy Convex-storage rows carry a directly servable URL.
+        // R2-backed rows (every driver capture and every web upload since
+        // spec §9) are exchanged for a short-lived signed URL at click
+        // time via s3Upload.getDocumentDownloadUrl — the bucket is private
+        // and `externalUrl` is a legacy field, never a display URL.
+        url: doc.storageId ? await ctx.storage.getUrl(doc.storageId) : null,
       })),
     );
   },

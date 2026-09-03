@@ -590,28 +590,7 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index('by_org', ['organizationId']),
 
-  // Carrier documents per load assignment
-  // Separate from broker documents - each party has their own
-  loadCarrierDocuments: defineTable({
-    assignmentId: v.id('loadCarrierAssignments'),
-    carrierOrgId: v.string(),
-
-    documentType: v.union(
-      v.literal('RATE_CONFIRMATION'), // Carrier's rate con
-      v.literal('BOL'), // Bill of lading
-      v.literal('POD'), // Proof of delivery
-      v.literal('LUMPER_RECEIPT'), // Lumper fees
-      v.literal('SCALE_TICKET'), // Weight ticket
-      v.literal('OTHER'),
-    ),
-
-    storageId: v.id('_storage'),
-    fileName: v.string(),
-    uploadedBy: v.string(),
-    uploadedAt: v.number(),
-  })
-    .index('by_assignment', ['assignmentId'])
-    .index('by_carrier', ['carrierOrgId']),
+  // (loadCarrierDocuments removed — never read or written; spec §9)
 
   // Saved table views for entity list pages (Drivers / Loads / etc.).
   // System defaults are code-only and surfaced by the page module — only

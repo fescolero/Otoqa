@@ -141,6 +141,7 @@ import type * as lib_voiceStt from "../lib/voiceStt.js";
 import type * as loadCarrierAssignments from "../loadCarrierAssignments.js";
 import type * as loadCarrierPayables from "../loadCarrierPayables.js";
 import type * as loadDocuments from "../loadDocuments.js";
+import type * as loadDocumentsWeb from "../loadDocumentsWeb.js";
 import type * as loadHoldWorkflow from "../loadHoldWorkflow.js";
 import type * as loadPayables from "../loadPayables.js";
 import type * as loadReview from "../loadReview.js";
@@ -394,6 +395,7 @@ declare const fullApi: ApiFromModules<{
   loadCarrierAssignments: typeof loadCarrierAssignments;
   loadCarrierPayables: typeof loadCarrierPayables;
   loadDocuments: typeof loadDocuments;
+  loadDocumentsWeb: typeof loadDocumentsWeb;
   loadHoldWorkflow: typeof loadHoldWorkflow;
   loadPayables: typeof loadPayables;
   loadReview: typeof loadReview;

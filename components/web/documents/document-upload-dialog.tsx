@@ -27,6 +27,7 @@ import type { EffectiveDocumentType } from '@/convex/_helpers/documentStatus';
 import type { DocumentEntity } from '@/convex/lib/documentTypeDefaults';
 import { MAX_DOCUMENT_BYTES } from '@/convex/lib/r2';
 import { normalizeUploadImage, UPLOAD_INPUT_ACCEPT } from '@/lib/normalize-upload-image';
+import { putWithProgress } from '@/lib/upload-put';
 import { convexErrorMessage } from '@/lib/convex-error';
 import { WBtn, WIcon } from '@/components/web';
 import {
@@ -350,28 +351,4 @@ function UploadForm({
       </DialogFooter>
     </DialogContent>
   );
-}
-
-/** PUT with upload progress (fetch has none). Rejects on non-2xx. */
-function putWithProgress(
-  url: string,
-  body: Blob,
-  headers: Record<string, string>,
-  onProgress: (fraction: number) => void,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('PUT', url);
-    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(e.loaded / e.total);
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload failed (${xhr.status}). Check the bucket CORS rule if this persists.`));
-    };
-    xhr.onerror = () => reject(new Error('Upload failed — network error or blocked by CORS.'));
-    xhr.onabort = () => reject(new Error('Upload cancelled.'));
-    xhr.send(body);
-  });
 }

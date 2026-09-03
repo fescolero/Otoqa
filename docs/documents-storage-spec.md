@@ -1,6 +1,8 @@
 # Documents & R2 storage — contract and product rules
 
-Status: agreed design, reviewed against the codebase, not yet built.
+Status: agreed design, reviewed against the codebase. Phases 1–3 are
+built and on main (drivers; carriers + company file + sharing; load web
+upload + legacy cleanup). Phase 4 (offboarding) is not started.
 Referenced from `convex/s3Upload.ts` (which pointed at a
 `docs/r2-storage.md` that never existed).
 
@@ -498,5 +500,13 @@ generated-API type cycle this avoids; new files follow the same pattern.
    owner-driver mirrors, carrier Documents tab wired, missing summary on
    partnerships.
 3. **Loads + cleanup.** Load detail web upload via shared helpers; §9.
+   Built: `loadDocumentsWeb` presigns under the same load prefix as
+   driver captures and HEAD-verifies before `loadDocuments.createFromWeb`
+   records a key-only row. There is no pending row for loads (the table
+   has no status column); a closed tab between PUT and finalize leaves an
+   orphan object, same as the mobile flow. Dual-write to
+   `stop.deliveryPhotos` ended; `listForLoad` no longer returns a public
+   URL for R2 rows; `loadCarrierDocuments` was removed; delete on the
+   load page requires loads:edit.
 4. **Offboarding.** Org offboarding fields and platform action,
    notifications, Save a copy, export, 14-day purge job.

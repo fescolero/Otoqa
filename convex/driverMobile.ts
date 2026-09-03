@@ -1165,21 +1165,16 @@ export const checkOutFromStop = mutation({
     );
     // #endregion
 
-    // If POD photo provided, store it in both places during the transition:
-    //   1. stop.deliveryPhotos (legacy — web UI still reads this)
-    //   2. loadDocuments (new unified table; mobile UI will read from here
-    //      once the Load Details port ships)
+    // If a POD photo was provided, record it in loadDocuments — the single
+    // source for POD (the legacy stop.deliveryPhotos dual-write ended with
+    // documents-storage-spec.md §9; migration 009 backfilled history and
+    // the web reads loadDocuments only).
     //
-    // The new loadDocuments row is classified AT_STOP because we're inside
+    // The loadDocuments row is classified AT_STOP because we're inside
     // the checkout flow — the driver is, by definition, at the stop they
     // just checked out of. We use the check-in → now window for capturedAt
     // approximation (the photo was taken somewhere in that window).
     if (args.podPhotoUrl && stop.stopType === 'DELIVERY') {
-      const existingPhotos = stop.deliveryPhotos || [];
-      await ctx.db.patch(args.stopId, {
-        deliveryPhotos: [...existingPhotos, args.podPhotoUrl],
-      });
-
       // capturedAt uses the driver's checkout time, not Date.now() — an
       // offline checkout can replay hours later, and sync time would
       // shove the POD out of chronological order in the doc timeline.
@@ -1391,13 +1386,9 @@ export const recordPOD = mutation({
       return { success: false, message: 'Not authorized for this load' };
     }
 
-    // Dual-write during transition — stop.deliveryPhotos for the legacy
-    // web UI, loadDocuments for the new unified driver surface.
-    const existingPhotos = stop.deliveryPhotos || [];
-    await ctx.db.patch(args.stopId, {
-      deliveryPhotos: [...existingPhotos, args.photoUrl],
-      updatedAt: Date.now(),
-    });
+    // loadDocuments is the single source for POD (spec §9); the legacy
+    // stop.deliveryPhotos dual-write is gone.
+    await ctx.db.patch(args.stopId, { updatedAt: Date.now() });
 
     await ctx.db.insert('loadDocuments', {
       loadId: stop.loadId,

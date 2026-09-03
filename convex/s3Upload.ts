@@ -92,7 +92,7 @@ export function createS3Client() {
  * audit). The random suffix guards against two captures landing in the
  * same millisecond.
  */
-function buildDocumentKey(
+export function buildLoadDocumentKey(
   orgSegment: string,
   loadId: string,
   docType: string,
@@ -278,7 +278,7 @@ export const getLoadDocumentUploadUrl = action({
     // Org comes from the load row, never from the client — the key's
     // org prefix is what per-customer export/deletion trusts.
     const orgSegment = await resolveOrgSegment(ctx, args.loadId);
-    const key = buildDocumentKey(orgSegment, args.loadId, args.type, args.filename);
+    const key = buildLoadDocumentKey(orgSegment, args.loadId, args.type, args.filename);
 
     // Build the metadata map — all values must be strings; skip empties
     // so S3 doesn't store "undefined" literals. Stick to kebab-case

@@ -20,6 +20,8 @@ import Link from 'next/link';
 import { LoadPayPlanCard } from '@/components/web/pay-plan/load-pay-plan-card';
 import { LiveTrackingModal, type TimelineEvent } from '@/components/loads/live-tracking-modal';
 import { DocPreviewModal, type DocRecord } from '@/components/loads/doc-preview-modal';
+import { LoadDocumentUploadDialog } from '@/components/loads/load-document-upload-dialog';
+import { convexErrorMessage } from '@/lib/convex-error';
 import {
   CancellationReasonModal,
   type CancellationReasonCode,
@@ -249,7 +251,9 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   const [activeSection, setActiveSection] = useState('overview');
   const [mapOpen, setMapOpen] = useState(false);
   const [previewDoc, setPreviewDoc] = useState<DocRecord | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
   const getDownloadUrl = useAction(api.s3Upload.getDocumentDownloadUrl);
+  const removeDocument = useMutation(api.loadDocuments.remove);
 
   const resolveDocUrl = React.useCallback(
     async (documentId: Id<'loadDocuments'>, fallback: string | null): Promise<string | null> => {
@@ -477,9 +481,11 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   const finalDeliveryStop = loadData.stops
     .filter((s) => s.stopType === 'DELIVERY')
     .pop() as StopWithEvidence | undefined;
+  // POD evidence = a loadDocuments POD row (driver capture or ops upload)
+  // or a captured signature on the final delivery stop. stop.deliveryPhotos
+  // is legacy and no longer consulted (documents-storage-spec.md §9).
   const hasPOD = !!(
-    (finalDeliveryStop &&
-      ((finalDeliveryStop.deliveryPhotos?.length ?? 0) > 0 || finalDeliveryStop.signatureImage)) ||
+    finalDeliveryStop?.signatureImage ||
     loadDocsData?.some((d) => d.type === 'POD')
   );
   const statusId = resolveStatusId('load', loadData.status);
@@ -1223,7 +1229,11 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     <DSCard
       title={`Documents (${docRows.length})`}
       bodyClassName="p-0"
-      action={<WBtn size="sm" leading="plus">Upload</WBtn>}
+      action={
+        <WBtn size="sm" leading="plus" onClick={() => setUploadOpen(true)}>
+          Upload
+        </WBtn>
+      }
     >
       <DSMiniTable<DocRecord>
         columns={[
@@ -1245,6 +1255,23 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
         rows={docRows}
         total={docRows.length}
         className="rounded-t-none border-0 border-t"
+        rowActions={(row) => {
+          const documentId = docIdByRow.get(row.id) ?? (row.id.startsWith('doc-') ? (row.id.slice(4) as Id<'loadDocuments'>) : null);
+          if (!documentId) return [];
+          return [
+            {
+              label: 'Delete',
+              icon: 'trash',
+              danger: true,
+              onClick: () => {
+                if (!window.confirm(`Delete ${row.name}? This removes the file permanently.`)) return;
+                void removeDocument({ documentId })
+                  .then(() => toast.success('Document deleted'))
+                  .catch((e: unknown) => toast.error(convexErrorMessage(e) ?? 'Failed to delete document'));
+              },
+            },
+          ];
+        }}
         onRowClick={(row) => {
           const documentId = docIdByRow.get(row.id);
           if (!documentId) {
@@ -1836,6 +1863,12 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       />
 
       <DocPreviewModal doc={previewDoc} onClose={() => setPreviewDoc(null)} />
+      <LoadDocumentUploadDialog
+        open={uploadOpen}
+        onOpenChange={setUploadOpen}
+        loadId={loadId as Id<'loadInformation'>}
+        orderNumber={loadData.orderNumber}
+      />
 
       <PhotoLightbox
         photos={lightboxPhotos}
