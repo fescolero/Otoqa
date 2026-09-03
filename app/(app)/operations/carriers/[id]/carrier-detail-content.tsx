@@ -39,6 +39,7 @@ import {
   WIcon,
 } from '@/components/web';
 import { CarrierPaySettingsSection } from '@/components/carrier-pay';
+import { EntityDocumentsTab } from '@/components/web/documents/entity-documents-tab';
 import {
   AssignedLoadsTable,
   type AssignedLoad,
@@ -616,17 +617,12 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
   );
 
   // ─── Section: Documents ──────────────────────────────────────────────
-  // Real document storage isn't wired for carriers yet — placeholder card.
+  // Backed by entityDocuments (documents-storage-spec.md §6): the broker's
+  // own records for this carrier plus whatever the linked carrier org
+  // shares from its company file. Insurance / owner-driver expiry on the
+  // partnership row are mirrors written by the backend.
   const documentsContent = (
-    <DSCard
-      title="Documents"
-      action={<WBtn size="sm" leading="plus">Upload</WBtn>}
-    >
-      <DSActivity
-        emptyText="No documents uploaded yet."
-        items={[]}
-      />
-    </DSCard>
+    <EntityDocumentsTab entity="carrier" entityId={partnershipId} entityName={partnership.carrierName} />
   );
 
   // ─── Section: Activity ───────────────────────────────────────────────
@@ -655,7 +651,11 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
       : []),
     { id: 'loads',     label: 'Loads',     icon: 'package',     count: carrierLoads?.length, content: loadsContent },
     { id: 'pay',       label: 'Pay profile', icon: 'doc-dollar', content: payContent },
-    { id: 'documents', label: 'Documents', icon: 'file-text',   content: documentsContent },
+    {
+      id: 'documents', label: 'Documents', icon: 'file-text',
+      attention: partnership.missingDocTypeKeys?.length || undefined,
+      content: documentsContent,
+    },
     { id: 'activity',  label: 'Activity',  icon: 'pulse',       content: activityContent },
   ];
 

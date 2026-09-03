@@ -41,6 +41,10 @@ export interface SystemDocumentType {
   sharedByDefault?: boolean;
   /** Parent-row date field the active document's expiry mirrors into. */
   mirrorField?: MirrorField;
+  /** `organization` entity only — the `carrier` type key this document
+   *  appears under on a linked broker's partnership page when shared
+   *  (documents-storage-spec.md §6.2). */
+  partnerTypeKey?: string;
   sortOrder: number;
 }
 
@@ -195,6 +199,7 @@ export const SYSTEM_DOCUMENT_TYPES: readonly SystemDocumentType[] = [
     uploadRequired: true,
     singleton: true,
     sharedByDefault: true,
+    partnerTypeKey: 'coi',
     sortOrder: 10,
   },
   {
@@ -206,6 +211,7 @@ export const SYSTEM_DOCUMENT_TYPES: readonly SystemDocumentType[] = [
     uploadRequired: true,
     singleton: true,
     sharedByDefault: true,
+    partnerTypeKey: 'w9',
     sortOrder: 20,
   },
   {
@@ -217,6 +223,7 @@ export const SYSTEM_DOCUMENT_TYPES: readonly SystemDocumentType[] = [
     uploadRequired: true,
     singleton: true,
     sharedByDefault: true,
+    partnerTypeKey: 'operating_authority',
     sortOrder: 30,
   },
 ];
@@ -242,3 +249,9 @@ export const DRIVER_MIRROR_TO_TYPE_KEY: Record<DriverMirrorField, string> = {
 /** Custom type keys are org-scoped slugs; they must never collide with a
  *  system key and must be safe to embed in an R2 object key. */
 export const CUSTOM_TYPE_KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{1,39}$/;
+
+/** Carrier mirror field → carrier type key (for partnership attention). */
+export const CARRIER_MIRROR_TO_TYPE_KEY: Record<CarrierMirrorField, string> = {
+  insuranceExpiration: 'coi',
+  ownerDriverLicenseExpiration: 'owner_driver_cdl',
+};

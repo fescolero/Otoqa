@@ -3,6 +3,7 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
+import { recomputePartnershipDocuments } from './entityDocuments';
 import {
   scheduleCreateClerkUserForDriver,
   scheduleSyncCarrierOwnerToClerk,
@@ -1031,6 +1032,8 @@ export const updateStatus = mutation({
           carrierOrgId: newCarrierOrgId,
           linkedAt: now,
         });
+        // Linked → the carrier's shared documents now count here (spec §6).
+        await recomputePartnershipDocuments(ctx, args.partnershipId);
 
         // Schedule Clerk user creation for mobile app access
         const firstName =
@@ -1433,6 +1436,7 @@ export const linkToCarrierOrg = mutation({
         linkedAt: now,
         updatedAt: now,
       });
+      await recomputePartnershipDocuments(ctx, partnership._id); // spec §6
       linked.push(partnership._id);
     }
 
@@ -1941,6 +1945,8 @@ export const bulkReactivate = mutation({
             carrierOrgId: newCarrierOrgId,
             linkedAt: now,
           });
+          // Linked → the carrier's shared documents now count here (spec §6).
+          await recomputePartnershipDocuments(ctx, partnershipId);
 
           // Schedule Clerk user creation
           const firstName =
@@ -2331,6 +2337,7 @@ export const syncPartnershipForMobileAccess = mutation({
         linkedAt: now,
         updatedAt: now,
       });
+      await recomputePartnershipDocuments(ctx, args.partnershipId); // spec §6
     }
 
     // Schedule Clerk user creation (uses syncSingleCarrierOwnerToClerk which updates the userIdentityLinks record)

@@ -1,8 +1,9 @@
 /**
  * Pure view-model for an entity's Documents surfaces (tab, overview
- * section, attention items). No React, no Convex — testable in the `web`
+ * section, attention items) — drivers, carrier partnerships, and the
+ * org's own company file. No React, no Convex — testable in the `web`
  * vitest project. Status itself comes from the shared module so every
- * surface agrees (documents-storage-spec.md §3).
+ * surface agrees (documents-storage-spec.md §3, §6.3).
  */
 
 import type { FunctionReturnType } from 'convex/server';
@@ -13,25 +14,34 @@ import {
   computeDocumentStatus,
   dateExpiryStatus,
   needsAttention,
+  pickEffectiveDocument,
   type DocumentStatus,
   type EffectiveDocumentType,
 } from '@/convex/_helpers/documentStatus';
 
 export type EntityDocumentsList = FunctionReturnType<typeof api.entityDocuments.listForEntity>;
 export type EntityDocument = EntityDocumentsList['documents'][number];
+export type SharedDocument = EntityDocumentsList['shared'][number];
+
+export type DocumentSource = 'own' | 'shared';
 
 export interface DocumentRowModel {
   /** Stable row id: the type key for singleton/missing rows, type+doc for
    *  multi-document types. */
   id: string;
   type: EffectiveDocumentType;
-  /** The active document backing this row, or null when Missing. */
-  doc: EntityDocument | null;
+  /** The effective document backing this row, or null when Missing. */
+  doc: EntityDocument | SharedDocument | null;
+  /** Where the effective document came from: the entity's own records or
+   *  (partnerships only) the linked carrier's shared company file. */
+  source: DocumentSource | null;
   status: DocumentStatus;
+  /** Partnerships: the broker's own active row when a shared document won
+   *  (so the tab can still offer Replace/Archive on it). */
+  ownDoc: EntityDocument | null;
   /** For Missing rows: the most recently archived document of the type,
    *  so the tab can show "last expired …" context (spec §5.3). */
   lastArchived: EntityDocument | null;
-  /** Expiry state of `lastArchived`, when present. */
   lastArchivedStatus: 'expired' | 'expiring' | 'warning' | 'valid' | 'missing' | null;
 }
 
@@ -53,10 +63,15 @@ export interface DocumentsViewModel {
   attention: number;
 }
 
+export function isSharedDocument(d: EntityDocument | SharedDocument): d is SharedDocument {
+  return 'sharedFromOrgId' in d;
+}
+
 export function composeDocumentsViewModel(
   types: readonly EffectiveDocumentType[],
   documents: readonly EntityDocument[],
   todayStr: string,
+  shared: readonly SharedDocument[] = [],
 ): DocumentsViewModel {
   const visible = types.filter((t) => !t.hidden).slice().sort((a, b) => a.sortOrder - b.sortOrder);
   const active = documents.filter((d) => d.status === 'active');
@@ -67,31 +82,43 @@ export function composeDocumentsViewModel(
 
   const rows: DocumentRowModel[] = [];
   for (const type of visible) {
-    const docs = active
+    const ownDocs = active
       .filter((d) => d.typeKey === type.key)
       .sort((a, b) => (b.activatedAt ?? b.uploadedAt) - (a.activatedAt ?? a.uploadedAt));
-    const forType = type.singleton ? docs.slice(0, 1) : docs;
+    const sharedDocs = shared.filter((s) => s.partnerTypeKey === type.key);
 
-    if (forType.length === 0) {
-      const lastArchived = archived.find((d) => d.typeKey === type.key) ?? null;
+    if (type.singleton || sharedDocs.length > 0) {
+      // One row: the effective document across own + shared (§6.3).
+      const eff = pickEffectiveDocument(type, ownDocs.slice(0, 1), sharedDocs.slice(0, 1));
+      if (!eff) {
+        rows.push(missingRow(type, archived, todayStr));
+        continue;
+      }
       rows.push({
         id: type.key,
         type,
-        doc: null,
-        status: 'missing',
-        lastArchived,
-        lastArchivedStatus: lastArchived ? dateExpiryStatus(lastArchived.expirationDate, todayStr) : null,
+        doc: eff.doc,
+        source: eff.source,
+        status: computeDocumentStatus(type, { expirationDate: eff.doc.expirationDate, hasFile: eff.doc.hasFile }, todayStr),
+        ownDoc: ownDocs[0] ?? null,
+        lastArchived: null,
+        lastArchivedStatus: null,
       });
       continue;
     }
 
-    for (const doc of forType) {
-      const status = computeDocumentStatus(type, { expirationDate: doc.expirationDate, hasFile: doc.hasFile }, todayStr);
+    if (ownDocs.length === 0) {
+      rows.push(missingRow(type, archived, todayStr));
+      continue;
+    }
+    for (const doc of ownDocs) {
       rows.push({
-        id: type.singleton ? type.key : `${type.key}:${doc._id}`,
+        id: `${type.key}:${doc._id}`,
         type,
         doc,
-        status,
+        source: 'own',
+        status: computeDocumentStatus(type, { expirationDate: doc.expirationDate, hasFile: doc.hasFile }, todayStr),
+        ownDoc: doc,
         lastArchived: null,
         lastArchivedStatus: null,
       });
@@ -123,6 +150,24 @@ export function composeDocumentsViewModel(
   }
 
   return { rows, archived, counts, attention };
+}
+
+function missingRow(
+  type: EffectiveDocumentType,
+  archived: readonly EntityDocument[],
+  todayStr: string,
+): DocumentRowModel {
+  const lastArchived = archived.find((d) => d.typeKey === type.key) ?? null;
+  return {
+    id: type.key,
+    type,
+    doc: null,
+    source: null,
+    status: 'missing',
+    ownDoc: null,
+    lastArchived,
+    lastArchivedStatus: lastArchived ? dateExpiryStatus(lastArchived.expirationDate, todayStr) : null,
+  };
 }
 
 // ─── Presentation helpers ────────────────────────────────────────────────

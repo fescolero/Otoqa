@@ -31,6 +31,7 @@ import type * as auditLogArchiveDb from "../auditLogArchiveDb.js";
 import type * as auditLogMigration from "../auditLogMigration.js";
 import type * as autoAssignment from "../autoAssignment.js";
 import type * as autoAssignmentCron from "../autoAssignmentCron.js";
+import type * as carrierDocuments from "../carrierDocuments.js";
 import type * as carrierMobile from "../carrierMobile.js";
 import type * as carrierPartnerships from "../carrierPartnerships.js";
 import type * as carrierPayCalculation from "../carrierPayCalculation.js";
@@ -113,6 +114,7 @@ import type * as lanes from "../lanes.js";
 import type * as lazyLoadPromotion from "../lazyLoadPromotion.js";
 import type * as lib_audit from "../lib/audit.js";
 import type * as lib_auth from "../lib/auth.js";
+import type * as lib_documentActionHandlers from "../lib/documentActionHandlers.js";
 import type * as lib_documentCatalog from "../lib/documentCatalog.js";
 import type * as lib_documentTypeDefaults from "../lib/documentTypeDefaults.js";
 import type * as lib_externalHealth from "../lib/externalHealth.js";
@@ -172,6 +174,7 @@ import type * as migrations_initializeOrgStats from "../migrations/initializeOrg
 import type * as migrations_unlinkFalselyLinkedCarriers from "../migrations/unlinkFalselyLinkedCarriers.js";
 import type * as mobileSettlements from "../mobileSettlements.js";
 import type * as orgMembers from "../orgMembers.js";
+import type * as organizationDocuments from "../organizationDocuments.js";
 import type * as payEngine_aggregateSettlement from "../payEngine/aggregateSettlement.js";
 import type * as payEngine_applyPostCalcRules from "../payEngine/applyPostCalcRules.js";
 import type * as payEngine_assembleInput from "../payEngine/assembleInput.js";
@@ -281,6 +284,7 @@ declare const fullApi: ApiFromModules<{
   auditLogMigration: typeof auditLogMigration;
   autoAssignment: typeof autoAssignment;
   autoAssignmentCron: typeof autoAssignmentCron;
+  carrierDocuments: typeof carrierDocuments;
   carrierMobile: typeof carrierMobile;
   carrierPartnerships: typeof carrierPartnerships;
   carrierPayCalculation: typeof carrierPayCalculation;
@@ -363,6 +367,7 @@ declare const fullApi: ApiFromModules<{
   lazyLoadPromotion: typeof lazyLoadPromotion;
   "lib/audit": typeof lib_audit;
   "lib/auth": typeof lib_auth;
+  "lib/documentActionHandlers": typeof lib_documentActionHandlers;
   "lib/documentCatalog": typeof lib_documentCatalog;
   "lib/documentTypeDefaults": typeof lib_documentTypeDefaults;
   "lib/externalHealth": typeof lib_externalHealth;
@@ -422,6 +427,7 @@ declare const fullApi: ApiFromModules<{
   "migrations/unlinkFalselyLinkedCarriers": typeof migrations_unlinkFalselyLinkedCarriers;
   mobileSettlements: typeof mobileSettlements;
   orgMembers: typeof orgMembers;
+  organizationDocuments: typeof organizationDocuments;
   "payEngine/aggregateSettlement": typeof payEngine_aggregateSettlement;
   "payEngine/applyPostCalcRules": typeof payEngine_applyPostCalcRules;
   "payEngine/assembleInput": typeof payEngine_assembleInput;

@@ -38,6 +38,8 @@ export interface EffectiveDocumentType {
   singleton: boolean;
   sharedByDefault: boolean;
   mirrorField?: MirrorField;
+  /** organization types only — see documentTypeDefaults.partnerTypeKey */
+  partnerTypeKey?: string;
   isSystem: boolean;
   hidden: boolean;
   sortOrder: number;
@@ -83,6 +85,32 @@ export function computeDocumentStatus(
   // A dated active row can't be 'missing' here (date is present), but the
   // union says otherwise — normalize for the type system.
   return s === 'missing' ? 'needs_date' : s;
+}
+
+/**
+ * Effective document for a partnership type when both the broker's own
+ * row and a carrier-shared row exist (spec §6.3): for expiring types the
+ * LATEST expiry wins; otherwise the broker's own row wins, then the
+ * shared one. Returns null when neither exists.
+ */
+export function pickEffectiveDocument<T extends { expirationDate?: string }>(
+  type: Pick<EffectiveDocumentType, 'expires'>,
+  own: readonly T[],
+  shared: readonly T[],
+): { doc: T; source: 'own' | 'shared' } | null {
+  const candidates: Array<{ doc: T; source: 'own' | 'shared' }> = [
+    ...own.map((doc) => ({ doc, source: 'own' as const })),
+    ...shared.map((doc) => ({ doc, source: 'shared' as const })),
+  ];
+  if (candidates.length === 0) return null;
+  if (!type.expires) return candidates[0];
+  let best = candidates[0];
+  for (const c of candidates.slice(1)) {
+    const a = c.doc.expirationDate ?? '';
+    const b = best.doc.expirationDate ?? '';
+    if (a > b) best = c; // YYYY-MM-DD sorts lexically
+  }
+  return best;
 }
 
 /** Statuses that should surface in attention bands and "needs attention"

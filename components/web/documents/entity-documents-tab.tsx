@@ -1,19 +1,25 @@
 'use client';
 
 /**
- * Driver Detail — Documents tab (full-page).
+ * EntityDocumentsTab — the Documents surface for a driver, a carrier
+ * partnership, or the org's own company file.
  *
  * Layout per design Otoqa Web.html § DvDocsFullPage:
  *   • 5-stat summary strip — On file · Valid · Expiring · Expired · Missing
- *   • Active documents card — FilterBar (Category + Status) + Upload;
- *     one row per visible document type (plus one per document for
- *     multi-document types), status from the shared status module
+ *   • Documents card — FilterBar (Document + Status) + Upload; one row per
+ *     visible document type (plus one per document for multi-document
+ *     types), status from the shared status module
  *   • Archived & replaced card — superseded and archived rows
+ *
+ * Partnerships also show the linked carrier's shared company documents:
+ * when a shared document is the effective one for a type (latest expiry
+ * wins, spec §6.3) the row is read-only with source "Carrier", and the
+ * broker can still add its own record alongside. The company file adds a
+ * per-document Share/Withhold action (spec §6.2).
  *
  * Backed by entityDocuments (docs/documents-storage-spec.md). A document
  * is a file plus a user-entered date; a type with no active document is
- * Missing. The four legacy driver date fields are mirrors written by the
- * backend on activation — this tab never edits them directly.
+ * Missing. Mirror date fields on the parent are written by the backend.
  */
 
 import * as React from 'react';
@@ -21,7 +27,7 @@ import { useAction, useMutation } from 'convex/react';
 import { toast } from 'sonner';
 
 import { api } from '@/convex/_generated/api';
-import type { Id } from '@/convex/_generated/dataModel';
+import type { DocumentEntity } from '@/convex/lib/documentTypeDefaults';
 import { convexErrorMessage } from '@/lib/convex-error';
 import {
   Chip,
@@ -41,22 +47,32 @@ import {
   chipForStatus,
   formatBytes,
   formatYmd,
+  isSharedDocument,
   type DocumentRowModel,
   type EntityDocument,
-} from './driver-documents-model';
-import { useDriverDocuments } from './use-driver-documents';
+  type SharedDocument,
+} from './entity-documents-model';
+import { useEntityDocuments } from './use-entity-documents';
 
-interface DriverDocumentsTabProps {
-  driverId: Id<'drivers'>;
-  driverName?: string;
+export interface EntityDocumentsTabProps {
+  entity: DocumentEntity;
+  entityId: string;
+  /** Display name of the entity, used in dialog titles. */
+  entityName?: string;
 }
 
 type ArchivedRow = EntityDocument & { id: string; typeName: string };
+type AnyDoc = EntityDocument | SharedDocument;
 
-export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabProps) {
-  const docs = useDriverDocuments(driverId);
+export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocumentsTabProps) {
+  const docs = useEntityDocuments(entity, entityId);
   const archiveDoc = useMutation(api.entityDocuments.archive);
-  const getDownloadUrl = useAction(api.driverDocuments.getDownloadUrl);
+  const setShared = useMutation(api.entityDocuments.setShared);
+  const download = {
+    driver: useAction(api.driverDocuments.getDownloadUrl),
+    carrier: useAction(api.carrierDocuments.getDownloadUrl),
+    organization: useAction(api.organizationDocuments.getDownloadUrl),
+  }[entity];
 
   const [filters, setFilters] = React.useState<FilterChipValue[]>([]);
   const [upload, setUpload] = React.useState<{ typeKey?: string; replacingName?: string } | null>(null);
@@ -77,6 +93,7 @@ export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabP
             : 'valid';
           if (!f.values.includes(bucket)) return false;
         }
+        if (f.propId === 'src' && !f.values.includes(r.source ?? 'none')) return false;
       }
       return true;
     });
@@ -96,23 +113,34 @@ export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabP
         { value: 'missing',  label: 'Missing' },
       ],
     },
+    ...(entity === 'carrier'
+      ? [{
+          id: 'src', label: 'Source', icon: 'handshake' as const, kind: 'enum' as const, operator: 'is any of' as const,
+          options: [
+            { value: 'own',    label: 'Our records' },
+            { value: 'shared', label: 'Carrier shared' },
+          ],
+        }]
+      : []),
   ];
 
   // ── Preview / download via short-lived signed GET ─────────────────────
-  const openPreview = async (row: DocumentRowModel | ArchivedRow) => {
-    const doc = 'doc' in row ? row.doc : row;
+  const openPreview = async (doc: AnyDoc | null, typeName: string) => {
     if (!doc || !doc.hasFile) return;
-    const typeName = 'type' in row ? row.type.name : row.typeName;
     const isPdf = !!doc.contentType?.includes('pdf');
+    const shared = isSharedDocument(doc);
     const record: DocRecord = {
       id: doc._id,
       name: `${typeName}${doc.fileName ? ` — ${doc.fileName}` : ''}`,
-      src: doc.uploadedByName ?? 'Ops',
+      src: shared ? doc.sharedFromOrgName : doc.uploadedByName ?? 'Ops',
       when: formatYmd(new Date(doc.activatedAt ?? doc.uploadedAt).toISOString().slice(0, 10)),
       status: 'valid',
       preview: isPdf ? { kind: 'pdf', url: '' } : { kind: 'image', url: '' },
       activity: [
-        { id: 'up', text: <>Uploaded by {doc.uploadedByName ?? 'ops'}</> },
+        {
+          id: 'up',
+          text: shared ? <>Shared by {doc.sharedFromOrgName}</> : <>Uploaded by {doc.uploadedByName ?? 'ops'}</>,
+        },
         ...(doc.expirationDate ? [{ id: 'exp', text: <>Expires {formatYmd(doc.expirationDate)}</> }] : []),
         ...(doc.issueDate ? [{ id: 'iss', text: <>Issued {formatYmd(doc.issueDate)}</> }] : []),
         ...(doc.note ? [{ id: 'note', text: <>{doc.note}</> }] : []),
@@ -120,32 +148,48 @@ export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabP
     };
     setPreview(record);
     try {
-      const [view, download] = await Promise.all([
-        getDownloadUrl({ docId: doc._id }),
-        getDownloadUrl({ docId: doc._id, download: true }),
+      const [view, dl] = await Promise.all([
+        download({ docId: doc._id }),
+        download({ docId: doc._id, download: true }),
       ]);
       setPreview((cur) =>
         cur?.id === doc._id
-          ? { ...cur, preview: { ...cur.preview, url: view.url }, openUrl: view.url, downloadUrl: download.url }
+          ? { ...cur, preview: { ...cur.preview, url: view.url }, openUrl: view.url, downloadUrl: dl.url }
           : cur,
       );
     } catch (e) {
-      toast.error((convexErrorMessage(e) ?? 'Could not open document'));
+      toast.error(convexErrorMessage(e) ?? 'Could not open document');
       setPreview(null);
     }
   };
 
   const onArchive = async (row: DocumentRowModel) => {
-    if (!row.doc) return;
+    const own = row.ownDoc;
+    if (!own) return;
     const ok = window.confirm(
-      `Archive ${row.type.name}? The driver will show "Missing" for this document until a new one is uploaded.`,
+      `Archive ${row.type.name}? ${
+        entity === 'carrier' && row.source === 'shared'
+          ? 'The carrier-shared copy will remain in effect.'
+          : 'This record will show "Missing" for this document until a new one is uploaded.'
+      }`,
     );
     if (!ok) return;
     try {
-      await archiveDoc({ docId: row.doc._id });
+      await archiveDoc({ docId: own._id });
       toast.success(`${row.type.name} archived`);
     } catch (e) {
-      toast.error((convexErrorMessage(e) ?? 'Failed to archive'));
+      toast.error(convexErrorMessage(e) ?? 'Failed to archive');
+    }
+  };
+
+  const onToggleShare = async (row: DocumentRowModel) => {
+    const own = row.ownDoc;
+    if (!own || own.shared === undefined) return;
+    try {
+      await setShared({ docId: own._id, shared: !own.shared });
+      toast.success(own.shared ? `${row.type.name} withheld from linked brokers` : `${row.type.name} shared with linked brokers`);
+    } catch (e) {
+      toast.error(convexErrorMessage(e) ?? 'Failed to update sharing');
     }
   };
 
@@ -170,6 +214,30 @@ export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabP
         </div>
       ),
     },
+    ...(entity === 'carrier'
+      ? [{
+          key: 'src', label: 'Source', width: '120px',
+          render: (r: DocumentRowModel) =>
+            r.source === 'shared' ? (
+              <Chip status="assigned" label="Carrier" />
+            ) : r.source === 'own' ? (
+              <span className="text-[12px] text-[var(--text-secondary)]">Our records</span>
+            ) : (
+              <span className="text-[12px] text-[var(--text-tertiary)]">—</span>
+            ),
+        } satisfies DSMiniColumn<DocumentRowModel>]
+      : []),
+    ...(entity === 'organization'
+      ? [{
+          key: 'shared', label: 'Shared', width: '110px',
+          render: (r: DocumentRowModel) =>
+            r.ownDoc ? (
+              r.ownDoc.shared ? <Chip status="assigned" label="Shared" /> : <Chip status="inactive" label="Withheld" />
+            ) : (
+              <span className="text-[12px] text-[var(--text-tertiary)]">—</span>
+            ),
+        } satisfies DSMiniColumn<DocumentRowModel>]
+      : []),
     {
       key: 'exp', label: 'Expires', width: '130px',
       render: (r) => (
@@ -191,14 +259,24 @@ export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabP
 
   const rowActions = (r: DocumentRowModel): DSRowAction[] => {
     const actions: DSRowAction[] = [];
-    if (r.doc?.hasFile) actions.push({ label: 'View', icon: 'eye', onClick: () => void openPreview(r) });
+    if (r.doc?.hasFile) actions.push({ label: 'View', icon: 'eye', onClick: () => void openPreview(r.doc, r.type.name) });
+    if (r.source === 'shared' && r.ownDoc?.hasFile) {
+      actions.push({ label: 'View our copy', icon: 'eye', onClick: () => void openPreview(r.ownDoc, r.type.name) });
+    }
     if (docs.canEdit) {
       actions.push({
-        label: r.doc ? 'Replace' : 'Upload',
+        label: r.ownDoc ? 'Replace' : r.source === 'shared' ? 'Add our own' : 'Upload',
         icon: 'upload',
-        onClick: () => setUpload({ typeKey: r.type.key, replacingName: r.doc ? r.type.name : undefined }),
+        onClick: () => setUpload({ typeKey: r.type.key, replacingName: r.ownDoc ? r.type.name : undefined }),
       });
-      if (r.doc) actions.push({ label: 'Archive', icon: 'archive', danger: true, onClick: () => void onArchive(r) });
+      if (r.ownDoc) actions.push({ label: 'Archive', icon: 'archive', danger: true, onClick: () => void onArchive(r) });
+    }
+    if (entity === 'organization' && docs.canShare && r.ownDoc && r.ownDoc.shared !== undefined) {
+      actions.push({
+        label: r.ownDoc.shared ? 'Withhold from brokers' : 'Share with brokers',
+        icon: 'handshake',
+        onClick: () => void onToggleShare(r),
+      });
     }
     return actions;
   };
@@ -233,6 +311,13 @@ export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabP
     },
   ];
 
+  const emptyCopy =
+    entity === 'carrier'
+      ? 'No document types are enabled for carriers. Add or unhide types in Settings › Documents.'
+      : entity === 'organization'
+        ? 'No company document types are enabled. Add or unhide types in Settings › Documents.'
+        : 'No document types are enabled. Add or unhide types in Settings › Documents.';
+
   return (
     <div className="flex flex-col gap-3.5">
       {/* Summary strip */}
@@ -244,7 +329,14 @@ export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabP
         <DocStat label="Missing"  value={docs.counts.missing}  tone="crit" divided />
       </div>
 
-      {/* Active documents */}
+      {entity === 'carrier' && docs.linkedCarrierName && (
+        <p className="m-0 text-[12px] text-[var(--text-tertiary)]">
+          Linked to <strong className="font-medium text-foreground">{docs.linkedCarrierName}</strong>. Documents they
+          share appear here automatically; the latest expiry wins when you also keep your own copy.
+        </p>
+      )}
+
+      {/* Documents */}
       <DSCard
         title={`Documents (${filtered.length})`}
         bodyClassName="p-0"
@@ -272,15 +364,13 @@ export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabP
           total={filtered.length}
           rowActions={rowActions}
           onRowClick={(r) => {
-            if (r.doc?.hasFile) void openPreview(r);
+            if (r.doc?.hasFile) void openPreview(r.doc, r.type.name);
             else if (docs.canEdit) setUpload({ typeKey: r.type.key });
           }}
           className="rounded-t-none border-0 border-t"
         />
         {!docs.loading && docs.rows.length === 0 && (
-          <div className="px-4 py-6 text-center text-[12px] text-[var(--text-tertiary)]">
-            No document types are enabled. Add or unhide types in Settings › Documents.
-          </div>
+          <div className="px-4 py-6 text-center text-[12px] text-[var(--text-tertiary)]">{emptyCopy}</div>
         )}
       </DSCard>
 
@@ -290,8 +380,8 @@ export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabP
           columns={archivedCols}
           rows={archivedRows}
           total={archivedRows.length}
-          rowActions={(r) => (r.hasFile ? [{ label: 'View', icon: 'eye', onClick: () => void openPreview(r) }] : [])}
-          onRowClick={(r) => r.hasFile && void openPreview(r)}
+          rowActions={(r) => (r.hasFile ? [{ label: 'View', icon: 'eye', onClick: () => void openPreview(r, r.typeName) }] : [])}
+          onRowClick={(r) => r.hasFile && void openPreview(r, r.typeName)}
           className="rounded-t-none border-0 border-t"
         />
         {archivedRows.length === 0 && (
@@ -304,11 +394,12 @@ export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabP
       <DocumentUploadDialog
         open={upload !== null}
         onOpenChange={(o) => !o && setUpload(null)}
-        driverId={driverId}
+        entity={entity}
+        entityId={entityId}
         types={docs.types}
         initialTypeKey={upload?.typeKey}
         replacingName={upload?.replacingName}
-        driverName={driverName}
+        entityName={entityName}
       />
 
       <DocPreviewModal doc={preview} onClose={() => setPreview(null)} />

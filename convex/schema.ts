@@ -381,6 +381,11 @@ export default defineSchema({
     updatedAt: v.number(),
     createdBy: v.string(),
     linkedAt: v.optional(v.number()), // When carrierOrgId was linked
+
+    // Time-independent documents summary (documents-storage-spec.md §2):
+    // carrier types with no qualifying active row from EITHER the
+    // broker's own uploads or the linked carrier's shared documents.
+    missingDocTypeKeys: v.optional(v.array(v.string())),
   })
     .index('by_broker', ['brokerOrgId', 'status'])
     .index('by_carrier', ['carrierOrgId'])

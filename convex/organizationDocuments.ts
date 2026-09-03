@@ -1,12 +1,14 @@
 'use node';
 
 /**
- * Driver documents — the 'use node' half (R2 presign / HEAD / signed GET).
- * docs/documents-storage-spec.md §1 "Upload flow (web)".
+ * Organization documents — the org's OWN compliance file (COI, W-9,
+ * operating authority…), documents-storage-spec.md §6.1–6.2. Stored under
+ * orgs/{orgId}/company/. When the org is a carrier linked to brokers, the
+ * documents whose type is shared by default (and not withheld per
+ * document) appear read-only on those brokers' partnership pages.
  *
- * Thin by design: bodies live in lib/documentActionHandlers.ts; every
- * rule lives in entityDocuments.ts and runs with the caller's identity.
- * Explicit return annotations break the generated-API type cycle.
+ * `entityId` is the caller's own WorkOS org id; the access rule refuses
+ * anything else.
  */
 
 import { v } from 'convex/values';
@@ -21,7 +23,7 @@ import {
 
 export const getUploadUrl = action({
   args: {
-    driverId: v.id('drivers'),
+    orgId: v.string(),
     typeKey: v.string(),
     fileName: v.string(),
     contentType: v.string(),
@@ -36,7 +38,7 @@ export const getUploadUrl = action({
     ctx,
     args,
   ): Promise<{ docId: Id<'entityDocuments'>; uploadUrl: string; metadataHeaders: Record<string, string> }> =>
-    presignEntityUpload(ctx, 'driver', { ...args, entityId: args.driverId }),
+    presignEntityUpload(ctx, 'organization', { ...args, entityId: args.orgId }),
 });
 
 export const finalizeUpload = action({

@@ -48,9 +48,9 @@ import {
   resolveStatusId,
 } from '@/components/web';
 import { PayeeProfilesCard } from '@/components/web/pay-profiles/payee-profiles-card';
-import { DriverDocumentsTab } from '@/components/web/drivers/driver-documents-tab';
-import { useDriverDocuments } from '@/components/web/drivers/use-driver-documents';
-import { complianceChipForStatus, formatYmd as formatDocDate } from '@/components/web/drivers/driver-documents-model';
+import { EntityDocumentsTab } from '@/components/web/documents/entity-documents-tab';
+import { useDriverDocuments } from '@/components/web/documents/use-entity-documents';
+import { complianceChipForStatus, formatYmd as formatDocDate } from '@/components/web/documents/entity-documents-model';
 import { needsAttention as docNeedsAttention } from '@/convex/_helpers/documentStatus';
 
 import { DeleteConfirmationDialog } from '@/components/drivers/delete-confirmation-dialog';
@@ -917,7 +917,7 @@ export default function DriverDetailPage() {
 
   // Documents tab — full-page layout backed by entityDocuments (upload,
   // replace, archive, Missing status). See documents-storage-spec.md.
-  const documentsContent = <DriverDocumentsTab driverId={driverId} driverName={fullName} />;
+  const documentsContent = <EntityDocumentsTab entity="driver" entityId={driverId} entityName={fullName} />;
 
   // Pay & expenses tab — new pay engine. Reads from payeeProfileAssignments
   // → payProfiles → payRules. "Manage pay profiles" opens an assignment

@@ -33,8 +33,8 @@ import {
   dateExpiryStatus,
   localTodayDateStr,
 } from '@/convex/_helpers/documentStatus';
-import { useDriverDocuments } from './use-driver-documents';
-import { chipForStatus, formatYmd } from './driver-documents-model';
+import { useDriverDocuments } from '@/components/web/documents/use-entity-documents';
+import { chipForStatus, formatYmd } from '@/components/web/documents/entity-documents-model';
 
 export interface DriverRow {
   _id: string;

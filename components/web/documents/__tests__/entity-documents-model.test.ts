@@ -7,7 +7,8 @@ import {
   formatBytes,
   formatYmd,
   type EntityDocument,
-} from '../driver-documents-model';
+  type SharedDocument,
+} from '../entity-documents-model';
 
 const today = '2026-05-04';
 
@@ -43,6 +44,26 @@ function doc(partial: Partial<EntityDocument> & { typeKey: string }): EntityDocu
   };
 }
 
+function sharedDoc(partial: Partial<SharedDocument> & { partnerTypeKey: string }): SharedDocument {
+  n++;
+  return {
+    _id: `shared_${n}` as SharedDocument['_id'],
+    entity: 'organization',
+    entityId: 'org_carrier',
+    typeKey: `org_${partial.partnerTypeKey}`,
+    status: 'active',
+    hasFile: true,
+    uploadedBy: 'c',
+    uploadedAt: 1000 + n,
+    activatedAt: 1000 + n,
+    shared: true,
+    sharedFromOrgId: 'org_carrier',
+    sharedFromOrgName: 'Rivera Trucking',
+    typeName: 'Certificate of insurance',
+    ...partial,
+  };
+}
+
 describe('composeDocumentsViewModel', () => {
   const types = [
     type({ key: 'cdl', name: 'CDL', sortOrder: 10 }),
@@ -53,10 +74,10 @@ describe('composeDocumentsViewModel', () => {
 
   it('emits one Missing row per visible type with no active document', () => {
     const vm = composeDocumentsViewModel(types, [], today);
-    expect(vm.rows.map((r) => [r.id, r.status])).toEqual([
-      ['cdl', 'missing'],
-      ['medical', 'missing'],
-      ['drug_screen', 'missing'],
+    expect(vm.rows.map((r) => [r.id, r.status, r.source])).toEqual([
+      ['cdl', 'missing', null],
+      ['medical', 'missing', null],
+      ['drug_screen', 'missing', null],
     ]);
     expect(vm.counts).toEqual({ total: 3, onFile: 0, valid: 0, expiring: 0, expired: 0, missing: 3 });
     expect(vm.attention).toBe(3);
@@ -73,6 +94,7 @@ describe('composeDocumentsViewModel', () => {
     const cdl = vm.rows.find((r) => r.id === 'cdl')!;
     expect(cdl.status).toBe('expiring');
     expect(cdl.doc?.expirationDate).toBe('2026-05-10');
+    expect(cdl.source).toBe('own');
     expect(vm.rows.filter((r) => r.type.key === 'drug_screen')).toHaveLength(2);
     expect(vm.rows.filter((r) => r.type.key === 'drug_screen').every((r) => r.status === 'on_file')).toBe(true);
     expect(vm.counts.onFile).toBe(3);
@@ -96,6 +118,48 @@ describe('composeDocumentsViewModel', () => {
   it('never shows hidden types', () => {
     const vm = composeDocumentsViewModel(types, [doc({ typeKey: 'hidden', expirationDate: '2030-01-01' })], today);
     expect(vm.rows.some((r) => r.type.key === 'hidden')).toBe(false);
+  });
+});
+
+describe('carrier partnerships with shared documents (spec §6.3)', () => {
+  const carrierTypes = [
+    type({ key: 'coi', entity: 'carrier', name: 'Certificate of insurance', sortOrder: 10 }),
+    type({ key: 'w9', entity: 'carrier', name: 'W-9', expires: false, sortOrder: 20 }),
+  ];
+
+  it('a shared document satisfies a type the broker has nothing for', () => {
+    const vm = composeDocumentsViewModel(carrierTypes, [], today, [
+      sharedDoc({ partnerTypeKey: 'coi', expirationDate: '2030-01-01' }),
+    ]);
+    const coi = vm.rows.find((r) => r.id === 'coi')!;
+    expect(coi.status).toBe('valid');
+    expect(coi.source).toBe('shared');
+    expect(coi.ownDoc).toBeNull();
+    expect(vm.rows.find((r) => r.id === 'w9')?.status).toBe('missing');
+  });
+
+  it('latest expiry wins between own and shared, and the loser stays reachable as ownDoc', () => {
+    const own = doc({ typeKey: 'coi', expirationDate: '2026-05-10' }); // expiring
+    const vm = composeDocumentsViewModel(carrierTypes, [own], today, [
+      sharedDoc({ partnerTypeKey: 'coi', expirationDate: '2031-01-01' }),
+    ]);
+    const coi = vm.rows.find((r) => r.id === 'coi')!;
+    expect(coi.source).toBe('shared');
+    expect(coi.status).toBe('valid');
+    expect(coi.ownDoc?._id).toBe(own._id);
+
+    const vm2 = composeDocumentsViewModel(carrierTypes, [doc({ typeKey: 'coi', expirationDate: '2032-01-01' })], today, [
+      sharedDoc({ partnerTypeKey: 'coi', expirationDate: '2031-01-01' }),
+    ]);
+    expect(vm2.rows.find((r) => r.id === 'coi')?.source).toBe('own');
+  });
+
+  it("non-expiring types prefer the broker's own record over a shared one", () => {
+    const own = doc({ typeKey: 'w9', issueDate: '2026-01-01' });
+    const vm = composeDocumentsViewModel(carrierTypes, [own], today, [sharedDoc({ partnerTypeKey: 'w9' })]);
+    const w9 = vm.rows.find((r) => r.id === 'w9')!;
+    expect(w9.source).toBe('own');
+    expect(w9.status).toBe('on_file');
   });
 });
 

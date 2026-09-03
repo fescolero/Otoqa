@@ -464,3 +464,264 @@ describe('maintenance', () => {
     }
   });
 });
+
+// ─── Phase 2: carriers, company file, sharing (spec §6) ──────────────────
+
+const BROKER_ORG = 'org_workos_broker_B2';
+const CARRIER_ORG = 'org_workos_carrier_B2';
+const BROKER_USER = {
+  subject: 'user_broker_ops',
+  name: 'Bea Broker',
+  org_id: BROKER_ORG,
+  role: 'dispatcher',
+  permissions: [...permissionsForLevel('partners', 'edit')],
+};
+const BROKER_VIEWER = {
+  subject: 'user_broker_viewer',
+  org_id: BROKER_ORG,
+  role: 'dispatcher',
+  permissions: [...permissionsForLevel('partners', 'view')],
+};
+const CARRIER_ADMIN = {
+  subject: 'user_carrier_admin',
+  name: 'Cal Carrier',
+  org_id: CARRIER_ORG,
+  role: 'admin',
+  permissions: [...permissionsForLevel('settings', 'manage')],
+};
+const STRANGER = {
+  subject: 'user_stranger',
+  org_id: 'org_workos_stranger',
+  role: 'admin',
+  permissions: [...permissionsForLevel('partners', 'manage')],
+};
+
+async function insertCarrierWorld(ctx: MutationCtx, opts: { linked: boolean }) {
+  const now = Date.now();
+  const orgId = await ctx.db.insert('organizations', {
+    name: 'Rivera Trucking',
+    clerkOrgId: 'clerk_rivera',
+    workosOrgId: CARRIER_ORG,
+    orgType: 'CARRIER',
+    billingEmail: 'b@t.co',
+    billingAddress: { addressLine1: '1', city: 'C', state: 'S', zip: 'Z', country: 'US' },
+    subscriptionPlan: 'E',
+    subscriptionStatus: 'Active',
+    billingCycle: 'Annual',
+    createdAt: now,
+    updatedAt: now,
+  });
+  const partnershipId = await ctx.db.insert('carrierPartnerships', {
+    brokerOrgId: BROKER_ORG,
+    // Legacy shape on purpose: the Clerk id, not the WorkOS id.
+    ...(opts.linked ? { carrierOrgId: 'clerk_rivera', linkedAt: now } : {}),
+    mcNumber: 'MC123',
+    carrierName: 'Rivera Trucking',
+    status: 'ACTIVE',
+    defaultPaymentTerms: 'Net15',
+    insuranceExpiration: '2026-02-02', // stale mirror from before documents
+    createdAt: now,
+    updatedAt: now,
+    createdBy: 'u',
+  });
+  return { orgId, partnershipId };
+}
+
+async function uploadFor(
+  t: ReturnType<typeof setup>,
+  identity: object,
+  entity: 'carrier' | 'organization',
+  entityId: string,
+  typeKey: string,
+  dates: { expirationDate?: string; issueDate?: string },
+) {
+  const as = t.withIdentity(identity as never);
+  const pending = await as.mutation(internal.entityDocuments.createPending, {
+    entity,
+    entityId,
+    typeKey,
+    fileName: `${typeKey}.pdf`,
+    contentType: 'application/pdf',
+    sizeBytes: 10,
+  });
+  await as.mutation(internal.entityDocuments.finalize, {
+    docId: pending.docId,
+    verified: { contentType: 'application/pdf', sizeBytes: 10 },
+    ...dates,
+  });
+  return pending.docId;
+}
+
+describe('carrier partnership documents (spec §6.1, §6.3)', () => {
+  it("a broker's COI upload mirrors insuranceExpiration and clears the missing summary", async () => {
+    const t = setup();
+    const { partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    const asBroker = t.withIdentity(BROKER_USER as never);
+
+    const pending = await asBroker.mutation(internal.entityDocuments.createPending, {
+      entity: 'carrier',
+      entityId: partnershipId,
+      typeKey: 'coi',
+      fileName: 'coi.pdf',
+      contentType: 'application/pdf',
+      sizeBytes: 10,
+    });
+    expect(pending.key).toBe(`orgs/${BROKER_ORG}/carriers/${partnershipId}/coi/${pending.docId}-coi.pdf`);
+    await asBroker.mutation(internal.entityDocuments.finalize, {
+      docId: pending.docId,
+      verified: { contentType: 'application/pdf', sizeBytes: 10 },
+      expirationDate: '2030-09-09',
+    });
+
+    const p = await t.run((ctx) => ctx.db.get(partnershipId));
+    expect(p?.insuranceExpiration).toBe('2030-09-09');
+    expect(p?.missingDocTypeKeys).not.toContain('coi');
+    expect(p?.missingDocTypeKeys).toContain('w9');
+
+    const list = await asBroker.query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(list.documents).toHaveLength(1);
+    expect(list.shared).toHaveLength(0);
+    expect(list.linkedCarrierName).toBeUndefined();
+
+    const audit = await t.run((ctx) =>
+      ctx.db
+        .query('auditLog')
+        .withIndex('by_entity_type', (q) => q.eq('organizationId', BROKER_ORG).eq('entityType', 'carrierPartnership'))
+        .collect(),
+    );
+    expect(audit.map((a) => a.action)).toContain('document_uploaded');
+  });
+
+  it('archive without replacement keeps the stale insurance mirror (spec §5.3 for carriers)', async () => {
+    const t = setup();
+    const { partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    const docId = await uploadFor(t, BROKER_USER, 'carrier', partnershipId, 'coi', { expirationDate: '2029-01-01' });
+    await t.withIdentity(BROKER_USER as never).mutation(api.entityDocuments.archive, { docId });
+    const p = await t.run((ctx) => ctx.db.get(partnershipId));
+    expect(p?.insuranceExpiration).toBe('2029-01-01');
+    expect(p?.missingDocTypeKeys).toContain('coi');
+  });
+
+  it('cross-org callers and viewers are gated on partners:*', async () => {
+    const t = setup();
+    const { partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    await expect(
+      t.withIdentity(STRANGER as never).query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId }),
+    ).rejects.toThrow(/Not found/);
+    const asViewer = t.withIdentity(BROKER_VIEWER as never);
+    const list = await asViewer.query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(list.canEdit).toBe(false);
+    await expect(
+      asViewer.mutation(internal.entityDocuments.createPending, {
+        entity: 'carrier',
+        entityId: partnershipId,
+        typeKey: 'coi',
+        fileName: 'x.pdf',
+        contentType: 'application/pdf',
+        sizeBytes: 1,
+      }),
+    ).rejects.toThrow(/partners:edit/);
+  });
+});
+
+describe('company file + sharing (spec §6.2)', () => {
+  it("a linked carrier's shared COI appears on the broker's partnership, drives its mirror, and can be read by the broker", async () => {
+    const t = setup();
+    const { partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const asCarrier = t.withIdentity(CARRIER_ADMIN as never);
+    const asBroker = t.withIdentity(BROKER_USER as never);
+
+    // The carrier's own company file, keyed under orgs/{carrierOrg}/company/.
+    const pending = await asCarrier.mutation(internal.entityDocuments.createPending, {
+      entity: 'organization',
+      entityId: CARRIER_ORG,
+      typeKey: 'org_coi',
+      fileName: 'coi.pdf',
+      contentType: 'application/pdf',
+      sizeBytes: 10,
+    });
+    expect(pending.key).toBe(`orgs/${CARRIER_ORG}/company/org_coi/${pending.docId}-coi.pdf`);
+    await asCarrier.mutation(internal.entityDocuments.finalize, {
+      docId: pending.docId,
+      verified: { contentType: 'application/pdf', sizeBytes: 10 },
+      expirationDate: '2031-03-03',
+    });
+
+    // Broker side: shared row present, mirror + summary updated (link stored as the Clerk id).
+    const list = await asBroker.query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(list.linkedCarrierName).toBe('Rivera Trucking');
+    expect(list.shared).toHaveLength(1);
+    expect(list.shared[0].partnerTypeKey).toBe('coi');
+    expect(list.shared[0].sharedFromOrgName).toBe('Rivera Trucking');
+    const p = await t.run((ctx) => ctx.db.get(partnershipId));
+    expect(p?.insuranceExpiration).toBe('2031-03-03');
+    expect(p?.missingDocTypeKeys).not.toContain('coi');
+
+    // Signed-GET access: linked broker yes, stranger no, unauthenticated no.
+    expect(await asBroker.query(internal.entityDocuments.getForAccess, { docId: pending.docId })).not.toBeNull();
+    expect(await t.withIdentity(STRANGER as never).query(internal.entityDocuments.getForAccess, { docId: pending.docId })).toBeNull();
+    expect(await t.query(internal.entityDocuments.getForAccess, { docId: pending.docId })).toBeNull();
+    // …and never for edit.
+    expect(await asBroker.query(internal.entityDocuments.getPendingForFinalize, { docId: pending.docId })).toBeNull();
+  });
+
+  it('latest expiry wins between the broker copy and the shared copy', async () => {
+    const t = setup();
+    const { partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2029-01-01' });
+    await uploadFor(t, BROKER_USER, 'carrier', partnershipId, 'coi', { expirationDate: '2030-01-01' });
+    let p = await t.run((ctx) => ctx.db.get(partnershipId));
+    expect(p?.insuranceExpiration).toBe('2030-01-01'); // broker's is later
+
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2032-01-01' });
+    p = await t.run((ctx) => ctx.db.get(partnershipId));
+    expect(p?.insuranceExpiration).toBe('2032-01-01'); // carrier renewed → propagates
+  });
+
+  it('withholding a document removes it from linked brokers; only settings:manage may toggle', async () => {
+    const t = setup();
+    const { partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const docId = await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    const asCarrier = t.withIdentity(CARRIER_ADMIN as never);
+    const asBroker = t.withIdentity(BROKER_USER as never);
+
+    const own = await asCarrier.query(api.entityDocuments.listForEntity, { entity: 'organization', entityId: CARRIER_ORG });
+    expect(own.canShare).toBe(true);
+    expect(own.documents[0].shared).toBe(true); // shared by default
+
+    await asCarrier.mutation(api.entityDocuments.setShared, { docId, shared: false });
+    const after = await asBroker.query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(after.shared).toHaveLength(0);
+    expect(await asBroker.query(internal.entityDocuments.getForAccess, { docId })).toBeNull();
+    const p = await t.run((ctx) => ctx.db.get(partnershipId));
+    expect(p?.missingDocTypeKeys).toContain('coi');
+    expect(p?.insuranceExpiration).toBe('2031-01-01'); // stale mirror kept
+
+    const actions = await t.run(async (ctx) => (await ctx.db.query('auditLog').collect()).map((a) => a.action));
+    expect(actions).toContain('document_share_changed');
+
+    await expect(asBroker.mutation(api.entityDocuments.setShared, { docId, shared: true })).rejects.toThrow(/Not found/);
+  });
+
+  it('an unlinked partnership sees nothing from the carrier org', async () => {
+    const t = setup();
+    const { partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    const list = await t
+      .withIdentity(BROKER_USER as never)
+      .query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(list.shared).toHaveLength(0);
+  });
+
+  it('backfillPartnershipSummaries stamps every partnership', async () => {
+    const t = setup();
+    const { partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_w9', { issueDate: '2026-01-01' });
+    await t.run((ctx) => ctx.db.patch(partnershipId, { missingDocTypeKeys: undefined }));
+    const res = await t.mutation(internal.entityDocuments.backfillPartnershipSummaries, {});
+    expect(res.processed).toBe(1);
+    const p = await t.run((ctx) => ctx.db.get(partnershipId));
+    expect(p?.missingDocTypeKeys).toContain('coi');
+    expect(p?.missingDocTypeKeys).not.toContain('w9');
+  });
+});

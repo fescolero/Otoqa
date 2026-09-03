@@ -1,12 +1,14 @@
 'use node';
 
 /**
- * Driver documents — the 'use node' half (R2 presign / HEAD / signed GET).
- * docs/documents-storage-spec.md §1 "Upload flow (web)".
+ * Carrier-partnership documents — the broker's own records about a
+ * carrier (documents-storage-spec.md §6.1). Owned by the broker org,
+ * stored under orgs/{brokerOrgId}/carriers/{partnershipId}/.
  *
- * Thin by design: bodies live in lib/documentActionHandlers.ts; every
- * rule lives in entityDocuments.ts and runs with the caller's identity.
- * Explicit return annotations break the generated-API type cycle.
+ * Shared documents the carrier org publishes are READ through
+ * entityDocuments.listForEntity and downloaded via getDownloadUrl below
+ * (the access rule allows a linked broker to read a shared organization
+ * document); they are never uploaded from here.
  */
 
 import { v } from 'convex/values';
@@ -21,7 +23,7 @@ import {
 
 export const getUploadUrl = action({
   args: {
-    driverId: v.id('drivers'),
+    partnershipId: v.id('carrierPartnerships'),
     typeKey: v.string(),
     fileName: v.string(),
     contentType: v.string(),
@@ -36,7 +38,7 @@ export const getUploadUrl = action({
     ctx,
     args,
   ): Promise<{ docId: Id<'entityDocuments'>; uploadUrl: string; metadataHeaders: Record<string, string> }> =>
-    presignEntityUpload(ctx, 'driver', { ...args, entityId: args.driverId }),
+    presignEntityUpload(ctx, 'carrier', { ...args, entityId: args.partnershipId }),
 });
 
 export const finalizeUpload = action({
