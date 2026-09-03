@@ -1,7 +1,7 @@
 import { ConvexError, v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { getDateStatus } from './_helpers/dateUtils';
+import { countDriverAttention } from './_helpers/documentStatus';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
 import {
@@ -52,22 +52,9 @@ export const countDriversByStatus = query({
         counts.inactive++;
       }
 
-      // Count needs attention (expiring/expired documents)
-      const licenseStatus = getDateStatus(driver.licenseExpiration, args.todayDateStr);
-      const medicalStatus = getDateStatus(driver.medicalExpiration, args.todayDateStr);
-      const badgeStatus = getDateStatus(driver.badgeExpiration, args.todayDateStr);
-      const twicStatus = getDateStatus(driver.twicExpiration, args.todayDateStr);
-
-      if (
-        licenseStatus === 'expired' ||
-        licenseStatus === 'expiring' ||
-        medicalStatus === 'expired' ||
-        medicalStatus === 'expiring' ||
-        badgeStatus === 'expired' ||
-        badgeStatus === 'expiring' ||
-        twicStatus === 'expired' ||
-        twicStatus === 'expiring'
-      ) {
+      // Needs attention = missing documents + expired/expiring mirrors.
+      // Same rule as the web list and the driver page (documentStatus.ts).
+      if (countDriverAttention(driver, args.todayDateStr) > 0) {
         counts.needsAttention++;
       }
     });

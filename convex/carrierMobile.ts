@@ -1266,7 +1266,8 @@ export const createDriver = mutation({
       licenseNumber: args.licenseNumber || undefined,
       licenseState: args.licenseState || 'N/A',
       licenseClass: args.licenseClass || 'Class A',
-      licenseExpiration: args.licenseExpiration || new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      // Never fabricate an expiry — the CDL document sets it (documents-storage-spec.md §5.4).
+      licenseExpiration: args.licenseExpiration || undefined,
       // Employment
       employmentStatus: args.employmentStatus || 'Active',
       employmentType: args.employmentType || 'Full-time',
@@ -1640,7 +1641,8 @@ export const createOwnerDriver = mutation({
       licenseNumber: args.licenseNumber,
       licenseState: args.licenseState,
       licenseClass: args.licenseClass,
-      licenseExpiration: args.licenseExpiration || new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      // Never fabricate an expiry — the CDL document sets it (documents-storage-spec.md §5.4).
+      licenseExpiration: args.licenseExpiration || undefined,
       employmentStatus: 'Active',
       employmentType: 'Owner-Operator',
       hireDate: new Date().toISOString().split('T')[0],

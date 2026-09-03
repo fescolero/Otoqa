@@ -3,7 +3,13 @@
 import { ConvexError, v } from 'convex/values';
 import { action, internalAction } from './_generated/server';
 import { internal } from './_generated/api';
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  HeadObjectCommand,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { keyFromExternalUrl } from './lib/r2';
 import type { Id } from './_generated/dataModel';
@@ -14,14 +20,22 @@ import type { Id } from './_generated/dataModel';
 // Supports both AWS S3 and Cloudflare R2
 // ============================================
 //
-// Bucket layout (see docs/r2-storage.md for the full contract):
+// Bucket layout (see docs/documents-storage-spec.md §1 for the contract):
 //
 //   orgs/{workosOrgId}/loads/{loadId}/{docType}/{ts}-{rand}-{filename}
+//   orgs/{workosOrgId}/drivers/{driverId}/{typeKey}/{docId}-{filename}
+//   orgs/{workosOrgId}/carriers/{partnershipId}/{typeKey}/{docId}-{filename}
+//   orgs/{workosOrgId}/company/{typeKey}/{docId}-{filename}
 //
-// The org segment comes from the load row server-side (never from the
+// The org segment comes from the owning row server-side (never from the
 // client), so a per-customer export or deletion is a single prefix
 // operation. Legacy prefixes `pod-photos/` and `load-documents/` are
 // read-only history — no new objects land there.
+//
+// This file owns the S3 client and the load-document actions the mobile
+// app calls. Entity documents (drivers today; carriers/organizations in
+// phase 2) get thin per-entity action files that import the low-level
+// helpers exported below — one contract, no generic presign action.
 
 // Exported for the presign regression test (s3Upload.presign.test.ts) —
 // the SDK's checksum defaults broke every R2 upload once; the test pins
@@ -115,50 +129,78 @@ async function resolveOrgSegment(
   return org ?? 'unassigned';
 }
 
+// ─── Low-level helpers shared by every document action ──────────────────
+// Kept here (the only 'use node' module that owns the client) so the R2
+// quirks — checksum defaults, signed metadata headers — are fixed once.
+
+export const PRESIGNED_PUT_TTL_SECONDS = 300;
+export const PRESIGNED_GET_TTL_SECONDS = 900;
+
 /**
- * Generate a presigned URL for uploading a file directly to S3/R2
+ * Presign a PUT whose `x-amz-meta-*` headers are SIGNED (not hoisted to
+ * the query string). The client must echo `metadataToHeaders(metadata)`
+ * verbatim on PUT or R2 answers 403. See s3Upload.presign.test.ts.
  */
-export const getUploadUrl = action({
-  args: {
-    filename: v.string(),
-    contentType: v.string(),
-    folder: v.optional(v.string()),
-  },
-  returns: v.object({
-    uploadUrl: v.string(),
-    fileUrl: v.string(),
-    key: v.string(),
-  }),
-  handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new ConvexError('Not authenticated');
-    }
+export async function presignPutWithMetadata(args: {
+  key: string;
+  contentType: string;
+  metadata: Record<string, string>;
+}): Promise<string> {
+  const { client, bucket } = createS3Client();
+  const command = new PutObjectCommand({
+    Bucket: bucket,
+    Key: args.key,
+    ContentType: args.contentType,
+    Metadata: args.metadata,
+  });
+  const unhoistableHeaders = new Set(Object.keys(args.metadata).map((k) => `x-amz-meta-${k}`));
+  return getSignedUrl(client, command, {
+    expiresIn: PRESIGNED_PUT_TTL_SECONDS,
+    unhoistableHeaders,
+  });
+}
 
-    const { client, bucket, r2AccountId } = createS3Client();
+/**
+ * Presign a GET. Pass `downloadAs` to force `Content-Disposition:
+ * attachment` so a file is saved rather than rendered (spec §1 "Reads").
+ */
+export async function presignGet(args: {
+  key: string;
+  downloadAs?: string;
+}): Promise<{ url: string; expiresAt: number }> {
+  const { client, bucket } = createS3Client();
+  const command = new GetObjectCommand({
+    Bucket: bucket,
+    Key: args.key,
+    ...(args.downloadAs
+      ? { ResponseContentDisposition: `attachment; filename="${args.downloadAs.replace(/"/g, '')}"` }
+      : {}),
+  });
+  const url = await getSignedUrl(client, command, { expiresIn: PRESIGNED_GET_TTL_SECONDS });
+  return { url, expiresAt: Date.now() + PRESIGNED_GET_TTL_SECONDS * 1000 };
+}
 
-    // Generate unique key for the file
-    const timestamp = Date.now();
-    const randomSuffix = Math.random().toString(36).substring(2, 8);
-    const sanitizedFilename = args.filename.replace(/[^a-zA-Z0-9.-]/g, '_');
-    const folder = args.folder || 'uploads';
-    const key = `${folder}/${timestamp}-${randomSuffix}-${sanitizedFilename}`;
+/** HEAD an object. Returns null when it does not exist. */
+export async function headObject(
+  key: string,
+): Promise<{ contentLength: number; contentType: string | undefined } | null> {
+  const { client, bucket } = createS3Client();
+  try {
+    const res = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    return { contentLength: res.ContentLength ?? 0, contentType: res.ContentType };
+  } catch (err) {
+    const name = (err as { name?: string })?.name;
+    const status = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+    if (name === 'NotFound' || name === 'NoSuchKey' || status === 404) return null;
+    throw err;
+  }
+}
 
-    const command = new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      ContentType: args.contentType,
-    });
-
-    const uploadUrl = await getSignedUrl(client, command, {
-      expiresIn: 300,
-    });
-
-    const fileUrl = buildFileUrl(key, r2AccountId, bucket);
-
-    return { uploadUrl, fileUrl, key };
-  },
-});
+/** Delete an object; idempotent on S3/R2. */
+export async function deleteObjectByKey(key: string): Promise<void> {
+  const { client, bucket } = createS3Client();
+  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+}
 
 /**
  * Presigned upload URL for unified load documents (driver-captured).
@@ -301,82 +343,6 @@ export const getLoadDocumentUploadUrl = action({
 });
 
 /**
- * DEPRECATED — POD presigns now go through getLoadDocumentUploadUrl with
- * type 'POD' + stopId. Kept alive only so driver-app builds still in the
- * field keep working; it produces the same org-prefixed key layout as
- * the unified path so even legacy clients stop writing to `pod-photos/`.
- * Remove once mobile adoption of the unified path is complete.
- */
-export const getPODUploadUrl = action({
-  args: {
-    loadId: v.string(),
-    stopId: v.string(),
-    filename: v.string(),
-    driverId: v.optional(v.string()),
-    capturedAt: v.optional(v.number()),
-    capturedLat: v.optional(v.number()),
-    capturedLng: v.optional(v.number()),
-  },
-  returns: v.object({
-    uploadUrl: v.string(),
-    fileUrl: v.string(),
-    key: v.string(),
-    metadataHeaders: v.record(v.string(), v.string()),
-  }),
-  handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new ConvexError('Not authenticated');
-    }
-
-    const { client, bucket, r2AccountId } = createS3Client();
-
-    const orgSegment = await resolveOrgSegment(ctx, args.loadId);
-    const key = buildDocumentKey(orgSegment, args.loadId, 'POD', args.filename);
-
-    const metadata: Record<string, string> = {
-      'org-id': orgSegment,
-      'load-id': args.loadId,
-      'stop-id': args.stopId,
-      'doc-type': 'POD',
-      'uploaded-via': 'driver-mobile',
-    };
-    if (args.driverId) metadata['driver-id'] = args.driverId;
-    if (args.capturedAt) metadata['captured-at'] = String(args.capturedAt);
-    if (typeof args.capturedLat === 'number')
-      metadata['captured-lat'] = args.capturedLat.toFixed(6);
-    if (typeof args.capturedLng === 'number')
-      metadata['captured-lng'] = args.capturedLng.toFixed(6);
-
-    const command = new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      ContentType: 'image/jpeg',
-      Metadata: metadata,
-    });
-
-    // Same signed-metadata-headers contract as getLoadDocumentUploadUrl.
-    const unhoistableHeaders = new Set(
-      Object.keys(metadata).map((k) => `x-amz-meta-${k}`),
-    );
-
-    const uploadUrl = await getSignedUrl(client, command, {
-      expiresIn: 300,
-      unhoistableHeaders,
-    });
-
-    const metadataHeaders: Record<string, string> = {};
-    for (const [k, v] of Object.entries(metadata)) {
-      metadataHeaders[`x-amz-meta-${k}`] = v;
-    }
-
-    const fileUrl = buildFileUrl(key, r2AccountId, bucket);
-
-    return { uploadUrl, fileUrl, key, metadataHeaders };
-  },
-});
-
-/**
  * Short-lived signed GET URL for a load document stored in R2.
  *
  * This is the read path that lets the bucket stay private: consumers
@@ -456,8 +422,7 @@ export const deleteObject = internalAction({
   },
   returns: v.null(),
   handler: async (_ctx, args) => {
-    const { client, bucket } = createS3Client();
-    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: args.key }));
+    await deleteObjectByKey(args.key);
     console.log('[S3Upload] Deleted object:', args.key);
     return null;
   },

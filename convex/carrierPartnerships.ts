@@ -802,10 +802,11 @@ export const update = mutation({
               licenseState: (updates.ownerDriverLicenseState as string) || partnership.ownerDriverLicenseState || 'N/A',
               licenseClass:
                 (updates.ownerDriverLicenseClass as string) || partnership.ownerDriverLicenseClass || 'Class A',
+              // Never fabricate an expiry (documents-storage-spec.md §5.4).
               licenseExpiration:
                 (updates.ownerDriverLicenseExpiration as string) ||
                 partnership.ownerDriverLicenseExpiration ||
-                '2030-12-31',
+                undefined,
               hireDate: new Date().toISOString().split('T')[0],
               createdBy: 'system',
               isDeleted: false,
@@ -1085,7 +1086,7 @@ export const updateStatus = mutation({
               licenseNumber: partnership.ownerDriverLicenseNumber,
               licenseState: partnership.ownerDriverLicenseState || 'N/A',
               licenseClass: partnership.ownerDriverLicenseClass || 'Class A',
-              licenseExpiration: partnership.ownerDriverLicenseExpiration || '2030-12-31',
+              licenseExpiration: partnership.ownerDriverLicenseExpiration || undefined, // never fabricated (spec §5.4)
               hireDate: new Date().toISOString().split('T')[0],
               createdBy: 'system',
               isDeleted: false,
@@ -1310,7 +1311,7 @@ export const createOwnerDriverRecord = mutation({
         licenseNumber: partnership.ownerDriverLicenseNumber,
         licenseState: partnership.ownerDriverLicenseState || 'N/A',
         licenseClass: partnership.ownerDriverLicenseClass || 'Class A',
-        licenseExpiration: partnership.ownerDriverLicenseExpiration || '2030-12-31',
+        licenseExpiration: partnership.ownerDriverLicenseExpiration || undefined, // never fabricated (spec §5.4)
         hireDate: new Date().toISOString().split('T')[0],
         createdBy: 'system',
         isDeleted: false,

@@ -48,10 +48,15 @@ export function diffCalendarDays(
   return Math.ceil((dateMs - refMs) / MS_PER_DAY);
 }
 
-type DateStatus = 'expired' | 'expiring' | 'warning' | 'valid';
+type DateStatus = 'missing' | 'expired' | 'expiring' | 'warning' | 'valid';
 
 /**
  * Determine the expiration status of a date-only string relative to today.
+ *
+ * An absent or unparseable date is `missing`, never `valid` — a driver
+ * with no medical date is not compliant (documents-storage-spec.md §3).
+ * Prefer `documentStatus.ts` for anything document-related; this stays
+ * for callers that only have a bare date.
  *
  * @param dateStr   YYYY-MM-DD string (e.g. licenseExpiration)
  * @param todayStr  YYYY-MM-DD string representing "today" — must be passed
@@ -61,10 +66,10 @@ export function getDateStatus(
   dateStr: string | undefined,
   todayStr: string
 ): DateStatus {
-  if (!dateStr) return 'valid';
+  if (!dateStr) return 'missing';
 
   const diff = diffCalendarDays(dateStr, todayStr);
-  if (diff === null) return 'valid';
+  if (diff === null) return 'missing';
 
   if (diff < 0) return 'expired';
   if (diff <= 30) return 'expiring';

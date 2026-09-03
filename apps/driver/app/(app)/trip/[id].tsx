@@ -446,7 +446,7 @@ export default function TripDetailScreen() {
 
     if (!result.canceled && result.assets?.[0]?.uri) {
       const asset = result.assets[0];
-      setPhotoUri(await prepareImageForUpload(asset.uri, asset.width, asset.height));
+      setPhotoUri(await prepareImageForUpload(asset.uri, asset.width, asset.height, asset.mimeType));
       posthog?.capture('capture_photo_taken', { loadId: id, success: true });
     }
   };
@@ -480,6 +480,7 @@ export default function TripDetailScreen() {
       capturedAsset.uri,
       capturedAsset.width,
       capturedAsset.height,
+      capturedAsset.mimeType,
     );
     setRecentUploads((prev) => [{ type: kind, status: 'uploading' }, ...prev]);
 
@@ -530,7 +531,7 @@ export default function TripDetailScreen() {
     });
     if (!cameraResult.canceled && cameraResult.assets?.[0]?.uri) {
       const asset = cameraResult.assets[0];
-      setAccidentPhotoUri(await prepareImageForUpload(asset.uri, asset.width, asset.height));
+      setAccidentPhotoUri(await prepareImageForUpload(asset.uri, asset.width, asset.height, asset.mimeType));
     }
   };
 

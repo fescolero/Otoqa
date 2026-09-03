@@ -369,4 +369,14 @@ crons.cron(
   job('platform-ledger-prune', 'platform/cronRunner:pruneLedger', 'mutation', DAY),
 );
 
+// ✅ Sweep orphaned entity-document uploads (pending rows older than 1h
+// whose finalize never came — closed tab between presign and finalize).
+// docs/documents-storage-spec.md §1 "Upload flow (web)" step 4.
+crons.interval(
+  'sweep-pending-documents',
+  { hours: 1 },
+  internal.platform.cronRunner.run,
+  job('sweep-pending-documents', 'entityDocuments:sweepPending', 'mutation', HOUR),
+);
+
 export default crons;

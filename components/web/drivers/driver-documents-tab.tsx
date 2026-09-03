@@ -4,146 +4,88 @@
  * Driver Detail — Documents tab (full-page).
  *
  * Layout per design Otoqa Web.html § DvDocsFullPage:
- *   • 4-stat summary strip — On file · Valid · Expiring · Expired
- *   • Active documents card — FilterBar (Category + Status) + Upload
- *     action; mini-table with editable Expires cell, computed Status chip
- *   • Archived & replaced card — empty until backend lands
+ *   • 5-stat summary strip — On file · Valid · Expiring · Expired · Missing
+ *   • Active documents card — FilterBar (Category + Status) + Upload;
+ *     one row per visible document type (plus one per document for
+ *     multi-document types), status from the shared status module
+ *   • Archived & replaced card — superseded and archived rows
  *
- * Today the driver record only carries four expiration dates (license,
- * medical, badge, TWIC). The table is populated from those four fields;
- * editing the Expires cell mutates the corresponding driver field. Adding
- * arbitrary documents (Drug screening, I-9, Hazmat, Background, etc.) +
- * an archive of replaced documents + actual file uploads need a
- * `driverDocuments` table + file storage. The Upload button and the
- * Archived & replaced card are wired in the UI now and will be connected
- * to that backend once it lands.
+ * Backed by entityDocuments (docs/documents-storage-spec.md). A document
+ * is a file plus a user-entered date; a type with no active document is
+ * Missing. The four legacy driver date fields are mirrors written by the
+ * backend on activation — this tab never edits them directly.
  */
 
 import * as React from 'react';
-import { useMutation } from 'convex/react';
+import { useAction, useMutation } from 'convex/react';
 import { toast } from 'sonner';
 
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
-
+import { convexErrorMessage } from '@/lib/convex-error';
 import {
   Chip,
-  type ChipStatus,
   DSCard,
   DSMiniTable,
   type DSMiniColumn,
+  type DSRowAction,
   FilterBar,
   type FilterChipValue,
   type FilterProperty,
   WBtn,
 } from '@/components/web';
+import { DocPreviewModal, type DocRecord } from '@/components/loads/doc-preview-modal';
 
-// ─── Date helpers (mirror build-driver-details.tsx) ──────────────────────
-
-type DocStatus = 'expired' | 'expiring' | 'warning' | 'valid' | 'na';
-
-function parseDateString(dateStr?: string | null): { y: number; m: number; d: number } | null {
-  if (!dateStr) return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
-  if (!m) return null;
-  return { y: Number(m[1]), m: Number(m[2]), d: Number(m[3]) };
-}
-function todayDateStr(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-function diffCalendarDays(dateStr: string, todayStr: string): number {
-  const a = parseDateString(dateStr);
-  const b = parseDateString(todayStr);
-  if (!a || !b) return Infinity;
-  const da = Date.UTC(a.y, a.m - 1, a.d);
-  const db = Date.UTC(b.y, b.m - 1, b.d);
-  return Math.round((da - db) / 86400000);
-}
-function getDocStatus(dateStr: string | undefined, today = todayDateStr()): DocStatus {
-  if (!dateStr) return 'na';
-  const days = diffCalendarDays(dateStr, today);
-  if (days < 0) return 'expired';
-  if (days <= 30) return 'expiring';
-  if (days <= 60) return 'warning';
-  return 'valid';
-}
-const STATUS_TO_CHIP: Record<DocStatus, ChipStatus> = {
-  expired: 'expired',
-  expiring: 'expiring',
-  warning: 'warning',
-  valid: 'valid',
-  na: 'na',
-};
-
-// ─── Row shape ───────────────────────────────────────────────────────────
-
-type DocCategory = 'License' | 'Medical' | 'Identity';
-type DocField = 'licenseExpiration' | 'medicalExpiration' | 'badgeExpiration' | 'twicExpiration';
-
-interface DocRow {
-  id: string;
-  field: DocField;
-  name: string;
-  cat: DocCategory;
-  exp: string; // YYYY-MM-DD ('' when not on file)
-  st: DocStatus;
-}
-
-interface DriverDocFields {
-  _id: Id<'drivers'>;
-  licenseExpiration?: string;
-  medicalExpiration?: string;
-  badgeExpiration?: string;
-  twicExpiration?: string;
-}
-
-function buildDocRows(driver: DriverDocFields): DocRow[] {
-  return [
-    { id: 'cdl',     field: 'licenseExpiration', name: 'CDL',                cat: 'License',  exp: driver.licenseExpiration ?? '', st: getDocStatus(driver.licenseExpiration) },
-    { id: 'medical', field: 'medicalExpiration', name: 'Medical certificate',cat: 'Medical',  exp: driver.medicalExpiration ?? '', st: getDocStatus(driver.medicalExpiration) },
-    { id: 'badge',   field: 'badgeExpiration',   name: 'Badge',              cat: 'Identity', exp: driver.badgeExpiration   ?? '', st: getDocStatus(driver.badgeExpiration) },
-    { id: 'twic',    field: 'twicExpiration',    name: 'TWIC card',          cat: 'Identity', exp: driver.twicExpiration    ?? '', st: getDocStatus(driver.twicExpiration) },
-  ];
-}
-
-// ─── Tab component ───────────────────────────────────────────────────────
+import { DocumentUploadDialog } from './document-upload-dialog';
+import {
+  chipForStatus,
+  formatBytes,
+  formatYmd,
+  type DocumentRowModel,
+  type EntityDocument,
+} from './driver-documents-model';
+import { useDriverDocuments } from './use-driver-documents';
 
 interface DriverDocumentsTabProps {
-  driver: DriverDocFields;
+  driverId: Id<'drivers'>;
+  driverName?: string;
 }
 
-export function DriverDocumentsTab({ driver }: DriverDocumentsTabProps) {
-  const updateDriver = useMutation(api.drivers.update);
-  const allRows = React.useMemo(() => buildDocRows(driver), [driver]);
+type ArchivedRow = EntityDocument & { id: string; typeName: string };
+
+export function DriverDocumentsTab({ driverId, driverName }: DriverDocumentsTabProps) {
+  const docs = useDriverDocuments(driverId);
+  const archiveDoc = useMutation(api.entityDocuments.archive);
+  const getDownloadUrl = useAction(api.driverDocuments.getDownloadUrl);
 
   const [filters, setFilters] = React.useState<FilterChipValue[]>([]);
+  const [upload, setUpload] = React.useState<{ typeKey?: string; replacingName?: string } | null>(null);
+  const [preview, setPreview] = React.useState<DocRecord | null>(null);
+
+  const typeNames = React.useMemo(() => new Map(docs.types.map((t) => [t.key, t.name])), [docs.types]);
+
   const filtered = React.useMemo(() => {
-    return allRows.filter((r) => {
+    return docs.rows.filter((r) => {
       for (const f of filters) {
         if (!f.values || f.values.length === 0) continue;
-        if (f.propId === 'cat' && !f.values.includes(r.cat)) return false;
-        if (f.propId === 'st'  && !f.values.includes(r.st))  return false;
+        if (f.propId === 'type' && !f.values.includes(r.type.key)) return false;
+        if (f.propId === 'st') {
+          const bucket =
+            r.status === 'missing' || r.status === 'needs_date' ? 'missing'
+            : r.status === 'expired' ? 'expired'
+            : r.status === 'expiring' ? 'expiring'
+            : 'valid';
+          if (!f.values.includes(bucket)) return false;
+        }
       }
       return true;
     });
-  }, [allRows, filters]);
-
-  const counts = {
-    total:    allRows.length,
-    valid:    allRows.filter((r) => r.st === 'valid' || r.st === 'warning').length,
-    expiring: allRows.filter((r) => r.st === 'expiring').length,
-    expired:  allRows.filter((r) => r.st === 'expired').length,
-  };
+  }, [docs.rows, filters]);
 
   const filterProps: FilterProperty[] = [
     {
-      id: 'cat', label: 'Category', icon: 'file-text', kind: 'enum', operator: 'is any of',
-      options: [
-        { value: 'License',  label: 'License' },
-        { value: 'Medical',  label: 'Medical' },
-        { value: 'Identity', label: 'Identity' },
-      ],
+      id: 'type', label: 'Document', icon: 'file-text', kind: 'enum', operator: 'is any of',
+      options: docs.types.filter((t) => !t.hidden).map((t) => ({ value: t.key, label: t.name })),
     },
     {
       id: 'st', label: 'Status', icon: 'shield', kind: 'enum', operator: 'is any of',
@@ -151,88 +93,169 @@ export function DriverDocumentsTab({ driver }: DriverDocumentsTabProps) {
         { value: 'valid',    label: 'Valid' },
         { value: 'expiring', label: 'Expiring' },
         { value: 'expired',  label: 'Expired' },
+        { value: 'missing',  label: 'Missing' },
       ],
     },
   ];
 
-  const cols: DSMiniColumn<DocRow>[] = [
-    { key: 'name', label: 'Document', width: '1.4fr' },
-    { key: 'cat',  label: 'Category', width: '110px' },
-    {
-      key: 'exp', label: 'Expires', width: '160px',
-      render: (r) => (
-        <span className="num">{r.exp ? formatDate(r.exp) : '—'}</span>
-      ),
-      editor: { type: 'date', placeholder: 'Set expiration…' },
-      getValue: (r) => r.exp,
-    },
-    {
-      key: 'st', label: 'Status', width: '110px',
-      render: (r) => <Chip status={STATUS_TO_CHIP[r.st]} />,
-      readOnly: true,
-    },
-  ];
-
-  // Archived & replaced reuses the active columns plus a Note column for
-  // "Replaced …" / "Renewed …" entries. Rendered empty until the
-  // documentation archive backend lands.
-  const archivedCols: DSMiniColumn<DocRow & { note?: string }>[] = [
-    { key: 'name', label: 'Document', width: '1.4fr' },
-    { key: 'cat',  label: 'Category', width: '110px' },
-    {
-      key: 'exp', label: 'Expired', width: '160px',
-      render: (r) => <span className="num">{r.exp ? formatDate(r.exp) : '—'}</span>,
-      readOnly: true,
-    },
-    {
-      key: 'st', label: 'Status', width: '110px',
-      render: () => <Chip status="expired" />,
-      readOnly: true,
-    },
-    {
-      key: 'note', label: 'Note', width: '180px',
-      render: (r) => <span className="text-[var(--text-tertiary)]">{r.note ?? '—'}</span>,
-      readOnly: true,
-    },
-  ];
-
-  const onCommit = async (row: DocRow, key: string, next: string | string[]) => {
-    if (key !== 'exp') return;
-    const value = Array.isArray(next) ? next[0] : next;
+  // ── Preview / download via short-lived signed GET ─────────────────────
+  const openPreview = async (row: DocumentRowModel | ArchivedRow) => {
+    const doc = 'doc' in row ? row.doc : row;
+    if (!doc || !doc.hasFile) return;
+    const typeName = 'type' in row ? row.type.name : row.typeName;
+    const isPdf = !!doc.contentType?.includes('pdf');
+    const record: DocRecord = {
+      id: doc._id,
+      name: `${typeName}${doc.fileName ? ` — ${doc.fileName}` : ''}`,
+      src: doc.uploadedByName ?? 'Ops',
+      when: formatYmd(new Date(doc.activatedAt ?? doc.uploadedAt).toISOString().slice(0, 10)),
+      status: 'valid',
+      preview: isPdf ? { kind: 'pdf', url: '' } : { kind: 'image', url: '' },
+      activity: [
+        { id: 'up', text: <>Uploaded by {doc.uploadedByName ?? 'ops'}</> },
+        ...(doc.expirationDate ? [{ id: 'exp', text: <>Expires {formatYmd(doc.expirationDate)}</> }] : []),
+        ...(doc.issueDate ? [{ id: 'iss', text: <>Issued {formatYmd(doc.issueDate)}</> }] : []),
+        ...(doc.note ? [{ id: 'note', text: <>{doc.note}</> }] : []),
+      ],
+    };
+    setPreview(record);
     try {
-      await updateDriver({ id: driver._id, [row.field]: value || undefined });
-      toast.success(`${row.name} expiration updated`);
+      const [view, download] = await Promise.all([
+        getDownloadUrl({ docId: doc._id }),
+        getDownloadUrl({ docId: doc._id, download: true }),
+      ]);
+      setPreview((cur) =>
+        cur?.id === doc._id
+          ? { ...cur, preview: { ...cur.preview, url: view.url }, openUrl: view.url, downloadUrl: download.url }
+          : cur,
+      );
     } catch (e) {
-      console.error(e);
-      toast.error('Failed to update expiration');
+      toast.error((convexErrorMessage(e) ?? 'Could not open document'));
+      setPreview(null);
     }
   };
 
+  const onArchive = async (row: DocumentRowModel) => {
+    if (!row.doc) return;
+    const ok = window.confirm(
+      `Archive ${row.type.name}? The driver will show "Missing" for this document until a new one is uploaded.`,
+    );
+    if (!ok) return;
+    try {
+      await archiveDoc({ docId: row.doc._id });
+      toast.success(`${row.type.name} archived`);
+    } catch (e) {
+      toast.error((convexErrorMessage(e) ?? 'Failed to archive'));
+    }
+  };
+
+  // ── Columns ────────────────────────────────────────────────────────────
+  const cols: DSMiniColumn<DocumentRowModel>[] = [
+    {
+      key: 'name', label: 'Document', width: '1.6fr',
+      render: (r) => (
+        <div className="min-w-0">
+          <div className="truncate">{r.type.name}</div>
+          {r.doc?.fileName ? (
+            <div className="truncate text-[11px] text-[var(--text-tertiary)]">
+              {r.doc.fileName} · {formatBytes(r.doc.sizeBytes)}
+            </div>
+          ) : r.status === 'missing' && r.lastArchived ? (
+            <div className="truncate text-[11px] text-[var(--text-tertiary)]">
+              Last on file {r.lastArchived.expirationDate ? `expired ${formatYmd(r.lastArchived.expirationDate)}` : 'archived'}
+            </div>
+          ) : r.status === 'missing' ? (
+            <div className="text-[11px] text-[var(--text-tertiary)]">No file on record</div>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      key: 'exp', label: 'Expires', width: '130px',
+      render: (r) => (
+        <span className="num">
+          {r.type.expires
+            ? r.doc?.expirationDate ? formatYmd(r.doc.expirationDate) : '—'
+            : r.doc?.issueDate ? `Issued ${formatYmd(r.doc.issueDate)}` : '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'st', label: 'Status', width: '120px',
+      render: (r) => {
+        const c = chipForStatus(r.status);
+        return <Chip status={c.status} label={c.label} />;
+      },
+    },
+  ];
+
+  const rowActions = (r: DocumentRowModel): DSRowAction[] => {
+    const actions: DSRowAction[] = [];
+    if (r.doc?.hasFile) actions.push({ label: 'View', icon: 'eye', onClick: () => void openPreview(r) });
+    if (docs.canEdit) {
+      actions.push({
+        label: r.doc ? 'Replace' : 'Upload',
+        icon: 'upload',
+        onClick: () => setUpload({ typeKey: r.type.key, replacingName: r.doc ? r.type.name : undefined }),
+      });
+      if (r.doc) actions.push({ label: 'Archive', icon: 'archive', danger: true, onClick: () => void onArchive(r) });
+    }
+    return actions;
+  };
+
+  const archivedRows: ArchivedRow[] = docs.archived.map((d) => ({
+    ...d,
+    id: d._id,
+    typeName: typeNames.get(d.typeKey) ?? d.typeKey,
+  }));
+
+  const archivedCols: DSMiniColumn<ArchivedRow>[] = [
+    {
+      key: 'name', label: 'Document', width: '1.6fr',
+      render: (r) => (
+        <div className="min-w-0">
+          <div className="truncate">{r.typeName}</div>
+          {r.fileName && <div className="truncate text-[11px] text-[var(--text-tertiary)]">{r.fileName}</div>}
+        </div>
+      ),
+    },
+    {
+      key: 'exp', label: 'Expired', width: '130px',
+      render: (r) => <span className="num">{r.expirationDate ? formatYmd(r.expirationDate) : '—'}</span>,
+    },
+    {
+      key: 'archivedAt', label: 'Archived', width: '120px',
+      render: (r) => <span className="num">{r.archivedAt ? formatYmd(new Date(r.archivedAt).toISOString().slice(0, 10)) : '—'}</span>,
+    },
+    {
+      key: 'note', label: 'Note', width: '180px',
+      render: (r) => <span className="text-[var(--text-tertiary)]">{r.archiveNote ?? '—'}</span>,
+    },
+  ];
+
   return (
     <div className="flex flex-col gap-3.5">
-      {/* 4-stat summary strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 rounded-xl border border-[var(--border-hairline)] bg-card overflow-hidden">
-        <DocStat label="On file"  value={counts.total} />
-        <DocStat label="Valid"    value={counts.valid}    tone="ok"   divided />
-        <DocStat label="Expiring" value={counts.expiring} tone="warn" divided />
-        <DocStat label="Expired"  value={counts.expired}  tone="crit" divided />
+      {/* Summary strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 rounded-xl border border-[var(--border-hairline)] bg-card overflow-hidden">
+        <DocStat label="On file"  value={docs.counts.onFile} />
+        <DocStat label="Valid"    value={docs.counts.valid}    tone="ok"   divided />
+        <DocStat label="Expiring" value={docs.counts.expiring} tone="warn" divided />
+        <DocStat label="Expired"  value={docs.counts.expired}  tone="crit" divided />
+        <DocStat label="Missing"  value={docs.counts.missing}  tone="crit" divided />
       </div>
 
       {/* Active documents */}
       <DSCard
-        title={`Active documents (${filtered.length})`}
+        title={`Documents (${filtered.length})`}
         bodyClassName="p-0"
         action={
           <div className="flex items-center gap-2">
             <FilterBar properties={filterProps} value={filters} onChange={setFilters} slot="trigger" />
-            <WBtn
-              size="sm"
-              variant="primary"
-              leading="plus"
-              onClick={() => toast.message('Document upload is on the way.')}
-            >
-              Upload
-            </WBtn>
+            {docs.canEdit && (
+              <WBtn size="sm" variant="primary" leading="plus" onClick={() => setUpload({})}>
+                Upload
+              </WBtn>
+            )}
           </div>
         }
       >
@@ -243,43 +266,52 @@ export function DriverDocumentsTab({ driver }: DriverDocumentsTabProps) {
             <FilterBar properties={filterProps} value={filters} onChange={setFilters} slot="trigger" />
           </div>
         )}
-        <DSMiniTable
+        <DSMiniTable<DocumentRowModel>
           columns={cols}
           rows={filtered}
           total={filtered.length}
-          editable
-          onCellCommit={onCommit}
+          rowActions={rowActions}
+          onRowClick={(r) => {
+            if (r.doc?.hasFile) void openPreview(r);
+            else if (docs.canEdit) setUpload({ typeKey: r.type.key });
+          }}
           className="rounded-t-none border-0 border-t"
         />
+        {!docs.loading && docs.rows.length === 0 && (
+          <div className="px-4 py-6 text-center text-[12px] text-[var(--text-tertiary)]">
+            No document types are enabled. Add or unhide types in Settings › Documents.
+          </div>
+        )}
       </DSCard>
 
-      {/* Archived & replaced — backend pending. Card chrome + empty state
-          render now so the section is in place when the data backend
-          arrives. */}
-      <DSCard
-        title="Archived & replaced"
-        bodyClassName="p-0"
-        action={
-          <WBtn
-            size="sm"
-            variant="ghost"
-            leading="export"
-            onClick={() => toast.message('Export will be available with the document archive.')}
-          >
-            Export
-          </WBtn>
-        }
-      >
-        <DSMiniTable
+      {/* Archived & replaced */}
+      <DSCard title={`Archived & replaced (${archivedRows.length})`} bodyClassName="p-0">
+        <DSMiniTable<ArchivedRow>
           columns={archivedCols}
-          rows={[]}
+          rows={archivedRows}
+          total={archivedRows.length}
+          rowActions={(r) => (r.hasFile ? [{ label: 'View', icon: 'eye', onClick: () => void openPreview(r) }] : [])}
+          onRowClick={(r) => r.hasFile && void openPreview(r)}
           className="rounded-t-none border-0 border-t"
         />
-        <div className="px-4 py-6 text-center text-[12px] text-[var(--text-tertiary)]">
-          No archived documents. Replaced and superseded documents will appear here once the
-          archive backend lands.
-        </div>
+        {archivedRows.length === 0 && (
+          <div className="px-4 py-6 text-center text-[12px] text-[var(--text-tertiary)]">
+            No archived documents yet. Replaced and archived documents are kept here.
+          </div>
+        )}
       </DSCard>
+
+      <DocumentUploadDialog
+        open={upload !== null}
+        onOpenChange={(o) => !o && setUpload(null)}
+        driverId={driverId}
+        types={docs.types}
+        initialTypeKey={upload?.typeKey}
+        replacingName={upload?.replacingName}
+        driverName={driverName}
+      />
+
+      <DocPreviewModal doc={preview} onClose={() => setPreview(null)} />
     </div>
   );
 }
@@ -310,16 +342,9 @@ function DocStat({
       <div className="text-[11px] uppercase tracking-[0.04em] text-[var(--text-tertiary)] mb-1">
         {label}
       </div>
-      <div className="num text-[22px] leading-[26px] font-medium" style={{ color }}>
+      <div className="num text-[22px] leading-[26px] font-medium" style={{ color: value === 0 && tone === 'crit' ? 'var(--text-primary)' : color }}>
         {value}
       </div>
     </div>
   );
-}
-
-function formatDate(ymd: string): string {
-  const p = parseDateString(ymd);
-  if (!p) return ymd;
-  const d = new Date(Date.UTC(p.y, p.m - 1, p.d));
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }

@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { createS3Client } from './s3Upload';
+import { createS3Client, presignGet, presignPutWithMetadata } from './s3Upload';
+import { buildEntityDocumentKey, buildEntityDocumentMetadata, metadataToHeaders } from './lib/r2';
 
 /**
  * Regression pin for the R2 presigned-PUT contract.
@@ -61,5 +62,44 @@ describe('R2 presigned PUT contract', () => {
       // header would count as an unsigned x-amz-* header (403).
       expect(url.searchParams.get(`x-amz-meta-${key}`)).toBeNull();
     }
+  });
+});
+
+describe('entity-document presign helpers (documents-storage-spec.md §1)', () => {
+  const metadata = buildEntityDocumentMetadata({
+    orgId: 'org_test',
+    entity: 'driver',
+    entityId: 'drv_1',
+    typeKey: 'cdl',
+    docId: 'doc_1',
+    uploadedVia: 'web',
+  });
+  const key = buildEntityDocumentKey({
+    orgId: 'org_test',
+    entity: 'driver',
+    entityId: 'drv_1',
+    typeKey: 'cdl',
+    docId: 'doc_1',
+    fileName: 'cdl.pdf',
+  });
+
+  it('presignPutWithMetadata signs every metadata header and adds no checksum params', async () => {
+    const url = new URL(await presignPutWithMetadata({ key, contentType: 'application/pdf', metadata }));
+    expect(url.pathname.endsWith('/orgs/org_test/drivers/drv_1/cdl/doc_1-cdl.pdf')).toBe(true);
+    const signedHeaders = (url.searchParams.get('X-Amz-SignedHeaders') ?? '').split(';');
+    for (const header of Object.keys(metadataToHeaders(metadata))) {
+      expect(signedHeaders).toContain(header);
+      expect(url.searchParams.get(header)).toBeNull();
+    }
+    for (const param of url.searchParams.keys()) {
+      expect(param.toLowerCase()).not.toMatch(/^x-amz-checksum-/);
+    }
+  });
+
+  it('presignGet forces attachment disposition only when asked', async () => {
+    const view = new URL((await presignGet({ key })).url);
+    expect(view.searchParams.get('response-content-disposition')).toBeNull();
+    const dl = new URL((await presignGet({ key, downloadAs: 'my "cdl".pdf' })).url);
+    expect(dl.searchParams.get('response-content-disposition')).toBe('attachment; filename="my cdl.pdf"');
   });
 });

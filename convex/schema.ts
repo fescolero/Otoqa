@@ -720,7 +720,13 @@ export default defineSchema({
     // License Information (non-sensitive)
     licenseNumber: v.optional(v.string()), // Driver's license number
     licenseState: v.string(),
-    licenseExpiration: v.string(),
+    // Expiration dates below are MIRRORS written by the entity-documents
+    // workflow (documents-storage-spec.md §5). They stay so list pages,
+    // the mobile APIs, and the partnership sync keep working; the active
+    // document is the source of truth. Optional because a driver created
+    // without a CDL on file has nothing honest to put here — never
+    // fabricate a date.
+    licenseExpiration: v.optional(v.string()),
     licenseClass: v.string(), // Class A, B, C
     gender: v.optional(v.string()), // M / F / X — appears on the license
 
@@ -730,6 +736,13 @@ export default defineSchema({
     // Security Access
     badgeExpiration: v.optional(v.string()),
     twicExpiration: v.optional(v.string()),
+
+    // Time-independent documents summary: visible document types with no
+    // qualifying active row. Rewritten by entityDocuments on every
+    // activate/archive and on catalog changes. Undefined = written before
+    // the summary existed (treated as "everything missing" by
+    // _helpers/documentStatus.driverMissingKeys until the backfill runs).
+    missingDocTypeKeys: v.optional(v.array(v.string())),
 
     // Employment
     hireDate: v.string(),
@@ -4517,6 +4530,79 @@ export default defineSchema({
   // the phone's build is behind `latestBuild` and a blocking screen when it's
   // below `minSupportedBuild`. One row per platform; written via the
   // driverAppConfig.setConfig internal mutation (CLI) after each `eas build`.
+  // ═══════════════════════════════════════════════════════════════════════
+  // ENTITY DOCUMENTS — docs/documents-storage-spec.md §2
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Per-org half of the documents catalog. System types live in code
+   * (convex/lib/documentTypeDefaults.ts); this table holds either an
+   * OVERRIDE of a system key (only the changed flags are set) or a fully
+   * CUSTOM type (isCustom, every flag set). The effective catalog is the
+   * merge, computed by documentTypes.effectiveCatalog. No seeding.
+   */
+  documentTypes: defineTable({
+    workosOrgId: v.string(),
+    key: v.string(),
+    entity: v.union(v.literal('driver'), v.literal('carrier'), v.literal('organization')),
+    isCustom: v.boolean(),
+    name: v.optional(v.string()),
+    expires: v.optional(v.boolean()),
+    issueDateRequired: v.optional(v.boolean()),
+    uploadRequired: v.optional(v.boolean()),
+    // Custom types only — system types take singleton from code.
+    singleton: v.optional(v.boolean()),
+    sharedByDefault: v.optional(v.boolean()),
+    sortOrder: v.optional(v.number()),
+    hiddenAt: v.optional(v.number()),
+    createdBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_org', ['workosOrgId'])
+    .index('by_org_key', ['workosOrgId', 'key']),
+
+  /**
+   * One table for driver, carrier-partnership, and organization documents.
+   * Rows are archived, never deleted by users; bytes live in R2 under
+   * `externalKey` (never a URL). `pending` rows exist between presign and
+   * finalize and are excluded from every listing; a cron sweeps stale ones.
+   */
+  entityDocuments: defineTable({
+    workosOrgId: v.string(), // owning org — who entered it
+    entity: v.union(v.literal('driver'), v.literal('carrier'), v.literal('organization')),
+    entityId: v.string(), // drivers._id | carrierPartnerships._id | workosOrgId
+    typeKey: v.string(), // effective catalog key
+    status: v.union(v.literal('pending'), v.literal('active'), v.literal('archived')),
+
+    // File (absent for date-only entries on types with uploadRequired=false)
+    externalKey: v.optional(v.string()),
+    fileName: v.optional(v.string()),
+    contentType: v.optional(v.string()),
+    sizeBytes: v.optional(v.number()),
+
+    // User-entered dates (YYYY-MM-DD). Never read from the file.
+    issueDate: v.optional(v.string()),
+    expirationDate: v.optional(v.string()),
+    note: v.optional(v.string()),
+
+    uploadedBy: v.string(), // WorkOS user id
+    uploadedByName: v.optional(v.string()),
+    uploadedAt: v.number(),
+    activatedAt: v.optional(v.number()),
+
+    archivedAt: v.optional(v.number()),
+    archivedBy: v.optional(v.string()),
+    archiveNote: v.optional(v.string()),
+    supersededById: v.optional(v.id('entityDocuments')),
+
+    // organization entity only — overrides the type's sharedByDefault
+    shared: v.optional(v.boolean()),
+  })
+    .index('by_entity', ['workosOrgId', 'entity', 'entityId', 'status'])
+    .index('by_org_type', ['workosOrgId', 'typeKey', 'status'])
+    .index('by_status_uploadedAt', ['status', 'uploadedAt']),
+
   driverAppConfig: defineTable({
     platform: v.union(v.literal('android'), v.literal('ios')),
     latestBuild: v.number(),

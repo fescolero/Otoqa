@@ -49,6 +49,9 @@ import {
 } from '@/components/web';
 import { PayeeProfilesCard } from '@/components/web/pay-profiles/payee-profiles-card';
 import { DriverDocumentsTab } from '@/components/web/drivers/driver-documents-tab';
+import { useDriverDocuments } from '@/components/web/drivers/use-driver-documents';
+import { complianceChipForStatus, formatYmd as formatDocDate } from '@/components/web/drivers/driver-documents-model';
+import { needsAttention as docNeedsAttention } from '@/convex/_helpers/documentStatus';
 
 import { DeleteConfirmationDialog } from '@/components/drivers/delete-confirmation-dialog';
 import {
@@ -58,9 +61,6 @@ import {
 import { DriverSessionsHistory } from '@/components/sessions/driver-sessions-history';
 
 import {
-  countAttention,
-  getDocStatus,
-  type DocStatus,
 } from '@/components/web/drivers/build-driver-details';
 import { toCountryCode } from '@/lib/format-country';
 
@@ -125,6 +125,8 @@ export default function DriverDetailPage() {
   const [loadStatusFilter, setLoadStatusFilter] = React.useState<AssignedLoadStatus>('Assigned');
   const driverLoadsData = useQuery(api.loads.getByDriver, { driverId, status: loadStatusFilter });
   const recentDriverLoads = useQuery(api.loads.getRecentByDriver, { driverId, limit: 4 });
+  // Documents summary — same rows/status as the Documents tab (one source).
+  const driverDocs = useDriverDocuments(driverId);
 
   const deactivateDriver = useMutation(api.drivers.deactivate);
   const restoreDriver = useMutation(api.drivers.restore);
@@ -275,11 +277,6 @@ export default function DriverDetailPage() {
       )}
     </span>
   );
-
-  const cdlStatus     = getDocStatus(driver.licenseExpiration);
-  const medicalStatus = getDocStatus(driver.medicalExpiration);
-  const badgeStatus   = getDocStatus(driver.badgeExpiration);
-  const twicStatus    = getDocStatus(driver.twicExpiration);
 
   // Hero KPI grid intentionally removed — the AttentionBand inside the
   // Overview composer now carries "what needs doing now" instead of the
@@ -633,45 +630,19 @@ export default function DriverDetailPage() {
   const onLoad = Boolean(inTransitLoad);
   const firstName = driver.firstName || fullName.split(' ')[0];
 
-  type ChipStatusForCompliance = 'valid' | 'expiring' | 'expired' | 'na';
-
-  // Compliance items — License + Medical from real data; Background / MVR /
-  // Drug screen as "Not tracked" placeholders until the backend lands them.
-  const chipFor = (s: DocStatus): ChipStatusForCompliance => {
-    if (s === 'expired') return 'expired';
-    if (s === 'expiring' || s === 'warning') return 'expiring';
-    if (s === 'na') return 'na';
-    return 'valid';
-  };
-  const complianceItems: ComplianceItem[] = [
-    {
-      label: 'License',
-      number: driver.licenseNumber ?? '—',
-      expires: driver.licenseExpiration ? formatDate(driver.licenseExpiration) : '—',
-      status: chipFor(cdlStatus),
-    },
-    {
-      label: 'Medical',
-      number: driver.medicalExpiration ? '—' : 'Not on file',
-      expires: driver.medicalExpiration ? formatDate(driver.medicalExpiration) : '—',
-      status: chipFor(medicalStatus),
-    },
-    {
-      label: 'Badge',
-      number: driver.badgeExpiration ? '—' : 'Not on file',
-      expires: driver.badgeExpiration ? formatDate(driver.badgeExpiration) : '—',
-      status: chipFor(badgeStatus),
-    },
-    {
-      label: 'TWIC',
-      number: driver.twicExpiration ? '—' : 'Not on file',
-      expires: driver.twicExpiration ? formatDate(driver.twicExpiration) : '—',
-      status: chipFor(twicStatus),
-    },
-    { label: 'Background',  untracked: true },
-    { label: 'MVR',         untracked: true },
-    { label: 'Drug screen', untracked: true },
-  ];
+  // Compliance items — one per visible document type, status from the
+  // shared status module (Missing renders as expired-tone).
+  const complianceItems: ComplianceItem[] = driverDocs.rows.map((r) => ({
+    label: r.type.name,
+    number:
+      r.type.key === 'cdl'
+        ? driver.licenseNumber ?? '—'
+        : r.doc ? (r.doc.fileName ?? '—') : 'Not on file',
+    expires: r.type.expires
+      ? r.doc?.expirationDate ? formatDocDate(r.doc.expirationDate) : '—'
+      : r.doc?.issueDate ? `Issued ${formatDocDate(r.doc.issueDate)}` : '—',
+    status: complianceChipForStatus(r.status),
+  }));
 
   // Attention items — same chips the design source emits, derived from
   // our real data. Each item carries a `tab` so the band navigates.
@@ -693,14 +664,20 @@ export default function DriverDetailPage() {
       detail: driver.city ? `Last seen in ${driver.city}` : 'Ready for next dispatch',
     });
   }
-  if (cdlStatus === 'expired')
-    attentionItems.push({ tone: 'crit', icon: 'shield', tab: 'documents', title: 'License expired', detail: formatDate(driver.licenseExpiration) });
-  else if (cdlStatus === 'expiring')
-    attentionItems.push({ tone: 'warn', icon: 'shield', tab: 'documents', title: 'License expiring soon', detail: formatDate(driver.licenseExpiration) });
-  if (medicalStatus === 'expired')
-    attentionItems.push({ tone: 'crit', icon: 'alert', tab: 'documents', title: 'Medical card expired', detail: formatDate(driver.medicalExpiration) });
-  else if (medicalStatus === 'expiring')
-    attentionItems.push({ tone: 'warn', icon: 'alert', tab: 'documents', title: 'Medical card expiring soon', detail: formatDate(driver.medicalExpiration) });
+  for (const r of driverDocs.rows) {
+    if (!docNeedsAttention(r.status)) continue;
+    const crit = r.status === 'expired' || r.status === 'missing';
+    const title =
+      r.status === 'missing' ? `${r.type.name} missing`
+      : r.status === 'needs_date' ? `${r.type.name} needs a date`
+      : r.status === 'expired' ? `${r.type.name} expired`
+      : `${r.type.name} expiring soon`;
+    const detail =
+      r.status === 'missing'
+        ? r.lastArchived?.expirationDate ? `Last on file expired ${formatDocDate(r.lastArchived.expirationDate)}` : 'Upload the document and enter its date'
+        : r.doc?.expirationDate ? formatDocDate(r.doc.expirationDate) : undefined;
+    attentionItems.push({ tone: crit ? 'crit' : 'warn', icon: r.type.key === 'cdl' ? 'shield' : 'alert', tab: 'documents', title, detail });
+  }
   if (driver.clerkSyncStatus === 'failed')
     attentionItems.push({
       tone: 'crit',
@@ -710,23 +687,13 @@ export default function DriverDetailPage() {
       detail: 'Clerk sync failed — driver will see "Not Registered". Resync from Profile.',
     });
 
-  const docsAttention = countAttention({
-    _id: driver._id,
-    firstName: driver.firstName,
-    lastName: driver.lastName,
-    email: driver.email,
-    phone: driver.phone,
-    licenseExpiration: driver.licenseExpiration,
-    medicalExpiration: driver.medicalExpiration,
-    badgeExpiration: driver.badgeExpiration,
-    twicExpiration: driver.twicExpiration,
-  });
+  const docsAttention = driverDocs.attention;
   attentionItems.push({
     tone: 'info',
     icon: 'file-text',
     tab: 'documents',
-    title: '4 documents on file',
-    detail: docsAttention > 0 ? `${docsAttention} require renewal` : 'all current',
+    title: `${driverDocs.counts.onFile} of ${driverDocs.counts.total} documents on file`,
+    detail: docsAttention > 0 ? `${docsAttention} need attention` : 'all current',
   });
 
   const headline = onLoad ? (
@@ -739,7 +706,7 @@ export default function DriverDetailPage() {
       >
         {inTransitLoad?.orderNumber}
       </button>
-      {cdlStatus === 'valid' && medicalStatus === 'valid'
+      {driverDocs.attention === 0
         ? <>, all compliance current.</>
         : <>, with compliance items needing attention before next dispatch.</>}
     </span>
@@ -747,7 +714,7 @@ export default function DriverDetailPage() {
     <span>
       <strong className="text-foreground">{firstName}</strong> is{' '}
       <span style={{ color: '#0F8C5F', fontWeight: 500 }}>available</span> and ready to dispatch
-      {cdlStatus === 'valid' && medicalStatus === 'valid'
+      {driverDocs.attention === 0
         ? <> — all compliance current.</>
         : <> — compliance items pending review.</>}
     </span>
@@ -948,20 +915,9 @@ export default function DriverDetailPage() {
     </div>
   );
 
-  // Documents tab — full-page layout: 4-stat strip + Active card with
-  // FilterBar + DSMiniTable. Editable Expires cells write back via
-  // api.drivers.update.
-  const documentsContent = (
-    <DriverDocumentsTab
-      driver={{
-        _id: driver._id,
-        licenseExpiration: driver.licenseExpiration,
-        medicalExpiration: driver.medicalExpiration,
-        badgeExpiration: driver.badgeExpiration,
-        twicExpiration: driver.twicExpiration,
-      }}
-    />
-  );
+  // Documents tab — full-page layout backed by entityDocuments (upload,
+  // replace, archive, Missing status). See documents-storage-spec.md.
+  const documentsContent = <DriverDocumentsTab driverId={driverId} driverName={fullName} />;
 
   // Pay & expenses tab — new pay engine. Reads from payeeProfileAssignments
   // → payProfiles → payRules. "Manage pay profiles" opens an assignment
@@ -1005,7 +961,7 @@ export default function DriverDetailPage() {
   const sections: FPSection[] = [
     { id: 'overview',  label: 'Overview',  icon: 'home',       content: overviewContent },
     { id: 'profile',   label: 'Profile',   icon: 'users',      content: profileContent },
-    { id: 'documents', label: 'Documents', icon: 'file-text',  count: 4, content: documentsContent },
+    { id: 'documents', label: 'Documents', icon: 'file-text',  count: driverDocs.counts.total || undefined, content: documentsContent },
     { id: 'pay-expenses', label: 'Pay & expenses', icon: 'calculator', content: payrollContent },
     {
       id: 'loads',

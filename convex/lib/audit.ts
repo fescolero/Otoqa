@@ -81,7 +81,15 @@ export type AuditAction =
   | 'expired'
   | 'expiry_warned'
   | 'auto_assign_skipped'
-  | 'archived';
+  | 'archived'
+  // Entity documents (documents-storage-spec.md §8). Logged on the PARENT
+  // entity (driver / carrierPartnership / organization) so the parent's
+  // Activity tab shows document events without extra UI.
+  | 'document_uploaded'
+  | 'document_replaced'
+  | 'document_archived'
+  | 'document_dates_changed'
+  | 'document_share_changed';
 
 // Derived from the schema so a new auditLog column can't silently drift out
 // of the write path; only the closed-union fields and the helper-supplied

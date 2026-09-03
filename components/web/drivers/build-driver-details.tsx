@@ -5,9 +5,10 @@
  * pure render that takes the driver row; the surrounding page wires the
  * mutations.
  *
- * Document expiration status uses the same date helpers as the existing
- * detail page (parseDateString / diffCalendarDays / getDateStatus) so the
- * "Needs Attention" badge in saved-views matches what a section row shows.
+ * Document status comes from the shared module (convex/_helpers/
+ * documentStatus.ts) — the same rule the Documents tab, the driver page
+ * attention band, and the Convex list counts use — so the "Needs Attention"
+ * badge in saved-views matches what a section row shows.
  */
 
 'use client';
@@ -27,6 +28,13 @@ import {
   type DetailsSection,
 } from '@/components/web';
 import { CommentsThread } from '@/components/web/comments-thread';
+import {
+  countDriverAttention,
+  dateExpiryStatus,
+  localTodayDateStr,
+} from '@/convex/_helpers/documentStatus';
+import { useDriverDocuments } from './use-driver-documents';
+import { chipForStatus, formatYmd } from './driver-documents-model';
 
 export interface DriverRow {
   _id: string;
@@ -42,6 +50,9 @@ export interface DriverRow {
   medicalExpiration?: string;
   badgeExpiration?: string;
   twicExpiration?: string;
+  /** Time-independent missing-documents summary written by the backend.
+   *  Undefined on rows from before the summary existed. */
+  missingDocTypeKeys?: string[];
   hireDate?: string;
   employmentStatus?: string;
   employmentType?: string;
@@ -54,55 +65,21 @@ export interface DriverRow {
 }
 
 // ─── Date status helpers ────────────────────────────────────────────────
+// Thin adapters over the shared status module (documentStatus.ts). `na`
+// stays as the label for "no date" in the list's per-row CDL / Medical
+// chips; attention counting goes through countDriverAttention so a
+// Missing type counts once and a stale mirror on a Missing type never
+// double counts.
 
 export type DocStatus = 'expired' | 'expiring' | 'warning' | 'valid' | 'na';
 
-function parseDateString(dateStr?: string | null): { y: number; m: number; d: number } | null {
-  if (!dateStr) return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
-  if (!m) return null;
-  return { y: Number(m[1]), m: Number(m[2]), d: Number(m[3]) };
+export function getDocStatus(dateStr: string | undefined, today: string = localTodayDateStr()): DocStatus {
+  const s = dateExpiryStatus(dateStr, today);
+  return s === 'missing' ? 'na' : s;
 }
-
-function todayDateStr(): string {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${dd}`;
-}
-
-function diffCalendarDays(dateStr: string, todayStr: string): number {
-  const a = parseDateString(dateStr);
-  const b = parseDateString(todayStr);
-  if (!a || !b) return Infinity;
-  const da = Date.UTC(a.y, a.m - 1, a.d);
-  const db = Date.UTC(b.y, b.m - 1, b.d);
-  return Math.round((da - db) / 86400000);
-}
-
-export function getDocStatus(dateStr: string | undefined, today = todayDateStr()): DocStatus {
-  if (!dateStr) return 'na';
-  const days = diffCalendarDays(dateStr, today);
-  if (days < 0) return 'expired';
-  if (days <= 30) return 'expiring';
-  if (days <= 60) return 'warning';
-  return 'valid';
-}
-
-const STATUS_TO_CHIP: Record<DocStatus, ChipStatus> = {
-  expired: 'expired',
-  expiring: 'expiring',
-  warning: 'warning',
-  valid: 'valid',
-  na: 'na',
-};
 
 function fmtDate(dateStr?: string): string {
-  const p = parseDateString(dateStr);
-  if (!p) return '—';
-  const d = new Date(Date.UTC(p.y, p.m - 1, p.d));
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  return formatYmd(dateStr);
 }
 
 function fmtPhone(p?: string): string {
@@ -112,13 +89,11 @@ function fmtPhone(p?: string): string {
   return p;
 }
 
-export function countAttention(driver: DriverRow): number {
-  let n = 0;
-  for (const f of [driver.licenseExpiration, driver.medicalExpiration, driver.badgeExpiration, driver.twicExpiration]) {
-    const s = getDocStatus(f);
-    if (s === 'expired' || s === 'expiring') n++;
-  }
-  return n;
+/** List-row attention: missing document types + expired/expiring
+ *  mirrored dates, without reading documents (spec §2 "Denormalized
+ *  summary"). */
+export function countAttention(driver: DriverRow, today: string = localTodayDateStr()): number {
+  return countDriverAttention(driver, today);
 }
 
 // ─── Section renderers ──────────────────────────────────────────────────
@@ -169,19 +144,27 @@ function OverviewSection({ driver, compact }: { driver: DriverRow; compact?: boo
 }
 
 function DocumentsSection({ driver }: { driver: DriverRow }) {
-  type DocRow = { id: string; name: string; expires: string; status: DocStatus };
-  const rows: DocRow[] = [
-    { id: 'cdl',     name: 'CDL',           expires: driver.licenseExpiration ?? '', status: getDocStatus(driver.licenseExpiration) },
-    { id: 'medical', name: 'Medical card',  expires: driver.medicalExpiration ?? '', status: getDocStatus(driver.medicalExpiration) },
-    { id: 'badge',   name: 'Badge',         expires: driver.badgeExpiration   ?? '', status: getDocStatus(driver.badgeExpiration) },
-    { id: 'twic',    name: 'TWIC',          expires: driver.twicExpiration    ?? '', status: getDocStatus(driver.twicExpiration) },
+  // Live from entityDocuments — the same rows the Documents tab renders.
+  const docs = useDriverDocuments(driver._id);
+  type Row = (typeof docs.rows)[number];
+  const cols: DSMiniColumn<Row>[] = [
+    { key: 'name',    label: 'Document', width: '1.4fr', render: (r) => r.type.name },
+    {
+      key: 'expires', label: 'Expires',  width: '1fr',
+      render: (r) =>
+        r.type.expires
+          ? fmtDate(r.doc?.expirationDate)
+          : r.doc?.issueDate ? `Issued ${fmtDate(r.doc.issueDate)}` : '—',
+    },
+    {
+      key: 'status',  label: 'Status',   width: '110px',
+      render: (r) => {
+        const c = chipForStatus(r.status);
+        return <Chip status={c.status} label={c.label} />;
+      },
+    },
   ];
-  const cols: DSMiniColumn<DocRow>[] = [
-    { key: 'name',    label: 'Document', width: '1.4fr' },
-    { key: 'expires', label: 'Expires',  width: '1fr', render: (r) => fmtDate(r.expires) },
-    { key: 'status',  label: 'Status',   width: '110px', render: (r) => <Chip status={STATUS_TO_CHIP[r.status]} /> },
-  ];
-  return <DSMiniTable columns={cols} rows={rows} />;
+  return <DSMiniTable columns={cols} rows={docs.rows} />;
 }
 
 function ActivitySection({ driver }: { driver: DriverRow }) {
@@ -265,7 +248,6 @@ export function buildDriverDetails(driver: DriverRow, opts: BuildOptions = {}) {
       id: 'documents',
       label: 'Documents',
       icon: 'file-text',
-      count: 4,
       attention: attention || undefined,
       content: <DocumentsSection driver={driver} />,
     },

@@ -1,0 +1,178 @@
+/**
+ * Pure view-model for an entity's Documents surfaces (tab, overview
+ * section, attention items). No React, no Convex — testable in the `web`
+ * vitest project. Status itself comes from the shared module so every
+ * surface agrees (documents-storage-spec.md §3).
+ */
+
+import type { FunctionReturnType } from 'convex/server';
+import type { api } from '@/convex/_generated/api';
+import type { ChipStatus } from '@/components/web/chip';
+import {
+  DOCUMENT_STATUS_LABEL,
+  computeDocumentStatus,
+  dateExpiryStatus,
+  needsAttention,
+  type DocumentStatus,
+  type EffectiveDocumentType,
+} from '@/convex/_helpers/documentStatus';
+
+export type EntityDocumentsList = FunctionReturnType<typeof api.entityDocuments.listForEntity>;
+export type EntityDocument = EntityDocumentsList['documents'][number];
+
+export interface DocumentRowModel {
+  /** Stable row id: the type key for singleton/missing rows, type+doc for
+   *  multi-document types. */
+  id: string;
+  type: EffectiveDocumentType;
+  /** The active document backing this row, or null when Missing. */
+  doc: EntityDocument | null;
+  status: DocumentStatus;
+  /** For Missing rows: the most recently archived document of the type,
+   *  so the tab can show "last expired …" context (spec §5.3). */
+  lastArchived: EntityDocument | null;
+  /** Expiry state of `lastArchived`, when present. */
+  lastArchivedStatus: 'expired' | 'expiring' | 'warning' | 'valid' | 'missing' | null;
+}
+
+export interface DocumentCounts {
+  total: number;
+  onFile: number;
+  valid: number;
+  expiring: number;
+  expired: number;
+  missing: number;
+}
+
+export interface DocumentsViewModel {
+  rows: DocumentRowModel[];
+  archived: EntityDocument[];
+  counts: DocumentCounts;
+  /** Rows whose status needs attention (missing / needs date / expired /
+   *  expiring). */
+  attention: number;
+}
+
+export function composeDocumentsViewModel(
+  types: readonly EffectiveDocumentType[],
+  documents: readonly EntityDocument[],
+  todayStr: string,
+): DocumentsViewModel {
+  const visible = types.filter((t) => !t.hidden).slice().sort((a, b) => a.sortOrder - b.sortOrder);
+  const active = documents.filter((d) => d.status === 'active');
+  const archived = documents
+    .filter((d) => d.status === 'archived')
+    .slice()
+    .sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0));
+
+  const rows: DocumentRowModel[] = [];
+  for (const type of visible) {
+    const docs = active
+      .filter((d) => d.typeKey === type.key)
+      .sort((a, b) => (b.activatedAt ?? b.uploadedAt) - (a.activatedAt ?? a.uploadedAt));
+    const forType = type.singleton ? docs.slice(0, 1) : docs;
+
+    if (forType.length === 0) {
+      const lastArchived = archived.find((d) => d.typeKey === type.key) ?? null;
+      rows.push({
+        id: type.key,
+        type,
+        doc: null,
+        status: 'missing',
+        lastArchived,
+        lastArchivedStatus: lastArchived ? dateExpiryStatus(lastArchived.expirationDate, todayStr) : null,
+      });
+      continue;
+    }
+
+    for (const doc of forType) {
+      const status = computeDocumentStatus(type, { expirationDate: doc.expirationDate, hasFile: doc.hasFile }, todayStr);
+      rows.push({
+        id: type.singleton ? type.key : `${type.key}:${doc._id}`,
+        type,
+        doc,
+        status,
+        lastArchived: null,
+        lastArchivedStatus: null,
+      });
+    }
+  }
+
+  const counts: DocumentCounts = { total: rows.length, onFile: 0, valid: 0, expiring: 0, expired: 0, missing: 0 };
+  let attention = 0;
+  for (const r of rows) {
+    if (r.doc) counts.onFile++;
+    switch (r.status) {
+      case 'valid':
+      case 'warning':
+      case 'on_file':
+        counts.valid++;
+        break;
+      case 'expiring':
+        counts.expiring++;
+        break;
+      case 'expired':
+        counts.expired++;
+        break;
+      case 'missing':
+      case 'needs_date':
+        counts.missing++;
+        break;
+    }
+    if (needsAttention(r.status)) attention++;
+  }
+
+  return { rows, archived, counts, attention };
+}
+
+// ─── Presentation helpers ────────────────────────────────────────────────
+
+export function chipForStatus(status: DocumentStatus): { status: ChipStatus; label: string } {
+  switch (status) {
+    case 'missing':
+      return { status: 'danger', label: DOCUMENT_STATUS_LABEL.missing };
+    case 'needs_date':
+      return { status: 'warning', label: DOCUMENT_STATUS_LABEL.needs_date };
+    case 'expired':
+      return { status: 'expired', label: DOCUMENT_STATUS_LABEL.expired };
+    case 'expiring':
+      return { status: 'expiring', label: DOCUMENT_STATUS_LABEL.expiring };
+    case 'warning':
+      return { status: 'warning', label: 'Renew soon' };
+    case 'on_file':
+      return { status: 'valid', label: DOCUMENT_STATUS_LABEL.on_file };
+    case 'valid':
+    default:
+      return { status: 'valid', label: DOCUMENT_STATUS_LABEL.valid };
+  }
+}
+
+/** Compliance micro-bar chips only know valid/expiring/expired/na. */
+export function complianceChipForStatus(status: DocumentStatus): 'valid' | 'expiring' | 'expired' | 'na' {
+  switch (status) {
+    case 'expired':
+    case 'missing':
+      return 'expired';
+    case 'expiring':
+    case 'needs_date':
+    case 'warning':
+      return 'expiring';
+    default:
+      return 'valid';
+  }
+}
+
+export function formatYmd(ymd?: string | null): string {
+  if (!ymd) return '—';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return ymd;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+export function formatBytes(n?: number): string {
+  if (!n) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
