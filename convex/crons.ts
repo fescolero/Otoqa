@@ -379,4 +379,15 @@ crons.interval(
   job('sweep-pending-documents', 'entityDocuments:sweepPending', 'mutation', HOUR),
 );
 
+// ✅ Purge organizations whose offboarding window has ended: delete the
+// org's R2 prefix and its document rows, stamp purgedAt. Daily; the
+// action pages through objects and rows in bounded batches.
+// docs/documents-storage-spec.md §7.
+crons.cron(
+  'purge-offboarded-orgs',
+  '30 7 * * *',
+  internal.platform.cronRunner.run,
+  job('purge-offboarded-orgs', 'offboardingPurge:purgeDueOrganizations', 'action', DAY),
+);
+
 export default crons;

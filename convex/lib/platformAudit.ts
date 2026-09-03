@@ -30,6 +30,9 @@ export type PlatformAuditAction =
   | 'identity_link_updated'
   | 'org_soft_deleted'
   | 'org_restored'
+  | 'org_offboarding_started'
+  | 'org_offboarding_cancelled'
+  | 'org_purged'
   | 'driver_phone_corrected'
   | 'webhook_deliveries_requeued'
   | 'cron_job_retired'
@@ -66,6 +69,7 @@ const DESTRUCTIVE_ACTIONS: ReadonlySet<PlatformAuditAction> = new Set([
   'session_force_ended',
   'identity_link_updated',
   'org_soft_deleted',
+  'org_offboarding_started',
   'driver_phone_corrected',
   'invoice_voided',
   'invoice_payment_reversed',

@@ -325,3 +325,51 @@ export const listForLoad = query({
     );
   },
 });
+
+/**
+ * Every load document the org owns, for the export zip (spec §7).
+ * settings:manage. Files are fetched via s3Upload.getDocumentDownloadUrl.
+ */
+export const listAllForOrgExport = query({
+  args: {},
+  returns: v.array(
+    v.object({
+      documentId: v.id('loadDocuments'),
+      loadId: v.id('loadInformation'),
+      orderNumber: v.optional(v.string()),
+      type: docType,
+      fileName: v.optional(v.string()),
+      contentType: v.optional(v.string()),
+      uploadedAt: v.float64(),
+      hasFile: v.boolean(),
+    }),
+  ),
+  handler: async (ctx) => {
+    const orgId = await requireCallerOrgId(ctx);
+    await assertOrgPermission(ctx, orgId, 'settings:manage');
+    const rows = await ctx.db
+      .query('loadDocuments')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', orgId))
+      .collect();
+    const orders = new Map<string, string | undefined>();
+    const out = [];
+    for (const d of rows) {
+      let orderNumber = orders.get(d.loadId);
+      if (orderNumber === undefined && !orders.has(d.loadId)) {
+        orderNumber = (await ctx.db.get(d.loadId))?.orderNumber;
+        orders.set(d.loadId, orderNumber);
+      }
+      out.push({
+        documentId: d._id,
+        loadId: d.loadId,
+        orderNumber,
+        type: d.type,
+        fileName: d.fileName,
+        contentType: d.contentType,
+        uploadedAt: d.uploadedAt,
+        hasFile: !!(d.storageId || d.externalKey || d.externalUrl),
+      });
+    }
+    return out;
+  },
+});

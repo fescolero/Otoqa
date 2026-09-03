@@ -11,9 +11,12 @@
  * document); they are never uploaded from here.
  */
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { action } from './_generated/server';
+import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
+import { buildEntityDocumentMetadata } from './lib/r2';
+import { copyObject, headObject } from './s3Upload';
 import {
   cancelEntityUpload,
   finalizeEntityUpload,
@@ -63,4 +66,71 @@ export const getDownloadUrl = action({
   returns: v.object({ url: v.string(), expiresAt: v.number() }),
   handler: async (ctx, args): Promise<{ url: string; expiresAt: number }> =>
     signedDownloadUrl(ctx, args.docId, args.download),
+});
+
+/**
+ * Save a copy (documents-storage-spec.md §7): during a linked carrier's
+ * offboarding window, copy one of its shared company documents into the
+ * broker's own partnership records — server-side CopyObject into the
+ * broker's prefix, then the normal HEAD-verified activation. Afterwards
+ * the broker-owned row keeps the type satisfied when the carrier's copy
+ * is purged.
+ */
+export const saveSharedCopy = action({
+  args: { partnershipId: v.id('carrierPartnerships'), sharedDocId: v.id('entityDocuments') },
+  returns: v.object({ docId: v.id('entityDocuments') }),
+  handler: async (ctx, args): Promise<{ docId: Id<'entityDocuments'> }> => {
+    const src: {
+      srcKey: string;
+      fileName: string;
+      contentType: string;
+      sizeBytes: number;
+      issueDate?: string;
+      expirationDate?: string;
+      partnerTypeKey: string;
+      carrierName: string;
+    } = await ctx.runQuery(internal.entityDocuments.getSharedForCopy, {
+      partnershipId: args.partnershipId,
+      sharedDocId: args.sharedDocId,
+    });
+
+    const pending: { docId: Id<'entityDocuments'>; key: string; orgId: string; contentType: string } =
+      await ctx.runMutation(internal.entityDocuments.createPending, {
+        entity: 'carrier',
+        entityId: args.partnershipId,
+        typeKey: src.partnerTypeKey,
+        fileName: src.fileName,
+        contentType: src.contentType,
+        sizeBytes: src.sizeBytes,
+      });
+
+    try {
+      await copyObject({
+        srcKey: src.srcKey,
+        dstKey: pending.key,
+        contentType: pending.contentType,
+        metadata: buildEntityDocumentMetadata({
+          orgId: pending.orgId,
+          entity: 'carrier',
+          entityId: args.partnershipId,
+          typeKey: src.partnerTypeKey,
+          docId: pending.docId,
+          uploadedVia: 'web',
+        }),
+      });
+      const head = await headObject(pending.key);
+      if (!head) throw new ConvexError('Copy did not land in storage');
+      await ctx.runMutation(internal.entityDocuments.finalize, {
+        docId: pending.docId,
+        verified: { contentType: (head.contentType ?? pending.contentType).toLowerCase(), sizeBytes: head.contentLength },
+        issueDate: src.issueDate,
+        expirationDate: src.expirationDate,
+        note: `Saved copy from ${src.carrierName} before they left the platform`,
+      });
+    } catch (e) {
+      await ctx.runMutation(internal.entityDocuments.discardPending, { docId: pending.docId }).catch(() => undefined);
+      throw e;
+    }
+    return { docId: pending.docId };
+  },
 });

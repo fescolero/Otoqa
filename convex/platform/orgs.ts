@@ -119,6 +119,12 @@ export const getOrgDetail = query({
         workosOrgId: org.workosOrgId,
         clerkOrgId: org.clerkOrgId,
         isDeleted: org.isDeleted === true,
+        // Offboarding (documents-storage-spec.md §7) — drives the console's
+        // Offboarding panel.
+        offboardingStartedAt: org.offboardingStartedAt,
+        offboardingReason: org.offboardingReason,
+        purgeAt: org.purgeAt,
+        purgedAt: org.purgedAt,
         billingEmail: org.billingEmail,
         // Contact fields are editable from the console's contract panel, so
         // they have to be readable there too.

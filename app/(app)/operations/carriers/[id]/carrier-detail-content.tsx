@@ -40,6 +40,7 @@ import {
 } from '@/components/web';
 import { CarrierPaySettingsSection } from '@/components/carrier-pay';
 import { EntityDocumentsTab } from '@/components/web/documents/entity-documents-tab';
+import { useEntityDocuments } from '@/components/web/documents/use-entity-documents';
 import {
   AssignedLoadsTable,
   type AssignedLoad,
@@ -111,6 +112,9 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
   const partnershipId = carrierId as Id<'carrierPartnerships'>;
 
   const partnership = useQuery(api.carrierPartnerships.get, { partnershipId });
+  // Documents summary (same subscription the Documents tab uses) — for
+  // the offboarding notice in the rail (documents-storage-spec.md §7).
+  const partnershipDocs = useEntityDocuments('carrier', partnershipId);
 
   const [loadStatusFilter, setLoadStatusFilter] = React.useState<AssignedLoadStatus>('Assigned');
   const carrierLoads = useQuery(
@@ -653,7 +657,8 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
     { id: 'pay',       label: 'Pay profile', icon: 'doc-dollar', content: payContent },
     {
       id: 'documents', label: 'Documents', icon: 'file-text',
-      attention: partnership.missingDocTypeKeys?.length || undefined,
+      attention:
+        (partnership.missingDocTypeKeys?.length ?? 0) + (partnershipDocs.linkedCarrierOffboarding ? 1 : 0) || undefined,
       content: documentsContent,
     },
     { id: 'activity',  label: 'Activity',  icon: 'pulse',       content: activityContent },
@@ -662,6 +667,19 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
   // Right rail — action needed, compliance summary, network at a glance.
   const rightRail = (
     <div className="flex flex-col gap-3">
+      {partnershipDocs.linkedCarrierOffboarding && (
+        <DSCard title="Carrier leaving Otoqa">
+          <DSActivity
+            items={[
+              {
+                icon: 'alert',
+                text: `${partnershipDocs.linkedCarrierName ?? 'This carrier'} is offboarding. Shared documents are removed on ${formatDate(new Date(partnershipDocs.linkedCarrierOffboarding.purgeAt).toISOString().slice(0, 10))} — save copies from the Documents tab.`,
+                when: 'action needed',
+              },
+            ]}
+          />
+        </DSCard>
+      )}
       {(insStatus === 'expired' || insStatus === 'expiring') && (
         <DSCard title="Action needed">
           <DSActivity

@@ -5,6 +5,8 @@ import { requirePlatformStaff, requireRecentStaffAuth } from '../lib/auth';
 import { logPlatformAudit } from '../lib/platformAudit';
 import { endSessionInternal } from '../driverSessions';
 import { GLOBAL_FLAG_SCOPE } from '../featureFlags';
+import { logAudit } from '../lib/audit';
+import { OFFBOARDING_RETENTION_MS, partnershipsLinkedToOrg } from '../lib/orgLookup';
 
 /**
  * Platform console — support operations (Phase 2). Staff-only, and every
@@ -518,6 +520,102 @@ export const restoreOrg = mutation({
       targetId: args.organizationId,
       before: JSON.stringify({ isDeleted: true }),
       after: JSON.stringify({ isDeleted: false }),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+// ─── Offboarding (documents-storage-spec.md §7) ──────────────────────────
+
+/**
+ * Start the 14-day offboarding window. Data stays intact; the purge job
+ * deletes the org's R2 prefix and document rows at `purgeAt`. Every
+ * broker linked to this carrier gets an Activity entry on the
+ * partnership and a Save-a-copy window on shared documents.
+ */
+export const startOffboarding = mutation({
+  args: { organizationId: v.id('organizations'), reason: v.string() },
+  returns: v.object({ purgeAt: v.number(), notifiedPartnerships: v.number() }),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    const org = await ctx.db.get(args.organizationId);
+    if (!org) throw new ConvexError('Organization not found');
+    if (org.purgedAt) throw new ConvexError('Organization was already purged');
+    const now = Date.now();
+    const purgeAt = org.offboardingStartedAt && org.purgeAt ? org.purgeAt : now + OFFBOARDING_RETENTION_MS;
+    if (!org.offboardingStartedAt) {
+      await ctx.db.patch(args.organizationId, {
+        offboardingStartedAt: now,
+        offboardingReason: args.reason,
+        purgeAt,
+        updatedAt: now,
+      });
+    }
+    // Notify linked brokers through their partnership's activity trail.
+    let notified = 0;
+    for (const p of await partnershipsLinkedToOrg(ctx, org)) {
+      await logAudit(ctx, {
+        organizationId: p.brokerOrgId,
+        entityType: 'carrierPartnership',
+        entityId: p._id,
+        entityName: p.carrierName || p.mcNumber,
+        action: 'status_changed',
+        performedBy: `platform:${staff.email}`,
+        description: `${org.name} is leaving Otoqa. Documents they share are available until ${new Date(purgeAt).toISOString().slice(0, 10)} — save copies from the Documents tab to keep them.`,
+        changesAfter: JSON.stringify({ offboarding: true, purgeAt }),
+      });
+      notified++;
+    }
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'org_offboarding_started',
+      targetOrgId: org.workosOrgId,
+      targetTable: 'organizations',
+      targetId: args.organizationId,
+      after: JSON.stringify({ offboardingStartedAt: now, purgeAt }),
+      reason: args.reason,
+      metadata: JSON.stringify({ notifiedPartnerships: notified }),
+    });
+    return { purgeAt, notifiedPartnerships: notified };
+  },
+});
+
+/** Cancel offboarding before the purge runs (the customer came back). */
+export const cancelOffboarding = mutation({
+  args: { organizationId: v.id('organizations'), reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    const org = await ctx.db.get(args.organizationId);
+    if (!org) throw new ConvexError('Organization not found');
+    if (org.purgedAt) throw new ConvexError('Organization was already purged — nothing to cancel');
+    if (!org.offboardingStartedAt) return null; // idempotent
+    await ctx.db.patch(args.organizationId, {
+      offboardingStartedAt: undefined,
+      offboardingReason: undefined,
+      purgeAt: undefined,
+      updatedAt: Date.now(),
+    });
+    for (const p of await partnershipsLinkedToOrg(ctx, org)) {
+      await logAudit(ctx, {
+        organizationId: p.brokerOrgId,
+        entityType: 'carrierPartnership',
+        entityId: p._id,
+        entityName: p.carrierName || p.mcNumber,
+        action: 'status_changed',
+        performedBy: `platform:${staff.email}`,
+        description: `${org.name} is staying on Otoqa — offboarding cancelled; shared documents remain available.`,
+        changesAfter: JSON.stringify({ offboarding: false }),
+      });
+    }
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'org_offboarding_cancelled',
+      targetOrgId: org.workosOrgId,
+      targetTable: 'organizations',
+      targetId: args.organizationId,
+      before: JSON.stringify({ offboardingStartedAt: org.offboardingStartedAt, purgeAt: org.purgeAt }),
       reason: args.reason,
     });
     return null;

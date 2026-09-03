@@ -13,9 +13,12 @@ import * as React from 'react';
 import { SettingsHeader } from '@/components/web';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { EntityDocumentsTab } from '@/components/web/documents/entity-documents-tab';
+import { ExportAllDocumentsButton } from '@/components/web/documents/export-all-documents-button';
+import { usePermissions } from '@/lib/use-permissions';
 
 export default function CompanyDocumentsPage() {
   const organizationId = useOrganizationId();
+  const { can } = usePermissions();
 
   return (
     <div className="flex flex-col gap-4">
@@ -23,6 +26,7 @@ export default function CompanyDocumentsPage() {
         eyebrow="Settings"
         title="Company file"
         subtitle="Your organization's own compliance documents. Shared types are visible to brokers you are linked with; withhold any document individually."
+        actions={can('settings', 'manage') ? <ExportAllDocumentsButton /> : null}
       />
       {organizationId ? (
         <EntityDocumentsTab entity="organization" entityId={organizationId} entityName="Company" />

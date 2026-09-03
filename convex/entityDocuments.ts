@@ -40,6 +40,8 @@ import {
   loadEffectiveCatalog,
 } from './lib/documentCatalog';
 import type { DocumentEntity } from './lib/documentTypeDefaults';
+import { isOffboarding, orgByAnyId, partnershipsLinkedToOrg } from './lib/orgLookup';
+import { logPlatformAudit } from './lib/platformAudit';
 import {
   MAX_DOCUMENT_BYTES,
   buildEntityDocumentKey,
@@ -164,46 +166,7 @@ function toPublic(doc: Doc<'entityDocuments'>, type?: EffectiveDocumentType): Pu
   };
 }
 
-// ─── Org lookups (ids come in three legacy shapes) ───────────────────────
-
 type Ctx = QueryCtx | MutationCtx;
-
-/** Resolve an organizations row from a WorkOS id, a Clerk id, or a Convex
- *  id — partnerships store `carrierOrgId` in all three shapes. */
-async function orgByAnyId(ctx: Ctx, id: string | undefined): Promise<Doc<'organizations'> | null> {
-  if (!id) return null;
-  const byWorkos = await ctx.db
-    .query('organizations')
-    .withIndex('by_organization', (q) => q.eq('workosOrgId', id))
-    .first();
-  if (byWorkos) return byWorkos;
-  const byClerk = await ctx.db
-    .query('organizations')
-    .withIndex('by_clerk_org', (q) => q.eq('clerkOrgId', id))
-    .first();
-  if (byClerk) return byClerk;
-  const nid = ctx.db.normalizeId('organizations', id);
-  return nid ? ctx.db.get(nid) : null;
-}
-
-/** Every partnership whose carrier side is this org, across the id shapes. */
-async function partnershipsLinkedToOrg(ctx: Ctx, org: Doc<'organizations'>): Promise<Doc<'carrierPartnerships'>[]> {
-  const ids = [org.workosOrgId, org.clerkOrgId, org._id as string].filter((x): x is string => !!x);
-  const seen = new Set<string>();
-  const out: Doc<'carrierPartnerships'>[] = [];
-  for (const id of ids) {
-    const rows = await ctx.db
-      .query('carrierPartnerships')
-      .withIndex('by_carrier', (q) => q.eq('carrierOrgId', id))
-      .collect();
-    for (const r of rows) {
-      if (seen.has(r._id)) continue;
-      seen.add(r._id);
-      out.push(r);
-    }
-  }
-  return out;
-}
 
 // ─── Owner resolution + the one access rule ──────────────────────────────
 
@@ -942,6 +905,9 @@ export const listForEntity = query({
     canShare: v.boolean(),
     /** Partnerships only: the linked carrier org's name, when linked. */
     linkedCarrierName: v.optional(v.string()),
+    /** Partnerships only: the linked carrier is leaving the platform;
+     *  shared documents vanish at `purgeAt` (spec §7). */
+    linkedCarrierOffboarding: v.optional(v.object({ purgeAt: v.number(), startedAt: v.number() })),
   }),
   handler: async (ctx, args) => {
     const who = await assertEntityAccess(ctx, args.entity, args.entityId, 'view');
@@ -971,12 +937,19 @@ export const listForEntity = query({
 
     let shared: SharedDoc[] = [];
     let linkedCarrierName: string | undefined;
+    let linkedCarrierOffboarding: { purgeAt: number; startedAt: number } | undefined;
     if (args.entity === 'carrier') {
       const pid = ctx.db.normalizeId('carrierPartnerships', args.entityId);
       const p = pid ? await ctx.db.get(pid) : null;
       if (p) {
         shared = await sharedDocsForPartnership(ctx, p);
-        if (p.carrierOrgId) linkedCarrierName = (await orgByAnyId(ctx, p.carrierOrgId))?.name;
+        if (p.carrierOrgId) {
+          const org = await orgByAnyId(ctx, p.carrierOrgId);
+          linkedCarrierName = org?.name;
+          if (org && isOffboarding(org) && org.purgeAt && org.offboardingStartedAt) {
+            linkedCarrierOffboarding = { purgeAt: org.purgeAt, startedAt: org.offboardingStartedAt };
+          }
+        }
       }
     }
 
@@ -990,7 +963,205 @@ export const listForEntity = query({
       canEdit,
       canShare,
       linkedCarrierName,
+      linkedCarrierOffboarding,
     };
+  },
+});
+
+// ─── Offboarding: Save a copy (spec §7) ──────────────────────────────────
+
+/**
+ * Eligibility + source details for copying a carrier-shared document into
+ * the broker's own partnership records. Only during the carrier org's
+ * offboarding window, only for a document the broker can already read.
+ */
+export const getSharedForCopy = internalQuery({
+  args: { partnershipId: v.id('carrierPartnerships'), sharedDocId: v.id('entityDocuments') },
+  returns: v.object({
+    srcKey: v.string(),
+    fileName: v.string(),
+    contentType: v.string(),
+    sizeBytes: v.number(),
+    issueDate: v.optional(v.string()),
+    expirationDate: v.optional(v.string()),
+    partnerTypeKey: v.string(),
+    carrierName: v.string(),
+  }),
+  handler: async (ctx, args) => {
+    await assertEntityAccess(ctx, 'carrier', args.partnershipId, 'edit');
+    const p = await ctx.db.get(args.partnershipId);
+    if (!p?.carrierOrgId) throw new ConvexError('This partnership is not linked to a carrier account');
+    const org = await orgByAnyId(ctx, p.carrierOrgId);
+    if (!org?.workosOrgId) throw new ConvexError('Carrier organization not found');
+    if (!isOffboarding(org)) throw new ConvexError('Save a copy is only available while the carrier is offboarding');
+    const doc = await ctx.db.get(args.sharedDocId);
+    if (!doc || doc.entity !== 'organization' || doc.workosOrgId !== org.workosOrgId || doc.status !== 'active') {
+      throw new ConvexError('Document not found');
+    }
+    if (!doc.externalKey || !doc.contentType) throw new ConvexError('This document has no file to copy');
+    const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
+    const type = catalog.find((t) => t.key === doc.typeKey);
+    if (!type?.partnerTypeKey || !isSharedByRule(doc, type)) throw new ConvexError('Document is not shared with you');
+    return {
+      srcKey: doc.externalKey,
+      fileName: doc.fileName ?? 'document',
+      contentType: doc.contentType,
+      sizeBytes: doc.sizeBytes ?? 1,
+      issueDate: doc.issueDate,
+      expirationDate: doc.expirationDate,
+      partnerTypeKey: type.partnerTypeKey,
+      carrierName: org.name,
+    };
+  },
+});
+
+// ─── Offboarding: purge (spec §7) ────────────────────────────────────────
+
+export const dueForPurge = internalQuery({
+  args: { now: v.number() },
+  returns: v.array(
+    v.object({ organizationId: v.id('organizations'), workosOrgId: v.optional(v.string()), name: v.string() }),
+  ),
+  handler: async (ctx, args) => {
+    const rows = await ctx.db
+      .query('organizations')
+      .withIndex('by_purgeAt', (q) => q.lte('purgeAt', args.now))
+      .take(25);
+    return rows
+      .filter((o) => o.purgeAt !== undefined && o.offboardingStartedAt && !o.purgedAt)
+      .map((o) => ({ organizationId: o._id, workosOrgId: o.workosOrgId, name: o.name }));
+  },
+});
+
+const PURGE_BATCH = 200;
+
+/** Delete one batch of the org's document rows. Returns done=true when
+ *  nothing is left. */
+export const purgeOrgRows = internalMutation({
+  args: { organizationId: v.id('organizations') },
+  returns: v.object({ deleted: v.number(), done: v.boolean() }),
+  handler: async (ctx, args) => {
+    const org = await ctx.db.get(args.organizationId);
+    if (!org?.workosOrgId) return { deleted: 0, done: true };
+    const orgId = org.workosOrgId;
+    let deleted = 0;
+
+    const docs = await ctx.db
+      .query('entityDocuments')
+      .withIndex('by_entity', (q) => q.eq('workosOrgId', orgId))
+      .take(PURGE_BATCH);
+    for (const d of docs) {
+      await ctx.db.delete(d._id);
+      deleted++;
+    }
+    if (deleted >= PURGE_BATCH) return { deleted, done: false };
+
+    const types = await ctx.db
+      .query('documentTypes')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', orgId))
+      .take(PURGE_BATCH - deleted);
+    for (const t of types) {
+      await ctx.db.delete(t._id);
+      deleted++;
+    }
+    if (deleted >= PURGE_BATCH) return { deleted, done: false };
+
+    const loadDocs = await ctx.db
+      .query('loadDocuments')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', orgId))
+      .take(PURGE_BATCH - deleted);
+    for (const d of loadDocs) {
+      await ctx.db.delete(d._id);
+      deleted++;
+    }
+    return { deleted, done: deleted < PURGE_BATCH };
+  },
+});
+
+export const markPurged = internalMutation({
+  args: { organizationId: v.id('organizations') },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const org = await ctx.db.get(args.organizationId);
+    if (!org || org.purgedAt) return null;
+    const now = Date.now();
+    await ctx.db.patch(args.organizationId, {
+      purgedAt: now,
+      isDeleted: true,
+      deletedAt: org.deletedAt ?? now,
+      deletedBy: org.deletedBy ?? 'platform:offboarding-purge',
+      deletionReason: org.deletionReason ?? org.offboardingReason ?? 'Offboarding purge',
+      updatedAt: now,
+    });
+    await logPlatformAudit(ctx, {
+      actorEmail: 'system@otoqa',
+      action: 'org_purged',
+      targetOrgId: org.workosOrgId,
+      targetTable: 'organizations',
+      targetId: args.organizationId,
+      after: JSON.stringify({ purgedAt: now }),
+      reason: org.offboardingReason ?? 'Offboarding window ended',
+    });
+    return null;
+  },
+});
+
+// ─── Export (spec §7) ────────────────────────────────────────────────────
+
+/**
+ * Every document the org owns, for the client-side export zip. Files are
+ * fetched one by one through signed GETs; this only lists.
+ * settings:manage.
+ */
+export const listAllForOrgExport = query({
+  args: {},
+  returns: v.array(
+    v.object({
+      docId: v.id('entityDocuments'),
+      entity: documentEntityValidator,
+      entityId: v.string(),
+      entityName: v.string(),
+      typeKey: v.string(),
+      status: statusValidator,
+      fileName: v.optional(v.string()),
+      contentType: v.optional(v.string()),
+      issueDate: v.optional(v.string()),
+      expirationDate: v.optional(v.string()),
+      uploadedAt: v.number(),
+    }),
+  ),
+  handler: async (ctx) => {
+    const { orgId } = await requireCallerIdentity(ctx);
+    await assertOrgPermission(ctx, orgId, 'settings:manage');
+    const rows = await ctx.db
+      .query('entityDocuments')
+      .withIndex('by_entity', (q) => q.eq('workosOrgId', orgId))
+      .collect();
+    const names = new Map<string, string>();
+    const out = [];
+    for (const d of rows) {
+      if (d.status === 'pending' || !d.externalKey) continue;
+      const nameKey = `${d.entity}:${d.entityId}`;
+      let entityName = names.get(nameKey);
+      if (!entityName) {
+        entityName = (await resolveOwner(ctx, d.entity, d.entityId))?.entityName ?? d.entityId;
+        names.set(nameKey, entityName);
+      }
+      out.push({
+        docId: d._id,
+        entity: d.entity,
+        entityId: d.entityId,
+        entityName,
+        typeKey: d.typeKey,
+        status: d.status,
+        fileName: d.fileName,
+        contentType: d.contentType,
+        issueDate: d.issueDate,
+        expirationDate: d.expirationDate,
+        uploadedAt: d.uploadedAt,
+      });
+    }
+    return out;
   },
 });
 

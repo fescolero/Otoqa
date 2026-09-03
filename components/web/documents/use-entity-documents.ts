@@ -27,6 +27,7 @@ export interface EntityDocumentsState extends DocumentsViewModel {
   documents: EntityDocumentsList['documents'];
   shared: EntityDocumentsList['shared'];
   linkedCarrierName?: string;
+  linkedCarrierOffboarding?: { purgeAt: number; startedAt: number };
   today: string;
 }
 
@@ -57,6 +58,7 @@ export function useEntityDocuments(entity: DocumentEntity, entityId: string | un
     documents: data?.documents ?? [],
     shared: data?.shared ?? [],
     linkedCarrierName: data?.linkedCarrierName,
+    linkedCarrierOffboarding: data?.linkedCarrierOffboarding,
     today,
   };
 }

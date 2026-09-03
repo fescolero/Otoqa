@@ -8,7 +8,10 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   HeadObjectCommand,
+  CopyObjectCommand,
+  ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { keyFromExternalUrl } from './lib/r2';
@@ -194,6 +197,63 @@ export async function headObject(
     if (name === 'NotFound' || name === 'NoSuchKey' || status === 404) return null;
     throw err;
   }
+}
+
+/**
+ * Server-side copy (Save a copy, spec §7). Metadata is REPLACED so the
+ * destination carries the new owner's org/entity/doc ids, not the
+ * source's.
+ */
+export async function copyObject(args: {
+  srcKey: string;
+  dstKey: string;
+  contentType: string;
+  metadata: Record<string, string>;
+}): Promise<void> {
+  const { client, bucket } = createS3Client();
+  await client.send(
+    new CopyObjectCommand({
+      Bucket: bucket,
+      CopySource: `/${bucket}/${encodeURIComponent(args.srcKey).replace(/%2F/g, '/')}`,
+      Key: args.dstKey,
+      ContentType: args.contentType,
+      Metadata: args.metadata,
+      MetadataDirective: 'REPLACE',
+    }),
+  );
+}
+
+/** One page of object keys under a prefix (purge, export tooling). */
+export async function listObjectKeys(
+  prefix: string,
+  continuationToken?: string,
+): Promise<{ keys: string[]; nextToken?: string }> {
+  const { client, bucket } = createS3Client();
+  const res = await client.send(
+    new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: continuationToken, MaxKeys: 1000 }),
+  );
+  return {
+    keys: (res.Contents ?? []).map((o) => o.Key).filter((k): k is string => !!k),
+    nextToken: res.IsTruncated ? res.NextContinuationToken : undefined,
+  };
+}
+
+/** Bulk delete (≤1000 per call, chunked here). Idempotent. */
+export async function deleteObjectsByKeys(keys: string[]): Promise<number> {
+  const { client, bucket } = createS3Client();
+  let deleted = 0;
+  for (let i = 0; i < keys.length; i += 1000) {
+    const chunk = keys.slice(i, i + 1000);
+    if (chunk.length === 0) continue;
+    const res = await client.send(
+      new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: chunk.map((Key) => ({ Key })), Quiet: true } }),
+    );
+    if (res.Errors && res.Errors.length > 0) {
+      throw new Error(`DeleteObjects failed for ${res.Errors.length} key(s): ${res.Errors[0].Message ?? ''}`);
+    }
+    deleted += chunk.length;
+  }
+  return deleted;
 }
 
 /** Delete an object; idempotent on S3/R2. */

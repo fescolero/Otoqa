@@ -1,8 +1,9 @@
 # Documents & R2 storage — contract and product rules
 
-Status: agreed design, reviewed against the codebase. Phases 1–3 are
+Status: agreed design, reviewed against the codebase. All four phases are
 built and on main (drivers; carriers + company file + sharing; load web
-upload + legacy cleanup). Phase 4 (offboarding) is not started.
+upload + legacy cleanup; offboarding with Save a copy, export, and the
+14-day purge).
 Referenced from `convex/s3Upload.ts` (which pointed at a
 `docs/r2-storage.md` that never existed).
 
@@ -510,3 +511,18 @@ generated-API type cycle this avoids; new files follow the same pattern.
    load page requires loads:edit.
 4. **Offboarding.** Org offboarding fields and platform action,
    notifications, Save a copy, export, 14-day purge job.
+   Built: platform staff start/cancel offboarding from the admin console
+   (`platform.support.startOffboarding` / `cancelOffboarding`, step-up
+   auth, platform audit). Starting stamps `offboardingStartedAt` and
+   `purgeAt = +14d` and writes an activity entry on every linked
+   partnership; the broker's carrier page shows a rail notice and the
+   Documents tab a banner with **Save a copy** on shared rows
+   (`carrierDocuments.saveSharedCopy`: server-side CopyObject into the
+   broker prefix, then the normal HEAD-verified activation). Export is an
+   always-available **Export all documents** button on Settings › Company
+   file (settings:manage) that zips every owned document plus a
+   manifest.csv in the browser via signed GETs. The daily
+   `offboardingPurge:purgeDueOrganizations` job deletes the org's
+   `orgs/{orgId}/` prefix and its entityDocuments / documentTypes /
+   loadDocuments rows in batches, then stamps `purgedAt` and soft-deletes
+   the org.

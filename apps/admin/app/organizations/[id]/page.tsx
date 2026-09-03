@@ -9,6 +9,7 @@ import { ConsoleShell } from '@/components/ConsoleShell';
 import { PanelBoundary } from '@/components/PanelBoundary';
 import {
   OrgSupportPanels,
+  OffboardingPanel,
   BillingConfigPanel,
   RateSchedulePanel,
   ContractPanel,
@@ -152,6 +153,14 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
 
       <ContractPanel organizationId={organizationId} current={org} />
 
+      <OffboardingPanel
+        organizationId={organizationId}
+        orgName={org.name}
+        offboardingStartedAt={org.offboardingStartedAt}
+        purgeAt={org.purgeAt}
+        purgedAt={org.purgedAt}
+        offboardingReason={org.offboardingReason}
+      />
       <BillingConfigPanel organizationId={organizationId} current={org} />
 
       <RateSchedulePanel

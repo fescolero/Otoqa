@@ -39,7 +39,9 @@ import {
   type FilterChipValue,
   type FilterProperty,
   WBtn,
+  WIcon,
 } from '@/components/web';
+import type { Id } from '@/convex/_generated/dataModel';
 import { DocPreviewModal, type DocRecord } from '@/components/loads/doc-preview-modal';
 
 import { DocumentUploadDialog } from './document-upload-dialog';
@@ -68,6 +70,8 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
   const docs = useEntityDocuments(entity, entityId);
   const archiveDoc = useMutation(api.entityDocuments.archive);
   const setShared = useMutation(api.entityDocuments.setShared);
+  const saveSharedCopy = useAction(api.carrierDocuments.saveSharedCopy);
+  const [copying, setCopying] = React.useState<string | null>(null);
   const download = {
     driver: useAction(api.driverDocuments.getDownloadUrl),
     carrier: useAction(api.carrierDocuments.getDownloadUrl),
@@ -182,6 +186,19 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
     }
   };
 
+  const onSaveCopy = async (row: DocumentRowModel) => {
+    if (entity !== 'carrier' || !row.doc || !isSharedDocument(row.doc)) return;
+    setCopying(row.id);
+    try {
+      await saveSharedCopy({ partnershipId: entityId as Id<'carrierPartnerships'>, sharedDocId: row.doc._id });
+      toast.success(`${row.type.name} saved to your records`);
+    } catch (e) {
+      toast.error(convexErrorMessage(e) ?? 'Could not save a copy');
+    } finally {
+      setCopying(null);
+    }
+  };
+
   const onToggleShare = async (row: DocumentRowModel) => {
     const own = row.ownDoc;
     if (!own || own.shared === undefined) return;
@@ -263,6 +280,13 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
     if (r.source === 'shared' && r.ownDoc?.hasFile) {
       actions.push({ label: 'View our copy', icon: 'eye', onClick: () => void openPreview(r.ownDoc, r.type.name) });
     }
+    if (docs.canEdit && docs.linkedCarrierOffboarding && r.source === 'shared' && r.doc && isSharedDocument(r.doc)) {
+      actions.push({
+        label: copying === r.id ? 'Saving…' : 'Save a copy',
+        icon: 'copy',
+        onClick: () => void onSaveCopy(r),
+      });
+    }
     if (docs.canEdit) {
       actions.push({
         label: r.ownDoc ? 'Replace' : r.source === 'shared' ? 'Add our own' : 'Upload',
@@ -329,7 +353,22 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
         <DocStat label="Missing"  value={docs.counts.missing}  tone="crit" divided />
       </div>
 
-      {entity === 'carrier' && docs.linkedCarrierName && (
+      {entity === 'carrier' && docs.linkedCarrierOffboarding && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-2 rounded-xl border px-3.5 py-2.5 text-[12.5px]"
+          style={{ borderColor: 'rgba(239,68,68,0.35)', background: 'rgba(239,68,68,0.06)' }}
+        >
+          <WIcon name="alert" size={14} style={{ color: '#B43030' }} />
+          <span>
+            <strong className="font-medium">{docs.linkedCarrierName ?? 'This carrier'}</strong> is leaving Otoqa.
+            Documents they share disappear on{' '}
+            <span className="num font-medium">{formatYmd(new Date(docs.linkedCarrierOffboarding.purgeAt).toISOString().slice(0, 10))}</span>.
+            Use <em>Save a copy</em> on each shared row to keep it in your own records.
+          </span>
+        </div>
+      )}
+      {entity === 'carrier' && docs.linkedCarrierName && !docs.linkedCarrierOffboarding && (
         <p className="m-0 text-[12px] text-[var(--text-tertiary)]">
           Linked to <strong className="font-medium text-foreground">{docs.linkedCarrierName}</strong>. Documents they
           share appear here automatically; the latest expiry wins when you also keep your own copy.

@@ -241,12 +241,22 @@ export default defineSchema({
     deletedAt: v.optional(v.number()),
     deletedBy: v.optional(v.string()), // User ID who performed deletion
     deletionReason: v.optional(v.string()), // Why org was deleted/deactivated
+
+    // Offboarding (documents-storage-spec.md §7). Started by platform
+    // staff; data is retained in full until `purgeAt` (start + 14 days),
+    // then the purge job deletes the org's R2 prefix and document rows and
+    // stamps `purgedAt`. Linked brokers see a Save-a-copy window meanwhile.
+    offboardingStartedAt: v.optional(v.number()),
+    offboardingReason: v.optional(v.string()),
+    purgeAt: v.optional(v.number()),
+    purgedAt: v.optional(v.number()),
   })
     .index('by_organization', ['workosOrgId'])
     .index('by_clerk_org', ['clerkOrgId'])
     .index('by_mc', ['mcNumber'])
     .index('by_type', ['orgType'])
-    .index('by_deleted', ['isDeleted']),
+    .index('by_deleted', ['isDeleted'])
+    .index('by_purgeAt', ['purgeAt']),
 
   // Sensitive organization data (separate table for security)
   // Following pattern of drivers_sensitive_info

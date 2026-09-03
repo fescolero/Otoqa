@@ -129,6 +129,7 @@ import type * as lib_legTracking from "../lib/legTracking.js";
 import type * as lib_loadFacets from "../lib/loadFacets.js";
 import type * as lib_loadReference from "../lib/loadReference.js";
 import type * as lib_money from "../lib/money.js";
+import type * as lib_orgLookup from "../lib/orgLookup.js";
 import type * as lib_permissions from "../lib/permissions.js";
 import type * as lib_platformAudit from "../lib/platformAudit.js";
 import type * as lib_polygonGeo from "../lib/polygonGeo.js";
@@ -174,6 +175,7 @@ import type * as migrations_backfillOrgType from "../migrations/backfillOrgType.
 import type * as migrations_initializeOrgStats from "../migrations/initializeOrgStats.js";
 import type * as migrations_unlinkFalselyLinkedCarriers from "../migrations/unlinkFalselyLinkedCarriers.js";
 import type * as mobileSettlements from "../mobileSettlements.js";
+import type * as offboardingPurge from "../offboardingPurge.js";
 import type * as orgMembers from "../orgMembers.js";
 import type * as organizationDocuments from "../organizationDocuments.js";
 import type * as payEngine_aggregateSettlement from "../payEngine/aggregateSettlement.js";
@@ -383,6 +385,7 @@ declare const fullApi: ApiFromModules<{
   "lib/loadFacets": typeof lib_loadFacets;
   "lib/loadReference": typeof lib_loadReference;
   "lib/money": typeof lib_money;
+  "lib/orgLookup": typeof lib_orgLookup;
   "lib/permissions": typeof lib_permissions;
   "lib/platformAudit": typeof lib_platformAudit;
   "lib/polygonGeo": typeof lib_polygonGeo;
@@ -428,6 +431,7 @@ declare const fullApi: ApiFromModules<{
   "migrations/initializeOrgStats": typeof migrations_initializeOrgStats;
   "migrations/unlinkFalselyLinkedCarriers": typeof migrations_unlinkFalselyLinkedCarriers;
   mobileSettlements: typeof mobileSettlements;
+  offboardingPurge: typeof offboardingPurge;
   orgMembers: typeof orgMembers;
   organizationDocuments: typeof organizationDocuments;
   "payEngine/aggregateSettlement": typeof payEngine_aggregateSettlement;

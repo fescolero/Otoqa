@@ -725,3 +725,131 @@ describe('company file + sharing (spec §6.2)', () => {
     expect(p?.missingDocTypeKeys).not.toContain('w9');
   });
 });
+
+// ─── Phase 4: offboarding, Save a copy eligibility, purge (spec §7) ─────
+
+const STAFF_ISSUER = 'https://api.workos.com/user_management/client_staff_test';
+const STAFF = {
+  issuer: STAFF_ISSUER,
+  subject: 'staff_docs',
+  email: 'ops@otoqa.com',
+  emailVerified: true,
+  auth_time: Math.floor(Date.now() / 1000), // step-up: recent sign-in
+};
+
+describe('offboarding (spec §7)', () => {
+  const savedEnv: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    savedEnv.STAFF_ISSUER = process.env.STAFF_ISSUER;
+    savedEnv.STAFF_EMAIL_ALLOWLIST = process.env.STAFF_EMAIL_ALLOWLIST;
+    process.env.STAFF_ISSUER = STAFF_ISSUER;
+    process.env.STAFF_EMAIL_ALLOWLIST = 'ops@otoqa.com';
+  });
+  afterEach(() => {
+    process.env.STAFF_ISSUER = savedEnv.STAFF_ISSUER;
+    process.env.STAFF_EMAIL_ALLOWLIST = savedEnv.STAFF_EMAIL_ALLOWLIST;
+  });
+
+  it('start opens the window, notifies linked brokers, and enables Save a copy; cancel closes it', async () => {
+    const t = setup();
+    const { orgId, partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const sharedDocId = await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    const asBroker = t.withIdentity(BROKER_USER as never);
+    const asStaff = t.withIdentity(STAFF as never);
+
+    // Before: no window, no copy.
+    let list = await asBroker.query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(list.linkedCarrierOffboarding).toBeUndefined();
+    await expect(
+      asBroker.query(internal.entityDocuments.getSharedForCopy, { partnershipId, sharedDocId }),
+    ).rejects.toThrow(/only available while the carrier is offboarding/);
+
+    const started = await asStaff.mutation(api.platform.support.startOffboarding, {
+      organizationId: orgId,
+      reason: 'Customer churned',
+    });
+    expect(started.notifiedPartnerships).toBe(1);
+    const org = await t.run((ctx) => ctx.db.get(orgId));
+    expect(org?.offboardingStartedAt).toBeDefined();
+    expect(org?.purgeAt).toBe(started.purgeAt);
+    expect(started.purgeAt - (org?.offboardingStartedAt ?? 0)).toBe(14 * 24 * 60 * 60 * 1000);
+
+    list = await asBroker.query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(list.linkedCarrierOffboarding?.purgeAt).toBe(started.purgeAt);
+
+    const copy = await asBroker.query(internal.entityDocuments.getSharedForCopy, { partnershipId, sharedDocId });
+    expect(copy.partnerTypeKey).toBe('coi');
+    expect(copy.expirationDate).toBe('2031-01-01');
+    expect(copy.srcKey).toContain(`orgs/${CARRIER_ORG}/company/org_coi/`);
+    expect(copy.carrierName).toBe('Rivera Trucking');
+
+    // The broker was notified on the partnership's activity trail.
+    const activity = await t.run((ctx) =>
+      ctx.db
+        .query('auditLog')
+        .withIndex('by_entity_type', (q) => q.eq('organizationId', BROKER_ORG).eq('entityType', 'carrierPartnership'))
+        .collect(),
+    );
+    expect(activity.some((a) => a.description?.includes('is leaving Otoqa'))).toBe(true);
+
+    // Strangers cannot use the copy path even during the window.
+    await expect(
+      t.withIdentity(STRANGER as never).query(internal.entityDocuments.getSharedForCopy, { partnershipId, sharedDocId }),
+    ).rejects.toThrow(/Not found/);
+
+    await asStaff.mutation(api.platform.support.cancelOffboarding, { organizationId: orgId, reason: 'Came back' });
+    list = await asBroker.query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(list.linkedCarrierOffboarding).toBeUndefined();
+    const after = await t.run((ctx) => ctx.db.get(orgId));
+    expect(after?.purgeAt).toBeUndefined();
+  });
+
+  it('only platform staff may start offboarding', async () => {
+    const t = setup();
+    const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    await expect(
+      t.withIdentity(CARRIER_ADMIN as never).mutation(api.platform.support.startOffboarding, { organizationId: orgId, reason: 'x' }),
+    ).rejects.toThrow(/Not platform staff/);
+  });
+
+  it('purge: due orgs are listed, rows deleted in batches, org stamped and soft-deleted', async () => {
+    const t = setup();
+    const { orgId, partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_w9', { issueDate: '2026-01-01' });
+    await t.withIdentity(CARRIER_ADMIN as never).mutation(api.documentTypes.upsertSystemOverride, { key: 'org_w9', name: 'W-9 (custom name)' });
+    // Broker's own copy lives under the BROKER prefix and must survive.
+    const brokerCopy = await uploadFor(t, BROKER_USER, 'carrier', partnershipId, 'coi', { expirationDate: '2030-01-01' });
+
+    const now = Date.now();
+    await t.run((ctx) => ctx.db.patch(orgId, { offboardingStartedAt: now - 20 * 86400000, purgeAt: now - 1000 }));
+
+    const due = await t.query(internal.entityDocuments.dueForPurge, { now });
+    expect(due.map((d) => d.organizationId)).toEqual([orgId]);
+
+    let done = false;
+    let deleted = 0;
+    while (!done) {
+      const r = await t.mutation(internal.entityDocuments.purgeOrgRows, { organizationId: orgId });
+      deleted += r.deleted;
+      done = r.done;
+    }
+    expect(deleted).toBe(3); // 2 documents + 1 catalog override
+    await t.mutation(internal.entityDocuments.markPurged, { organizationId: orgId });
+
+    const org = await t.run((ctx) => ctx.db.get(orgId));
+    expect(org?.purgedAt).toBeDefined();
+    expect(org?.isDeleted).toBe(true);
+    expect(await t.query(internal.entityDocuments.dueForPurge, { now: Date.now() })).toHaveLength(0);
+
+    const remaining = await t.run((ctx) => ctx.db.query('entityDocuments').collect());
+    expect(remaining.map((d) => d._id)).toEqual([brokerCopy]);
+
+    // The broker's partnership no longer sees anything shared.
+    const list = await t
+      .withIdentity(BROKER_USER as never)
+      .query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(list.shared).toHaveLength(0);
+    expect(list.linkedCarrierOffboarding).toBeUndefined();
+  });
+});

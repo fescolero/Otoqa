@@ -819,3 +819,77 @@ function DangerZone({
     </Panel>
   );
 }
+
+// ─── Offboarding (documents-storage-spec.md §7) ──────────────────────────
+
+/**
+ * Start / cancel the 14-day offboarding window. Starting notifies every
+ * linked broker through their partnership activity and opens the
+ * Save-a-copy window on shared documents; the daily purge job deletes the
+ * org's R2 prefix and document rows once `purgeAt` passes.
+ */
+export function OffboardingPanel({
+  organizationId,
+  orgName,
+  offboardingStartedAt,
+  purgeAt,
+  purgedAt,
+  offboardingReason,
+}: {
+  organizationId: Id<'organizations'>;
+  orgName: string;
+  offboardingStartedAt?: number;
+  purgeAt?: number;
+  purgedAt?: number;
+  offboardingReason?: string;
+}) {
+  const start = useMutation(api.platform.support.startOffboarding);
+  const cancel = useMutation(api.platform.support.cancelOffboarding);
+  const [last, setLast] = useState<string | null>(null);
+
+  const state = purgedAt ? 'purged' : offboardingStartedAt ? 'offboarding' : 'active';
+  const tone = state === 'purged' ? 'danger' : state === 'offboarding' ? 'warn' : 'neutral';
+
+  return (
+    <Panel
+      title="Offboarding"
+      tone={tone}
+      subtitle={
+        state === 'purged'
+          ? `Purged ${formatWhen(purgedAt!)} — documents and storage are gone.`
+          : state === 'offboarding'
+            ? `Started ${formatAgo(offboardingStartedAt!)} · purge scheduled ${formatWhen(purgeAt!)}${offboardingReason ? ` · ${offboardingReason}` : ''}`
+            : 'Not offboarding. Starting keeps all data for 14 days, then purges documents and storage.'
+      }
+      actions={
+        <span className="mono" style={{ fontSize: 12 }}>
+          {state === 'offboarding' ? <Badge tone="warn">leaving</Badge> : state === 'purged' ? <Badge tone="danger">purged</Badge> : null}
+        </span>
+      }
+    >
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        {state === 'active' && (
+          <ReasonAction
+            label="Start offboarding"
+            danger
+            confirmText={orgName}
+            onSubmit={async (reason) => {
+              const r = await start({ organizationId, reason });
+              setLast(`Offboarding started — purge on ${formatWhen(r.purgeAt)}; ${r.notifiedPartnerships} linked partnership(s) notified.`);
+            }}
+          />
+        )}
+        {state === 'offboarding' && (
+          <ReasonAction
+            label="Cancel offboarding"
+            onSubmit={async (reason) => {
+              await cancel({ organizationId, reason });
+              setLast('Offboarding cancelled — data retained, linked brokers notified.');
+            }}
+          />
+        )}
+        {last && <span style={{ fontSize: 12, opacity: 0.8 }}>{last}</span>}
+      </div>
+    </Panel>
+  );
+}
