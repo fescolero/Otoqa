@@ -853,3 +853,71 @@ describe('offboarding (spec §7)', () => {
     expect(list.linkedCarrierOffboarding).toBeUndefined();
   });
 });
+
+describe('purge robustness (review findings)', () => {
+  it('dueForPurge is not starved by orgs without a purgeAt, and a purged org drops out of the range', async () => {
+    const t = setup();
+    // 30 ordinary orgs sort before any numeric purgeAt on the index.
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let i = 0; i < 30; i++) {
+        await ctx.db.insert('organizations', {
+          name: `Filler ${i}`,
+          workosOrgId: `org_filler_${i}`,
+          orgType: 'CARRIER',
+          billingEmail: 'b@t.co',
+          billingAddress: { addressLine1: '1', city: 'C', state: 'S', zip: 'Z', country: 'US' },
+          subscriptionPlan: 'E',
+          subscriptionStatus: 'Active',
+          billingCycle: 'Annual',
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+    const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    const now = Date.now();
+    await t.run((ctx) => ctx.db.patch(orgId, { offboardingStartedAt: now - 20 * 86400000, purgeAt: now - 1000 }));
+
+    const due = await t.query(internal.entityDocuments.dueForPurge, { now });
+    expect(due.map((d) => d.organizationId)).toEqual([orgId]);
+
+    await t.mutation(internal.entityDocuments.markPurged, { organizationId: orgId });
+    const org = await t.run((ctx) => ctx.db.get(orgId));
+    expect(org?.purgeAt).toBeUndefined();
+    expect(await t.query(internal.entityDocuments.dueForPurge, { now: Date.now() })).toHaveLength(0);
+  });
+
+  it('purgeOrgRows reports legacy-prefix keys and deletes Convex-storage blobs from load documents', async () => {
+    const t = setup();
+    const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    const storageId = await t.run((ctx) => ctx.storage.store(new Blob(['legacy'])));
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const customerId = await ctx.db.insert('customers', {
+        name: 'Cust', companyType: 'Shipper', status: 'Active', addressLine1: '1', city: 'C', state: 'S', zip: 'Z',
+        country: 'US', workosOrgId: CARRIER_ORG, createdBy: 'u', createdAt: now, updatedAt: now,
+      });
+      const loadId = await ctx.db.insert('loadInformation', {
+        internalId: 'L-1', orderNumber: 'O-1', status: 'Assigned', trackingStatus: 'In Transit', customerId,
+        fleet: 'Main', units: 'Pallets', workosOrgId: CARRIER_ORG, createdBy: 'u', createdAt: now, updatedAt: now,
+      });
+      await ctx.db.insert('loadDocuments', {
+        loadId, workosOrgId: CARRIER_ORG, type: 'POD', uploadedBy: 'driver:x', uploadedAt: now,
+        externalUrl: 'https://pub-abc.r2.dev/pod-photos/legacy-1.jpg',
+      });
+      await ctx.db.insert('loadDocuments', {
+        loadId, workosOrgId: CARRIER_ORG, type: 'Other', uploadedBy: 'u', uploadedAt: now, storageId,
+      });
+      await ctx.db.insert('loadDocuments', {
+        loadId, workosOrgId: CARRIER_ORG, type: 'POD', uploadedBy: 'driver:x', uploadedAt: now,
+        externalKey: `orgs/${CARRIER_ORG}/loads/${loadId}/POD/1-a-b.jpg`, // inside prefix → prefix delete covers it
+      });
+    });
+
+    const r = await t.mutation(internal.entityDocuments.purgeOrgRows, { organizationId: orgId });
+    expect(r.deleted).toBe(3);
+    expect(r.extraKeys).toEqual(['pod-photos/legacy-1.jpg']);
+    expect(await t.run((ctx) => ctx.storage.getUrl(storageId))).toBeNull();
+  });
+});

@@ -87,6 +87,14 @@ export const finalizeUpload = action({
   },
   returns: v.object({ documentId: v.id('loadDocuments') }),
   handler: async (ctx, args): Promise<{ documentId: Id<'loadDocuments'> }> => {
+    // Ownership first: the key must be under a load the caller's org owns
+    // and match the load/type being recorded. No storage call before this.
+    const owned: { loadId: Id<'loadInformation'>; orgId: string; type: string } = await ctx.runQuery(
+      internal.loadDocuments.assertWebUploadKey,
+      { key: args.key },
+    );
+    if (owned.loadId !== args.loadId || owned.type !== args.type) throw new ConvexError('Invalid document key');
+
     const head = await headObject(args.key);
     if (!head) throw new ConvexError('Upload not found in storage. Please try again.');
     const contentType = (head.contentType ?? '').toLowerCase();
@@ -114,10 +122,10 @@ export const finalizeUpload = action({
 export const cancelUpload = action({
   args: { key: v.string() },
   returns: v.null(),
-  handler: async (_ctx, args): Promise<null> => {
-    // Only ever a key we presigned under the caller's org prefix could
-    // have been written with it; deleting a missing key is a no-op.
-    if (!args.key.startsWith('orgs/')) throw new ConvexError('Invalid key');
+  handler: async (ctx, args): Promise<null> => {
+    // Same ownership rule as finalize — an unauthenticated or cross-org
+    // caller must not be able to delete anyone's object.
+    await ctx.runQuery(internal.loadDocuments.assertWebUploadKey, { key: args.key });
     try {
       await deleteObjectByKey(args.key);
     } catch (e) {

@@ -288,10 +288,13 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
       });
     }
     if (docs.canEdit) {
+      // Only singleton types supersede on upload; multi-document types
+      // (drug screens…) keep every active row, so the verb is "Add another".
+      const replaces = !!r.ownDoc && r.type.singleton;
       actions.push({
-        label: r.ownDoc ? 'Replace' : r.source === 'shared' ? 'Add our own' : 'Upload',
+        label: replaces ? 'Replace' : r.ownDoc ? 'Add another' : r.source === 'shared' ? 'Add our own' : 'Upload',
         icon: 'upload',
-        onClick: () => setUpload({ typeKey: r.type.key, replacingName: r.ownDoc ? r.type.name : undefined }),
+        onClick: () => setUpload({ typeKey: r.type.key, replacingName: replaces ? r.type.name : undefined }),
       });
       if (r.ownDoc) actions.push({ label: 'Archive', icon: 'archive', danger: true, onClick: () => void onArchive(r) });
     }

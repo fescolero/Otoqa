@@ -46,6 +46,7 @@ import {
   MAX_DOCUMENT_BYTES,
   buildEntityDocumentKey,
   isStoredContentType,
+  keyFromExternalUrl,
   sanitizeFilename,
 } from './lib/r2';
 import { parseDateString } from './_helpers/dateUtils';
@@ -1023,9 +1024,11 @@ export const dueForPurge = internalQuery({
     v.object({ organizationId: v.id('organizations'), workosOrgId: v.optional(v.string()), name: v.string() }),
   ),
   handler: async (ctx, args) => {
+    // Convex orders `undefined` before every number, so a bare `lte` would
+    // spend the page on orgs that have no purgeAt at all. Bound below too.
     const rows = await ctx.db
       .query('organizations')
-      .withIndex('by_purgeAt', (q) => q.lte('purgeAt', args.now))
+      .withIndex('by_purgeAt', (q) => q.gte('purgeAt', 1).lte('purgeAt', args.now))
       .take(25);
     return rows
       .filter((o) => o.purgeAt !== undefined && o.offboardingStartedAt && !o.purgedAt)
@@ -1035,15 +1038,21 @@ export const dueForPurge = internalQuery({
 
 const PURGE_BATCH = 200;
 
-/** Delete one batch of the org's document rows. Returns done=true when
- *  nothing is left. */
+/**
+ * Delete one batch of the org's document rows. Returns done=true when
+ * nothing is left, plus any object keys that live OUTSIDE the org prefix
+ * (legacy `pod-photos/` / `load-documents/` rows) so the action can delete
+ * them too; Convex `_storage` blobs are deleted here directly.
+ */
 export const purgeOrgRows = internalMutation({
   args: { organizationId: v.id('organizations') },
-  returns: v.object({ deleted: v.number(), done: v.boolean() }),
+  returns: v.object({ deleted: v.number(), done: v.boolean(), extraKeys: v.array(v.string()) }),
   handler: async (ctx, args) => {
     const org = await ctx.db.get(args.organizationId);
-    if (!org?.workosOrgId) return { deleted: 0, done: true };
+    if (!org?.workosOrgId) return { deleted: 0, done: true, extraKeys: [] };
     const orgId = org.workosOrgId;
+    const prefix = `orgs/${orgId}/`;
+    const extraKeys: string[] = [];
     let deleted = 0;
 
     const docs = await ctx.db
@@ -1051,10 +1060,11 @@ export const purgeOrgRows = internalMutation({
       .withIndex('by_entity', (q) => q.eq('workosOrgId', orgId))
       .take(PURGE_BATCH);
     for (const d of docs) {
+      if (d.externalKey && !d.externalKey.startsWith(prefix)) extraKeys.push(d.externalKey);
       await ctx.db.delete(d._id);
       deleted++;
     }
-    if (deleted >= PURGE_BATCH) return { deleted, done: false };
+    if (deleted >= PURGE_BATCH) return { deleted, done: false, extraKeys };
 
     const types = await ctx.db
       .query('documentTypes')
@@ -1064,17 +1074,20 @@ export const purgeOrgRows = internalMutation({
       await ctx.db.delete(t._id);
       deleted++;
     }
-    if (deleted >= PURGE_BATCH) return { deleted, done: false };
+    if (deleted >= PURGE_BATCH) return { deleted, done: false, extraKeys };
 
     const loadDocs = await ctx.db
       .query('loadDocuments')
       .withIndex('by_org', (q) => q.eq('workosOrgId', orgId))
       .take(PURGE_BATCH - deleted);
     for (const d of loadDocs) {
+      if (d.storageId) await ctx.storage.delete(d.storageId);
+      const key = d.externalKey ?? (d.externalUrl ? keyFromExternalUrl(d.externalUrl) : null);
+      if (key && !key.startsWith(prefix)) extraKeys.push(key);
       await ctx.db.delete(d._id);
       deleted++;
     }
-    return { deleted, done: deleted < PURGE_BATCH };
+    return { deleted, done: deleted < PURGE_BATCH, extraKeys };
   },
 });
 
@@ -1087,6 +1100,7 @@ export const markPurged = internalMutation({
     const now = Date.now();
     await ctx.db.patch(args.organizationId, {
       purgedAt: now,
+      purgeAt: undefined, // leave the by_purgeAt range for orgs still due
       isDeleted: true,
       deletedAt: org.deletedAt ?? now,
       deletedBy: org.deletedBy ?? 'platform:offboarding-purge',

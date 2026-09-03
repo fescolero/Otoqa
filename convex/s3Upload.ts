@@ -14,7 +14,7 @@ import {
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { keyFromExternalUrl } from './lib/r2';
+import { keyFromExternalUrl, metadataToHeaders } from './lib/r2';
 import type { Id } from './_generated/dataModel';
 
 // ============================================
@@ -333,7 +333,7 @@ export const getLoadDocumentUploadUrl = action({
       throw new ConvexError('Not authenticated');
     }
 
-    const { client, bucket, r2AccountId } = createS3Client();
+    const { bucket, r2AccountId } = createS3Client();
 
     // Org comes from the load row, never from the client — the key's
     // org prefix is what per-customer export/deletion trusts.
@@ -366,35 +366,14 @@ export const getLoadDocumentUploadUrl = action({
       metadata['accident-kind'] = args.accidentKind.trim();
     }
 
-    const command = new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      ContentType: args.contentType ?? 'image/jpeg',
-      Metadata: metadata,
+    // Signed x-amz-meta-* headers (never hoisted to the query string) —
+    // the one presign contract every document path shares.
+    const uploadUrl = await presignPutWithMetadata({
+      key,
+      contentType: args.contentType ?? 'image/jpeg',
+      metadata,
     });
-
-    // Keep the x-amz-meta-* headers in the SIGNED headers instead of
-    // letting the presigner hoist them into the query string. The mobile
-    // client echoes them as request headers on PUT (metadataHeaders
-    // below) — if they're hoisted, the echoed headers are unsigned
-    // x-amz-* headers, which S3/R2 rejects. Signing them restores the
-    // original contract: client must send them verbatim or gets a 403.
-    const unhoistableHeaders = new Set(
-      Object.keys(metadata).map((k) => `x-amz-meta-${k}`),
-    );
-
-    const uploadUrl = await getSignedUrl(client, command, {
-      expiresIn: 300,
-      unhoistableHeaders,
-    });
-
-    // Translate the metadata map into the header names the client must
-    // send back on PUT. S3 requires each key to be prefixed with
-    // `x-amz-meta-` when transmitted.
-    const metadataHeaders: Record<string, string> = {};
-    for (const [k, v] of Object.entries(metadata)) {
-      metadataHeaders[`x-amz-meta-${k}`] = v;
-    }
+    const metadataHeaders = metadataToHeaders(metadata);
 
     const fileUrl = buildFileUrl(key, r2AccountId, bucket);
 

@@ -159,3 +159,33 @@ describe('web upload path', () => {
     expect(await asEditor.query(api.loadDocuments.listForLoad, { loadId })).toHaveLength(0);
   });
 });
+
+describe('assertWebUploadKey (ownership before any storage side effect)', () => {
+  it('accepts only a key under a load the caller org owns, for loads:edit callers', async () => {
+    const t = convexTest(schema);
+    const loadId = await t.run((ctx) => insertLoad(ctx));
+    const good = `orgs/${ORG}/loads/${loadId}/POD/1-abc-pod.pdf`;
+
+    const ok = await t.withIdentity(EDITOR as never).query(internal.loadDocuments.assertWebUploadKey, { key: good });
+    expect(ok).toEqual({ loadId, orgId: ORG, type: 'POD' });
+
+    // Unauthenticated, wrong org, viewer, foreign key, malformed key — all refused.
+    await expect(t.query(internal.loadDocuments.assertWebUploadKey, { key: good })).rejects.toThrow();
+    await expect(
+      t.withIdentity(OUTSIDER as never).query(internal.loadDocuments.assertWebUploadKey, { key: good }),
+    ).rejects.toThrow(/Invalid document key/);
+    await expect(
+      t.withIdentity(VIEWER as never).query(internal.loadDocuments.assertWebUploadKey, { key: good }),
+    ).rejects.toThrow(/loads:edit/);
+    await expect(
+      t.withIdentity(EDITOR as never).query(internal.loadDocuments.assertWebUploadKey, {
+        key: `orgs/${OTHER_ORG}/loads/${loadId}/POD/x.pdf`,
+      }),
+    ).rejects.toThrow(/Invalid document key/);
+    await expect(
+      t.withIdentity(EDITOR as never).query(internal.loadDocuments.assertWebUploadKey, {
+        key: `orgs/${ORG}/drivers/${loadId}/cdl/x.pdf`,
+      }),
+    ).rejects.toThrow(/Invalid document key/);
+  });
+});

@@ -63,6 +63,30 @@ export const resolveLoadForWebUpload = internalQuery({
 });
 
 /**
+ * Ownership check for a client-supplied object key on the web load path.
+ * Parses `orgs/{orgId}/loads/{loadId}/{type}/…`, requires the caller to be
+ * a loads:edit member of THAT org, and requires the load to exist there.
+ * Runs before any HEAD / DELETE so an unauthenticated or cross-org caller
+ * can neither probe nor delete another org's objects.
+ */
+export const assertWebUploadKey = internalQuery({
+  args: { key: v.string() },
+  returns: v.object({ loadId: v.id('loadInformation'), orgId: v.string(), type: v.string() }),
+  handler: async (ctx, args) => {
+    const m = /^orgs\/([^/]+)\/loads\/([^/]+)\/([^/]+)\/[^/]+$/.exec(args.key);
+    if (!m) throw new ConvexError('Invalid document key');
+    const [, orgId, rawLoadId, type] = m;
+    const callerOrgId = await requireCallerOrgId(ctx);
+    if (callerOrgId !== orgId) throw new ConvexError('Invalid document key');
+    await assertOrgPermission(ctx, orgId, 'loads:edit');
+    const loadId = ctx.db.normalizeId('loadInformation', rawLoadId);
+    const load = loadId ? await ctx.db.get(loadId) : null;
+    if (!load || !loadId || load.workosOrgId !== orgId) throw new ConvexError('Invalid document key');
+    return { loadId, orgId, type };
+  },
+});
+
+/**
  * Web/ops upload — step 3 (called by loadDocumentsWeb.finalizeUpload after
  * the object was HEAD-verified). Stores the R2 key only — never a URL
  * (documents-storage-spec.md §1). The key MUST sit under the load's own

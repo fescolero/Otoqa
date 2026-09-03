@@ -7,7 +7,9 @@
  * passed and that is not yet `purgedAt`:
  *   1. delete every object under `orgs/{workosOrgId}/` (paged, bulk),
  *   2. delete its entityDocuments / documentTypes / loadDocuments rows in
- *      bounded batches,
+ *      bounded batches — each batch also deletes the Convex `_storage`
+ *      blobs and reports legacy-prefix R2 keys its rows referenced, which
+ *      are deleted here,
  *   3. stamp `purgedAt` and soft-delete the org, with a platform audit
  *      entry.
  *
@@ -49,10 +51,13 @@ export const purgeDueOrganizations = internalAction({
       // 2. Rows, in batches until the mutation reports nothing left.
       let done = false;
       while (!done) {
-        const r: { deleted: number; done: boolean } = await ctx.runMutation(internal.entityDocuments.purgeOrgRows, {
-          organizationId: org.organizationId,
-        });
+        const r: { deleted: number; done: boolean; extraKeys: string[] } = await ctx.runMutation(
+          internal.entityDocuments.purgeOrgRows,
+          { organizationId: org.organizationId },
+        );
         rowsDeleted += r.deleted;
+        // Legacy-prefix objects referenced by the deleted rows.
+        if (r.extraKeys.length > 0) objectsDeleted += await deleteObjectsByKeys(r.extraKeys);
         done = r.done;
       }
 
