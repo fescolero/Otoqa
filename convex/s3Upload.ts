@@ -333,8 +333,6 @@ export const getLoadDocumentUploadUrl = action({
       throw new ConvexError('Not authenticated');
     }
 
-    const { bucket, r2AccountId } = createS3Client();
-
     // Org comes from the load row, never from the client — the key's
     // org prefix is what per-customer export/deletion trusts.
     const orgSegment = await resolveOrgSegment(ctx, args.loadId);
@@ -375,7 +373,9 @@ export const getLoadDocumentUploadUrl = action({
     });
     const metadataHeaders = metadataToHeaders(metadata);
 
-    const fileUrl = buildFileUrl(key, r2AccountId, bucket);
+    // presignPutWithMetadata already validated the env; the legacy
+    // fileUrl only needs the bucket/account names, not a second client.
+    const fileUrl = buildFileUrl(key, process.env.R2_ACCOUNT_ID, process.env.S3_BUCKET ?? '');
 
     return { uploadUrl, fileUrl, key, metadataHeaders };
   },

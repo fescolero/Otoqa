@@ -888,7 +888,7 @@ describe('purge robustness (review findings)', () => {
     expect(await t.query(internal.entityDocuments.dueForPurge, { now: Date.now() })).toHaveLength(0);
   });
 
-  it('purgeOrgRows reports legacy-prefix keys and deletes Convex-storage blobs from load documents', async () => {
+  it('legacy-prefix keys are listed for deletion before rows go; purgeOrgRows deletes Convex-storage blobs', async () => {
     const t = setup();
     const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
     const storageId = await t.run((ctx) => ctx.storage.store(new Blob(['legacy'])));
@@ -915,9 +915,14 @@ describe('purge robustness (review findings)', () => {
       });
     });
 
+    const legacy = await t.query(internal.entityDocuments.legacyLoadKeysForOrg, { organizationId: orgId });
+    expect(legacy.keys).toEqual(['pod-photos/legacy-1.jpg']); // in-prefix key is covered by the prefix delete
+    expect(legacy.nextCursor).toBeNull();
+
     const r = await t.mutation(internal.entityDocuments.purgeOrgRows, { organizationId: orgId });
     expect(r.deleted).toBe(3);
-    expect(r.extraKeys).toEqual(['pod-photos/legacy-1.jpg']);
     expect(await t.run((ctx) => ctx.storage.getUrl(storageId))).toBeNull();
+    // Rows gone → nothing left to list; a re-run is a no-op.
+    expect((await t.query(internal.entityDocuments.legacyLoadKeysForOrg, { organizationId: orgId })).keys).toEqual([]);
   });
 });

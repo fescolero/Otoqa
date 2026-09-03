@@ -6,11 +6,11 @@
  * Runs daily (crons.ts). For every organization whose `purgeAt` has
  * passed and that is not yet `purgedAt`:
  *   1. delete every object under `orgs/{workosOrgId}/` (paged, bulk),
- *   2. delete its entityDocuments / documentTypes / loadDocuments rows in
- *      bounded batches — each batch also deletes the Convex `_storage`
- *      blobs and reports legacy-prefix R2 keys its rows referenced, which
- *      are deleted here,
- *   3. stamp `purgedAt` and soft-delete the org, with a platform audit
+ *   2. delete legacy-prefix R2 objects its load-document rows reference
+ *      (`pod-photos/`, `load-documents/`) — bytes before rows,
+ *   3. delete its entityDocuments / documentTypes / loadDocuments rows in
+ *      bounded batches (Convex `_storage` blobs go with their rows),
+ *   4. stamp `purgedAt` and soft-delete the org, with a platform audit
  *      entry.
  *
  * This is the ONLY automated physical deletion in the documents system.
@@ -48,20 +48,30 @@ export const purgeDueOrganizations = internalAction({
         } while (token);
       }
 
-      // 2. Rows, in batches until the mutation reports nothing left.
+      // 2. Legacy-prefix objects referenced by load-document rows — deleted
+      //    BEFORE the rows so a failure here leaves the rows (re-listed
+      //    next run), never unreferenced bytes.
+      let cursor: string | null = null;
+      do {
+        const page: { keys: string[]; nextCursor: string | null } = await ctx.runQuery(
+          internal.entityDocuments.legacyLoadKeysForOrg,
+          { organizationId: org.organizationId, cursor: cursor ?? undefined },
+        );
+        if (page.keys.length > 0) objectsDeleted += await deleteObjectsByKeys(page.keys);
+        cursor = page.nextCursor;
+      } while (cursor);
+
+      // 3. Rows, in batches until the mutation reports nothing left.
       let done = false;
       while (!done) {
-        const r: { deleted: number; done: boolean; extraKeys: string[] } = await ctx.runMutation(
-          internal.entityDocuments.purgeOrgRows,
-          { organizationId: org.organizationId },
-        );
+        const r: { deleted: number; done: boolean } = await ctx.runMutation(internal.entityDocuments.purgeOrgRows, {
+          organizationId: org.organizationId,
+        });
         rowsDeleted += r.deleted;
-        // Legacy-prefix objects referenced by the deleted rows.
-        if (r.extraKeys.length > 0) objectsDeleted += await deleteObjectsByKeys(r.extraKeys);
         done = r.done;
       }
 
-      // 3. Stamp.
+      // 4. Stamp.
       await ctx.runMutation(internal.entityDocuments.markPurged, { organizationId: org.organizationId });
       purged++;
       console.log(`[offboardingPurge] purged ${org.name} (${org.workosOrgId ?? org.organizationId})`);

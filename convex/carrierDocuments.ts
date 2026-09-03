@@ -16,7 +16,7 @@ import { action } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
 import { buildEntityDocumentMetadata } from './lib/r2';
-import { copyObject, deleteObjectByKey, headObject } from './s3Upload';
+import { copyObject, headObject } from './s3Upload';
 import {
   cancelEntityUpload,
   finalizeEntityUpload,
@@ -128,10 +128,9 @@ export const saveSharedCopy = action({
         note: `Saved copy from ${src.carrierName} before they left the platform`,
       });
     } catch (e) {
-      // The copy may already sit under the broker's prefix with no row to
-      // reclaim it (the sweep only sees pending rows) — delete it here.
-      await deleteObjectByKey(pending.key).catch(() => undefined);
-      await ctx.runMutation(internal.entityDocuments.discardPending, { docId: pending.docId }).catch(() => undefined);
+      // Same discard-then-delete as a cancelled upload: drop the pending
+      // row and the object the copy may already have written.
+      await cancelEntityUpload(ctx, pending.docId).catch(() => undefined);
       throw e;
     }
     return { docId: pending.docId };
