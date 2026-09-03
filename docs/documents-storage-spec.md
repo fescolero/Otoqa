@@ -1,25 +1,32 @@
 # Documents & R2 storage — contract and product rules
 
-Status: agreed design, not yet built. Referenced from `convex/s3Upload.ts`
-(which pointed at a `docs/r2-storage.md` that never existed).
+Status: agreed design, reviewed against the codebase, not yet built.
+Referenced from `convex/s3Upload.ts` (which pointed at a
+`docs/r2-storage.md` that never existed).
 
-This document covers three things:
+This document covers:
 
 1. The R2 bucket contract every document path must follow.
 2. The data model for entity documents (drivers, carriers, organizations).
-3. The product rules for status, replacement, sharing, and offboarding.
+3. Status computation and the one place it lives.
+4. Replacement and archive rules.
+5. Driver rules. 6. Carrier rules. 7. Offboarding.
+8. Access, permissions, audit. 9. Cleanup. 10. Code shape. 11. Testing.
+12. Phases.
 
 Load documents (`loadDocuments`, driver-captured POD/receipts/etc.) already
-follow §1 and are unchanged by this spec except where noted in §6.
+follow §1 and are unchanged except where §9 says otherwise.
 
 ---
 
 ## 1. R2 bucket contract
 
-One private bucket, accessed through the S3 API. Credentials live only in
-Convex env (`S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`,
-`R2_ACCOUNT_ID`). The web app never holds bucket credentials; every upload
-and download is a short-lived presigned URL minted by a Convex action.
+One private bucket per Convex deployment (dev, preview, prod each get
+their own bucket and CORS rule; never point a dev deployment at the prod
+bucket). Accessed through the S3 API. Credentials live only in Convex env
+(`S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`).
+The web app never holds bucket credentials; every upload and download is
+a short-lived presigned URL minted by a Convex action.
 
 GPS and audit-log archives use a separate AWS bucket with separate
 credentials (`convex/gpsArchive.ts`, `convex/auditLogArchive.ts`). Out of
@@ -59,23 +66,28 @@ legacy field kept for pre-migration rows; do not add it anywhere else.
 ### Reads
 
 Consumers exchange a document id for a presigned GET that expires in
-15 minutes. The access check lives in an internal query next to the table
-and fails closed. No public bucket, no public URLs.
+15 minutes. The access check is `canAccessDocument` (§8) and fails closed.
+Downloads (as opposed to previews) presign with
+`ResponseContentDisposition: attachment` so a file is never rendered as a
+page. No public bucket, no public URLs.
 
 ### Browser uploads need CORS
 
-Mobile presigned PUTs bypass CORS; browser PUTs do not. The bucket needs a
-CORS rule for each web origin allowing `PUT`, the `Content-Type` header,
-and every `x-amz-meta-*` header we sign, and exposing `ETag`. This is
-bucket configuration and must be applied to every environment before the
-web upload path is enabled.
+Mobile presigned PUTs bypass CORS; browser PUTs do not. Each bucket needs
+a CORS rule listing the web origins for that deployment (local dev, the
+preview domain, prod) allowing `PUT`, the `Content-Type` header, and every
+`x-amz-meta-*` header we sign, and exposing `ETag`. Confirm whether R2
+accepts a wildcard origin for Vercel preview deployments; if not, previews
+use a fixed preview domain. This is bucket configuration and must be
+applied before the web upload path is enabled in that environment.
 
 ### Upload flow (web)
 
 1. **Presign.** Client calls the entity's presign action with entity id,
-   document type, filename, content type, and size. The action:
-   - runs a mutation that validates access and the type, and inserts a
-     row in status `pending` (this yields the doc id for the key);
+   document type key, filename, content type, and size. The action:
+   - runs a mutation that checks permission (§8), validates the type
+     against the effective catalog (§2), and inserts a row in status
+     `pending` (this yields the doc id for the key);
    - builds the key and metadata, presigns a PUT (5 minutes);
    - returns `{docId, uploadUrl, metadataHeaders}`.
 2. **PUT.** Browser uploads directly to R2 with the signed headers.
@@ -83,62 +95,99 @@ web upload path is enabled.
    user-entered issue/expiration dates. The action does a `HEAD` on the
    object, rejects size over the limit or a content type outside the
    allowlist (deleting the object), then runs a mutation that activates
-   the row, archives the previous active row for singleton types, and
-   updates the mirror fields (§4, §5).
-4. **Sweep.** A cron deletes `pending` rows older than one hour and their
-   objects if any. This is the orphan story for a closed tab.
+   the row, archives the previous active row for singleton types, updates
+   the mirror fields (§5, §6), recomputes the entity's missing-types
+   summary (§3), and writes an audit entry (§8). Finalize is idempotent:
+   a row that is already `active` returns success without side effects.
+4. **Sweep.** A cron registered through the `job()` wrapper in
+   `convex/crons.ts` deletes `pending` rows older than one hour and their
+   objects if any. This is the orphan story for a closed tab. `pending`
+   rows are excluded from every listing and from status.
 
-Limits: 25 MB per file. Allowed types: PDF, JPEG, PNG, HEIC, WebP.
+Limits: 25 MB per file. Web allowlist: PDF, JPEG, PNG, WebP. HEIC is not
+accepted from the web because the preview modal cannot render it and
+nothing in the web app converts it.
 
 ### Deletion
 
-Rows are archived, not deleted (§3). Physical deletion happens only through
-org purge (§5.4) and the pending sweep. The existing pattern for load
-documents (row first, then a scheduled `DeleteObject`) is kept for purge.
+Rows are archived, not deleted (§4). Physical deletion happens only through
+org purge (§7) and the pending sweep. The existing pattern (row first, then
+a scheduled `DeleteObject`) is kept for purge.
+
+Malware scanning is out of scope and recorded as accepted debt. The
+content-type allowlist, private bucket, and attachment disposition are the
+mitigations.
 
 ---
 
 ## 2. Data model
 
-### `documentTypes` — per-org catalog
+### Document types: code defaults plus per-org overrides
 
-Managed on a Settings › Documents page. Each org gets the system defaults
-seeded on first use and can add its own.
+There is **no per-org seeding**. Convex has no org-creation hook (orgs are
+inserted in four places in `carrierPartnerships.ts` alone) and queries
+cannot write, so a "seed on first read" design would either race or never
+run. Instead:
+
+- **System types** are code constants in
+  `convex/lib/documentTypeDefaults.ts`, keyed by a stable `key`. This is
+  where `mirrorField` and `singleton` live; they are not editable by orgs.
+- **`documentTypes` table** holds only per-org overrides of a system type
+  (by `key`) and per-org custom types.
+- The **effective catalog** for an org is defaults merged with its rows,
+  computed in a query. Changing a default in code updates every org.
 
 | Field | Notes |
 |---|---|
 | `workosOrgId` | owner org |
-| `key` | stable slug, e.g. `cdl`, `medical`, `coi`, `w9` |
+| `key` | stable slug. Matches a system key for an override; unique custom slug otherwise |
 | `name` | display name |
-| `entity` | `driver` \| `carrier` \| `organization` |
+| `entity` | `driver` \| `carrier` \| `organization` (immutable once set) |
 | `expires` | boolean. If false the row has an issue date only |
 | `issueDateRequired` | boolean |
 | `uploadRequired` | boolean. If false a dated entry without a file is allowed |
-| `singleton` | boolean. One active per entity (CDL, medical) vs many (drug screens) |
-| `sharedByDefault` | `organization` entity only. See §5.2 |
-| `mirrorField` | system types only: which row field mirrors the expiry (§4.4, §5.3) |
-| `isSystem` | seeded types cannot be deleted, only hidden |
-| `sortOrder`, `hiddenAt` | |
+| `sharedByDefault` | `organization` entity only. See §6.2 |
+| `sortOrder`, `hiddenAt` | system types can be hidden, never deleted |
 
-Seeded defaults:
+Custom types can be deleted only when no `entityDocuments` row references
+them; otherwise they can only be hidden.
 
-- driver: CDL (mirror `licenseExpiration`), Medical certificate (mirror
-  `medicalExpiration`), Badge (mirror `badgeExpiration`), TWIC (mirror
-  `twicExpiration`), Drug screen (no expiry), I-9 (no expiry), Hazmat
-  endorsement, Background check.
-- carrier: Certificate of insurance (mirror `insuranceExpiration`), W-9,
-  Operating authority, Owner-driver CDL (mirror
-  `ownerDriverLicenseExpiration`), Carrier agreement.
+Seeded system defaults:
+
+- driver: CDL (mirror `licenseExpiration`, singleton), Medical certificate
+  (mirror `medicalExpiration`, singleton), Badge (mirror `badgeExpiration`,
+  singleton), TWIC (mirror `twicExpiration`, singleton), Drug screen (no
+  expiry), I-9 (no expiry), Hazmat endorsement, Background check.
+- carrier: Certificate of insurance (mirror `insuranceExpiration`,
+  singleton), W-9, Operating authority, Owner-driver CDL (mirror
+  `ownerDriverLicenseExpiration`, singleton), Carrier agreement.
 - organization: Certificate of insurance, W-9, Operating authority, all
   `sharedByDefault`.
+
+Operating authority as a document is the uploaded letter. It is separate
+from the live FMCSA authority check on the partnership
+(`authorityVerification`), which stays as is.
+
+### Changing a type's flags after documents exist
+
+| Change | Effect on existing active documents |
+|---|---|
+| `expires` false → true | Rows without an expiry show **Needs date** until edited |
+| `expires` true → false | Expiry is ignored; status becomes **On file** |
+| `uploadRequired` false → true | Rows without a file show **Missing** |
+| `uploadRequired` true → false | Dated rows without a file become valid entries |
+| hidden | Rows are kept but excluded from status and the missing summary |
+
+Every flag change recomputes the missing summary (§3) for affected
+entities in the same mutation, batched by entity type.
 
 ### `entityDocuments` — one table for all three entities
 
 | Field | Notes |
 |---|---|
 | `workosOrgId` | owning org (who entered it) |
-| `entity`, `entityId` | `driver`/driver id, `carrier`/partnership id, `organization`/org id |
-| `typeId` | `documentTypes` row |
+| `entity`, `entityId` | `driver`/driver id, `carrier`/partnership id, `organization`/org id. Referential integrity is enforced in mutations, not by the validator |
+| `typeKey` | effective catalog key |
 | `status` | `pending` \| `active` \| `archived` |
 | `externalKey`, `fileName`, `contentType`, `sizeBytes` | null when `uploadRequired` is false and no file was attached |
 | `issueDate`, `expirationDate` | `YYYY-MM-DD`, user-entered |
@@ -147,18 +196,54 @@ Seeded defaults:
 | `shared` | `organization` entity only; overrides `sharedByDefault` |
 
 Indexes: `by_entity` (`workosOrgId`, `entity`, `entityId`, `status`),
-`by_type` (`typeId`, `status`), `by_org_status`.
+`by_type` (`workosOrgId`, `typeKey`, `status`), `by_status_uploadedAt`
+(for the pending sweep).
 
 Shared carrier documents are **not** copied into the broker's org. They are
 read through a query that joins the linked carrier org's `organization`
-documents (§5.2). Copying happens only via "Save a copy" (§5.4).
+documents (§6.2). Copying happens only via "Save a copy" (§7).
 
-### Computed status per (entity, type)
+### Denormalized summary on the parent row
+
+The drivers list and the carrier list must not read every document to
+render a status column. Each parent row (`drivers`, `carrierPartnerships`)
+gets `missingDocTypeKeys: string[]`, rewritten whenever a document is
+activated or archived or a type flag changes. It is **time-independent**,
+so it never drifts. Time-dependent states (expired, expiring) continue to
+come from the mirror date fields, computed at read time with the caller's
+`todayDateStr` exactly as today. Never denormalize a time-dependent status.
+
+---
+
+## 3. Status: one computation, every surface
+
+Today the driver's document status is computed in four places from the
+four date fields: the Documents tab, the Overview documents section
+(`build-driver-details.tsx`), the driver page attention items (plus a
+hard-coded `count: 4` and "4 documents on file"), and the drivers list
+`needsAttention` count in `convex/drivers.ts`. The server helper
+`getDateStatus` returns **valid** when no date exists, so a driver with no
+medical date counts as fine today. The client tab duplicates the date
+parsing with slightly different thresholds. Left alone, these four would
+disagree with each other on day one.
+
+Fix: a single module `convex/_helpers/documentStatus.ts`, plain TypeScript
+importable by both Convex functions and the web app, exporting the status
+function and the 30/60-day thresholds. Every surface above is rewritten to
+use it and to read from `entityDocuments` plus the missing summary. The
+existing duplicated date helpers in the tab and in `build-driver-details`
+are deleted. `getDateStatus` is changed so an absent date is **missing**,
+not valid; the drivers list attention count will rise on day one as a
+result, which is the intended behavior.
+
+Status per (entity, type):
 
 | Situation | Status |
 |---|---|
 | No active row, never had one | **Missing** |
 | No active row, previous row archived | **Missing**, with the archived row's expiry shown and its own expired/expiring state as a sub-label |
+| Active row, `uploadRequired` and no file | **Missing** |
+| Active row, type expires, no date | **Needs date** |
 | Active row, type expires, date in the past | **Expired** |
 | Active row, type expires, ≤ 30 days | **Expiring** |
 | Active row, type expires, ≤ 60 days | **Warning** |
@@ -166,10 +251,11 @@ documents (§5.2). Copying happens only via "Save a copy" (§5.4).
 | Active row, type does not expire | **On file** |
 
 The summary strip (On file / Valid / Expiring / Expired) gains **Missing**.
+The Documents tab badge and the attention item counts become live.
 
 ---
 
-## 3. Replacement and archive
+## 4. Replacement and archive
 
 - A document is a file plus a user-entered date. The system never reads
   dates from the file.
@@ -182,14 +268,19 @@ The summary strip (On file / Valid / Expiring / Expired) gains **Missing**.
   where `uploadRequired` is true. It stays for date-only types.
 - Archived rows are retained. Compliance files are never hard-deleted by a
   user action.
+- Placeholder buttons with no handler (the current Upload buttons on
+  carriers and loads, the Export button on the archived card) are removed
+  in the same change that wires the real ones. No dead buttons ship.
 
 ---
 
-## 4. Driver rules
+## 5. Driver rules
 
 1. **Day one is Missing.** Existing drivers have dates but no files. They
    show Missing for every `uploadRequired` type until a file is uploaded.
-   No transitional status.
+   No transitional status. The CSV import and the create form still
+   collect dates; the UI copy there says the date does not count as a
+   document on file.
 2. **Driver row dates are mirrors.** `licenseExpiration`,
    `medicalExpiration`, `badgeExpiration`, `twicExpiration` are written by
    the document workflow, not edited directly on the Documents tab. They
@@ -198,29 +289,36 @@ The summary strip (On file / Valid / Expiring / Expired) gains **Missing**.
 3. **Archive without replacement keeps the stale mirror.** The driver row
    keeps its last known date; the Documents tab shows Missing with the
    archived expiry as context. If there was never a date, the mirror stays
-   empty. `licenseExpiration` therefore stays a required field.
-4. **Mirror mapping** lives on the system document type (`mirrorField`).
-5. **The carrier mobile app stops defaulting `licenseExpiration` to one
-   year out** when creating a driver. A fabricated date would present as a
-   real expiry.
+   empty.
+4. **`licenseExpiration` becomes optional in the schema.** Three code
+   paths fabricate a license expiry today: `carrierMobile.ts` (one year
+   out, twice) and `carrierPartnerships.ts` (`2030-12-31`, twice). All
+   four stop. Since the field is currently required, that needs
+   `v.optional(v.string())` plus a sweep of consumers (`drivers.ts`,
+   `driverMobile.ts`, `dispatchMobile.ts`, `carrierPartnerships.ts`, the
+   import mapping) to handle absence. The create form and import may keep
+   requiring a date for now; that is a product choice, not a schema one.
+5. **Mirror mapping** lives on the system document type (`mirrorField`).
 6. Driver-app read access to driver documents is out of scope for phase 1.
    Before enabling it, `resolveAuthenticatedDriver` must scope by org: it
    currently returns the first driver matching the phone across all orgs.
 
 ---
 
-## 5. Carrier rules
+## 6. Carrier rules
 
-### 5.1 Ownership follows who entered it
+### 6.1 Ownership follows who entered it
 
 - A broker's upload on a partnership is the broker's record. It lives under
   `orgs/{brokerOrgId}/carriers/{partnershipId}/` and is owned by the broker.
 - A carrier org's upload of its own documents is the carrier's record. It
   lives under `orgs/{carrierOrgId}/company/` as an `organization` document.
+  A broker's own compliance file uses the same entity kind under its own
+  org.
 - The same carrier partnered with several brokers may have a broker-owned
   copy per partnership. That is expected.
 
-### 5.2 Linking shares top-down
+### 6.2 Linking shares top-down
 
 - When a partnership has `carrierOrgId` set, the carrier org's
   `organization` documents whose type is `sharedByDefault` and whose
@@ -233,41 +331,78 @@ The summary strip (On file / Valid / Expiring / Expired) gains **Missing**.
 - The broker can always add its own record alongside. The tab shows both
   sources.
 - Unlinking removes the carrier-shared rows from the broker's view. The
-  broker's own records stay.
+  broker's own records stay. Whatever the broker had relied on from the
+  carrier reverts to the broker's own status immediately.
 
-### 5.3 Effective status and mirrors
+### 6.3 Effective status and mirrors
 
 - For a type present from both sources, the effective status uses the
   **latest expiry** across the broker's active row and the carrier's shared
   active row. The row that won is marked as the source.
 - `carrierPartnerships.insuranceExpiration` and
   `ownerDriverLicenseExpiration` are mirrors of the effective expiry,
-  recomputed whenever either side's active row changes. The existing
-  one-way sync from the driver row to `ownerDriverLicenseExpiration` stays.
-
-### 5.4 Offboarding and "Save a copy"
-
-- When an org signals it is leaving the platform, it enters an
-  `offboarding` state with `purgeAt = now + 14 days`. Data is retained in
-  full during that window in case they return.
-- Every broker linked to an offboarding carrier org is notified and sees a
-  **Save a copy** action on each carrier-shared row. Saving performs a
-  server-side object copy into the broker's partnership prefix and creates
-  a broker-owned `entityDocuments` row. "Save a copy" is not shown outside
-  the offboarding window.
-- At `purgeAt` a job deletes the org's `orgs/{orgId}/` prefix and its rows.
-  This is the only automated physical deletion. `convex/platform/support.ts`
-  has no storage purge today; this adds one.
+  recomputed whenever either side's active row changes or the link
+  changes. The existing one-way sync from the driver row to
+  `ownerDriverLicenseExpiration` stays.
 
 ---
 
-## 6. Cleanup that ships alongside
+## 7. Offboarding, retention, purge
+
+- `organizations` has soft-delete fields but no offboarding state. Add
+  `offboardingStartedAt` and `purgeAt`. A platform action starts or
+  cancels offboarding; `purgeAt = start + 14 days`. Data is retained in
+  full during the window.
+- Every broker linked to an offboarding carrier org is notified and sees a
+  **Save a copy** action on each carrier-shared row during the window
+  only. Saving performs a server-side `CopyObject` into the broker's
+  partnership prefix and creates a broker-owned `entityDocuments` row.
+- Before purge the org can export its own prefix (per-org zip). Regulatory
+  retention for driver qualification files outlives the platform
+  relationship, so the export is offered explicitly in the offboarding
+  flow rather than assumed.
+- At `purgeAt` a cron (via `job()`) deletes the org's `orgs/{orgId}/`
+  prefix and its `entityDocuments` and `loadDocuments` rows. This is the
+  only automated physical deletion. `convex/platform/support.ts` has no
+  storage purge today; this adds one.
+
+---
+
+## 8. Access, permissions, audit
+
+- **Permissions** use the existing slugs. Driver documents: `fleet:view`
+  to list and preview, `fleet:edit` to upload, archive, or edit dates.
+  Carrier partnership documents: the same slugs the carrier detail page
+  already gates on. Organization documents and the Settings › Documents
+  catalog: `settings:manage`. Sharing toggles: `settings:manage` on the
+  carrier org.
+- **One access function.** `canAccessDocument(ctx, doc, intent)` in
+  `convex/entityDocuments.ts` is the only place the rule lives and is used
+  by list queries, the signed-GET action, archive, and share changes. It
+  covers: owner-org member with the required permission; a broker org
+  member reading an `organization` document shared by a carrier org
+  linked to one of the broker's partnerships; and, later, a driver reading
+  their own. The current `getDocForAccess` for load documents checks org
+  membership only, not permission; it is aligned to the same function.
+- **Audit.** Every activate, archive, replace, date edit, and share change
+  writes through `logAudit` on the **parent** entity (`driver`,
+  `carrierPartnership`, `organization`) with new actions
+  `document_uploaded`, `document_replaced`, `document_archived`,
+  `document_dates_changed`, `document_share_changed`. The driver Activity
+  tab already reads the parent's audit log, so document events appear
+  there without extra UI. `AuditAction` and `AuditEntityType` are closed
+  unions and are extended accordingly.
+
+---
+
+## 9. Cleanup that ships alongside
 
 - Delete the unused `s3Upload.getUploadUrl` (client-chosen folder, outside
   the org prefix) and the deprecated `s3Upload.getPODUploadUrl`. Neither
   has a caller.
-- Stop the `stop.deliveryPhotos` dual-write in `driverMobile.ts` once the
-  load detail page's "has POD" check reads `loadDocuments` instead.
+- Switch the load detail "has POD" check to `loadDocuments` only (it
+  already reads both), then stop the `stop.deliveryPhotos` dual-write in
+  `driverMobile.ts`. Migration 009 already backfilled history.
 - Drop the `externalUrl` fallback from `loadDocuments.listForLoad`'s `url`
   field; consumers already fetch signed URLs on click.
 - Remove the unused `loadCarrierDocuments` table.
@@ -277,32 +412,60 @@ The summary strip (On file / Valid / Expiring / Expired) gains **Missing**.
 
 ---
 
-## 7. Shared code shape
+## 10. Code shape
 
 One small action per entity, sharing low-level helpers. No single generic
 presign action: the per-entity argument shapes and access rules differ, and
 the mobile client depends on the exact `getLoadDocumentUploadUrl` contract.
 
 ```
-convex/lib/r2.ts           key builders, metadata → headers, sanitize
-convex/s3Upload.ts         createS3Client, presignPut, presignGet, headObject, deleteObject, copyObject
-convex/documentTypes.ts    catalog CRUD + seeding
-convex/entityDocuments.ts  presign/finalize/archive/list per entity, status computation, mirrors
-convex/driverDocuments.ts  thin driver-specific actions (access rule: org member)
-convex/carrierDocuments.ts thin partnership + organization actions (access rules: broker org / carrier org, sharing join)
+convex/lib/r2.ts                   key builders, metadata → headers, sanitize
+convex/lib/documentTypeDefaults.ts system types (key, entity, flags, mirrorField, singleton)
+convex/_helpers/documentStatus.ts  status function + thresholds, shared with the web app
+convex/s3Upload.ts                 createS3Client, presignPut, presignGet, headObject, deleteObject, copyObject
+convex/documentTypes.ts            effective catalog query, override/custom CRUD
+convex/entityDocuments.ts          canAccessDocument, presign/finalize/archive/list, mirrors, missing summary
+convex/driverDocuments.ts          thin driver-specific actions
+convex/carrierDocuments.ts         thin partnership + organization actions, sharing join
 ```
+
+Actions live in `'use node'` files and call `internal.*` functions with
+explicit return type annotations. `s3Upload.ts` already documents the
+generated-API type cycle this avoids; new files follow the same pattern.
 
 ---
 
-## 8. Phases
+## 11. Testing
 
-1. **Drivers.** §1 contract, `documentTypes` + seeding, `entityDocuments`,
-   driver presign/finalize/archive, driver Documents tab wired (upload with
-   date, archive, Missing status, mirrors), Settings › Documents page
-   (list + edit flags). CORS applied.
+`convex-test` and vitest are in place. Required before each phase merges:
+
+- Unit tests for `documentStatus` covering every row of the §3 table,
+  the stale-mirror case, and the threshold boundaries.
+- Mutation tests for finalize (idempotency, singleton archive, mirror
+  write, missing-summary rewrite), archive without replacement, and each
+  type-flag transition in §2.
+- Access tests: same org with and without permission, other org, broker
+  reading shared vs unshared vs unlinked carrier documents, driver app.
+- Extend `s3Upload.presign.test.ts` to pin the new key layout and signed
+  metadata headers for each entity.
+- Component tests for the driver tab: Missing rendering, upload form
+  requiring the date, inline edit hidden for file-required types.
+
+---
+
+## 12. Phases
+
+1. **Drivers.** §1 contract, system defaults + overrides table,
+   `entityDocuments`, status module and the four-surface rewrite (§3),
+   `licenseExpiration` optional and fabricated dates removed (§5.4),
+   driver presign/finalize/archive, driver Documents tab wired (upload
+   with date, archive, Missing, mirrors, live counts), Settings ›
+   Documents page, audit actions, pending sweep cron. CORS applied to the
+   dev bucket first, then prod.
 2. **Carriers.** Partnership documents, organization documents, sharing
    join, per-document share toggle, effective status, insurance and
-   owner-driver mirrors, carrier Documents tab wired.
-3. **Loads + cleanup.** Load detail web upload via shared helpers; §6.
-4. **Offboarding.** `offboarding` state, notifications, Save a copy,
-   14-day purge job.
+   owner-driver mirrors, carrier Documents tab wired, missing summary on
+   partnerships.
+3. **Loads + cleanup.** Load detail web upload via shared helpers; §9.
+4. **Offboarding.** Org offboarding fields and platform action,
+   notifications, Save a copy, export, 14-day purge job.
