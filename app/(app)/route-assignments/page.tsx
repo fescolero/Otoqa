@@ -45,6 +45,7 @@ import {
 import { AutoAssignModal } from '@/components/route-assignments/auto-assign-modal';
 import { toast } from 'sonner';
 import type { CombinedAssignment } from '@/components/route-assignments/types';
+import { describeHolds, formatAgo } from '@/components/route-assignments/rotation-labels';
 
 // ─── helpers ────────────────────────────────────────────────────────────
 
@@ -201,6 +202,52 @@ function ScheduleCell({ row }: { row: Row }) {
   );
 }
 
+/**
+ * Rotation state of one rule's auto-assigned loads: what a re-sync would
+ * move now, else what the last one did. Templates have no such loads.
+ */
+function SyncCell({
+  row,
+  pending,
+}: {
+  row: Row;
+  pending?: { outOfSync: number; blocked: number };
+}) {
+  if (row.type !== 'external') {
+    return <span className="text-[12px] text-[var(--text-tertiary)]">—</span>;
+  }
+  if (pending && pending.outOfSync > 0) {
+    return (
+      <span className="text-[12px] text-foreground truncate" title="Upcoming loads still on a previous assignee">
+        <span className="font-medium" style={{ color: 'var(--accent)' }}>
+          {pending.outOfSync} to move
+        </span>
+        {pending.blocked > 0 && (
+          <span className="text-[var(--text-tertiary)]"> · {pending.blocked} held</span>
+        )}
+      </span>
+    );
+  }
+  const last = row.routeAssignmentData?.lastRotation;
+  if (!last) {
+    return <span className="text-[12px] text-[var(--text-tertiary)]">In sync</span>;
+  }
+  const holds = last.byReason.filter((r) => r.reason !== 'ALREADY_ON_TARGET');
+  const heldReal = holds.reduce((n, r) => n + r.count, 0);
+  return (
+    <span
+      className="text-[12px] truncate"
+      title={`Last re-sync ${formatAgo(last.at)}: ${last.moved} moved${heldReal > 0 ? `, held: ${describeHolds(holds)}` : ''}`}
+    >
+      <span style={{ color: heldReal > 0 ? '#A66800' : '#15803D' }}>
+        {heldReal > 0 ? '⚠' : '✓'} {last.moved} moved
+      </span>
+      {heldReal > 0 && <span className="text-[var(--text-tertiary)]"> · {heldReal} held</span>}
+      <span className="text-[var(--text-tertiary)]"> · {formatAgo(last.at)}</span>
+    </span>
+  );
+}
+
 function TypeCell({ type }: { type: 'external' | 'internal' }) {
   const accent = type === 'external' ? '#1A47E6' : '#7C3AED';
   const bg =
@@ -259,7 +306,7 @@ export default function RouteAssignmentsPage() {
   const [chipFilters, setChipFilters] = useState<FilterChipValue[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [visibleCols, setVisibleCols] = useState<Set<string>>(
-    new Set(['name', 'trigger', 'assignee', 'schedule', 'type', 'status']),
+    new Set(['name', 'trigger', 'assignee', 'schedule', 'sync', 'type', 'status']),
   );
 
   // Modals
@@ -268,6 +315,7 @@ export default function RouteAssignmentsPage() {
     NonNullable<CombinedAssignment['routeAssignmentData']> | null
   >(null);
   const [deleting, setDeleting] = useState<CombinedAssignment | null>(null);
+  const [confirmBulkResync, setConfirmBulkResync] = useState(false);
 
   // ── data ─────────────────────────────────────────────────────────────
   const routeAssignments = useQuery(
@@ -285,10 +333,24 @@ export default function RouteAssignmentsPage() {
     organizationId ? { workosOrgId: organizationId } : 'skip',
   );
 
+  // Rotation state for the org. `outOfSync` is what an org-wide re-sync
+  // would move right now — it drives the banner and its button, and drops
+  // to zero on its own once the re-sync has run. The settings row carries
+  // the last bulk outcome.
+  const orgRotation = useQuery(
+    api.routeAssignments.previewOrgRotation,
+    organizationId ? { workosOrgId: organizationId } : 'skip',
+  );
+  const autoAssignSettings = useQuery(
+    api.routeAssignments.getSettings,
+    organizationId ? { workosOrgId: organizationId } : 'skip',
+  );
+
   // Mutations
   const toggleRouteActive = useMutation(api.routeAssignments.toggleActive);
   const deleteRouteAssignment = useMutation(api.routeAssignments.remove);
   const rotateRouteLoads = useMutation(api.routeAssignments.rotateLoads);
+  const rotateAllLoads = useMutation(api.routeAssignments.rotateAllLoads);
   const toggleTemplateActive = useMutation(api.recurringLoads.toggleActive);
   const deleteTemplate = useMutation(api.recurringLoads.remove);
 
@@ -486,6 +548,18 @@ export default function RouteAssignmentsPage() {
       render: (r) => <ScheduleCell row={r} />,
     },
     {
+      key: 'sync',
+      label: 'Loads',
+      width: '150px', // 122 content fits "3 to move · 1 held" / "✓ 4 moved 2h ago"
+      sortable: false,
+      render: (r) => (
+        <SyncCell
+          row={r}
+          pending={orgRotation?.byRule.find((b) => b.routeId === r.id)}
+        />
+      ),
+    },
+    {
       key: 'type',
       label: 'Type',
       width: '110px', // 82 content fits "↗ External" chip (~85, truncates if needed)
@@ -599,6 +673,18 @@ export default function RouteAssignmentsPage() {
     setSelected([]);
   };
 
+  // ── bulk re-sync ────────────────────────────────────────────────────
+  const handleBulkResync = async () => {
+    if (!organizationId) return;
+    setConfirmBulkResync(false);
+    try {
+      await rotateAllLoads({ workosOrgId: organizationId });
+      toast.success('Re-syncing upcoming loads for every active rule');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to start re-sync');
+    }
+  };
+
   // ── delete confirm ──────────────────────────────────────────────────
   const handleDelete = async () => {
     if (!deleting) return;
@@ -636,6 +722,98 @@ export default function RouteAssignmentsPage() {
             </>
           }
         />
+
+        {/* Out-of-sync banner: rules whose upcoming auto-assigned loads
+            still sit on a previous assignee. Appears after a rotation is
+            saved without moving loads, and once a bulk re-sync has run it
+            turns into the outcome for a day so "did it work" is answerable
+            without the Convex logs. */}
+        {orgRotation && orgRotation.outOfSync > 0 && (
+          <div
+            className="shrink-0 flex items-center gap-2.5 px-6 py-2.5 border-b border-[var(--border-hairline)]"
+            style={{ background: 'var(--bg-sidebar-active)' }}
+          >
+            <span
+              aria-hidden
+              className="inline-flex items-center justify-center rounded-md shrink-0"
+              style={{ width: 24, height: 24, background: 'rgba(59,130,246,0.14)', color: 'var(--accent)' }}
+            >
+              <WIcon name="refresh" size={13} />
+            </span>
+            <div className="text-[12.5px] text-foreground">
+              <strong className="font-semibold">
+                {orgRotation.outOfSync} upcoming load{orgRotation.outOfSync === 1 ? '' : 's'} on{' '}
+                {orgRotation.rules} rule{orgRotation.rules === 1 ? '' : 's'}{' '}
+                {orgRotation.rules === 1 ? 'is' : 'are'} still on a previous assignee.
+              </strong>{' '}
+              <span className="text-[var(--text-secondary)]">
+                Re-sync moves them to each rule&apos;s current assignee. Loads in progress, past
+                pickup, or placed by a dispatcher are left alone.
+              </span>
+            </div>
+            <div className="flex-1" />
+            <WBtn size="sm" variant="primary" leading="refresh" onClick={() => setConfirmBulkResync(true)}>
+              Re-sync all
+            </WBtn>
+          </div>
+        )}
+        {orgRotation &&
+          orgRotation.outOfSync === 0 &&
+          autoAssignSettings?.lastBulkRotation &&
+          Date.now() - autoAssignSettings.lastBulkRotation.at < 24 * 60 * 60 * 1000 && (
+            <div
+              className="shrink-0 flex items-center gap-2.5 px-6 py-2.5 border-b border-[var(--border-hairline)]"
+              style={{
+                background:
+                  autoAssignSettings.lastBulkRotation.held > 0
+                    ? 'rgba(245,158,11,0.08)'
+                    : 'rgba(34,197,94,0.08)',
+              }}
+            >
+              <span
+                aria-hidden
+                className="inline-flex items-center justify-center rounded-md shrink-0"
+                style={{
+                  width: 24,
+                  height: 24,
+                  background:
+                    autoAssignSettings.lastBulkRotation.held > 0
+                      ? 'rgba(245,158,11,0.18)'
+                      : 'rgba(34,197,94,0.18)',
+                  color: autoAssignSettings.lastBulkRotation.held > 0 ? '#A66800' : '#15803D',
+                }}
+              >
+                <WIcon
+                  name={autoAssignSettings.lastBulkRotation.held > 0 ? 'circle-alert' : 'check-circle'}
+                  size={13}
+                />
+              </span>
+              <div className="text-[12.5px] text-foreground">
+                <strong className="font-semibold">
+                  Re-sync {formatAgo(autoAssignSettings.lastBulkRotation.at)}: moved{' '}
+                  {autoAssignSettings.lastBulkRotation.moved} load
+                  {autoAssignSettings.lastBulkRotation.moved === 1 ? '' : 's'} across{' '}
+                  {autoAssignSettings.lastBulkRotation.rules} rule
+                  {autoAssignSettings.lastBulkRotation.rules === 1 ? '' : 's'}.
+                </strong>{' '}
+                {autoAssignSettings.lastBulkRotation.held > 0 ? (
+                  <span className="text-[var(--text-secondary)]">
+                    {autoAssignSettings.lastBulkRotation.held} stayed put:{' '}
+                    {describeHolds(
+                      autoAssignSettings.lastBulkRotation.byReason.filter(
+                        (r) => r.reason !== 'ALREADY_ON_TARGET',
+                      ),
+                    ) || 'already on the current assignee'}
+                    . Open a rule for its own breakdown.
+                  </span>
+                ) : (
+                  <span className="text-[var(--text-secondary)]">
+                    Every upcoming auto-assigned load is on its rule&apos;s current assignee.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
         {/* Expiring-soon banner */}
         {counts.expiring > 0 && view !== 'expired' && view !== 'expiring' && (
@@ -832,6 +1010,26 @@ export default function RouteAssignmentsPage() {
             >
               Delete
             </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={confirmBulkResync} onOpenChange={setConfirmBulkResync}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Re-sync upcoming loads for every rule?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {orgRotation
+                ? `Moves ${orgRotation.outOfSync} upcoming load${orgRotation.outOfSync === 1 ? '' : 's'} across ${orgRotation.rules} rule${orgRotation.rules === 1 ? '' : 's'} onto each rule's current assignee. `
+                : ''}
+              Loads that have started, are past pickup, or were placed by a dispatcher are never
+              touched. A load the new assignee is already booked across stays where it is and is
+              reported here when the run finishes.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleBulkResync}>Re-sync all</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

@@ -24,6 +24,7 @@ import { useAuthQuery } from '@/hooks/use-auth-query';
 import { Avatar, WBtn, WIcon, type IconName } from '@/components/web';
 import { DaysControl } from '@/components/web/create-form/controls/days';
 import { ToggleControl } from '@/components/web/create-form/controls/toggle';
+import { describeHolds } from '@/components/route-assignments/rotation-labels';
 import { Loader2 } from 'lucide-react';
 
 type AssigneeKind = 'driver' | 'carrier';
@@ -47,26 +48,6 @@ interface RouteAssignmentDoc {
     held: number;
     byReason: Array<{ reason: string; count: number }>;
   };
-}
-
-/** Human labels for routeRotation's hold reasons. Unknown codes fall
- *  through to the raw string rather than vanishing. */
-const ROTATION_REASON_LABELS: Record<string, string> = {
-  IN_MOTION: 'already in progress',
-  PAST: 'pickup date has passed',
-  NO_SERVICE_DATE: 'no pickup date',
-  MOVED_BY_HUMAN: 'moved by a dispatcher',
-  ALREADY_ON_TARGET: 'already on this assignee',
-  DAY_RESTRICTED: 'rule no longer runs that day',
-  TARGET_INACTIVE: 'assignee inactive',
-  OVERLAP_CONFLICT: 'assignee already booked',
-  ERROR: 'error',
-};
-
-function describeHolds(byReason: Array<{ reason: string; count: number }>): string {
-  return byReason
-    .map((r) => `${r.count} ${ROTATION_REASON_LABELS[r.reason] ?? r.reason}`)
-    .join(', ');
 }
 
 interface AutoAssignModalProps {

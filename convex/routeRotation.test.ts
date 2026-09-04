@@ -289,4 +289,58 @@ describe('rotation on rule edit', () => {
     expect(r.action).toBe('ALREADY_ASSIGNED');
     expect((await loadState(t, w.robotNear)).driver).toBe(w.driverB);
   });
+
+  it('re-sync all walks every active rule and records one org summary', async () => {
+    const t = setup();
+    const w = await buildWorld(t);
+
+    // A second rule on another HCR, also on Dana, with one robot load.
+    const { rule2, load2 } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const rule2: Id<'routeAssignments'> = await ctx.db.insert('routeAssignments', {
+        workosOrgId: ORG, hcr: '96036', driverId: w.driverA, priority: 1, isActive: true,
+        name: 'Dana 96036', createdBy: USER, createdAt: now, updatedAt: now,
+      });
+      const load2 = await seedLoad(ctx, w.customerId, 'R3', daysFromNow(12));
+      // seedLoad tags HCR 917DK; re-point this one at the second rule's HCR.
+      const tag = await ctx.db
+        .query('loadTags')
+        .withIndex('by_load', (q) => q.eq('loadId', load2))
+        .first();
+      if (tag) await ctx.db.patch(tag._id, { value: '96036', canonicalValue: '96036' });
+      return { rule2, load2 };
+    });
+    const r = await t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: load2, userId: 'system' });
+    expect(r.action).toBe('ASSIGNED_DRIVER');
+    expect((await loadState(t, load2)).route).toBe(rule2);
+
+    // Both rules rotated to Sam without moving loads.
+    await w.asUser.mutation(api.routeAssignments.update, { id: w.routeId, driverId: w.driverB });
+    await w.asUser.mutation(api.routeAssignments.update, { id: rule2, driverId: w.driverB });
+    await drain(t);
+
+    const before = await w.asUser.query(api.routeAssignments.previewOrgRotation, { workosOrgId: ORG });
+    expect(before.outOfSync).toBe(3); // robotNear, robotFar, load2
+    expect(before.rules).toBe(2);
+    expect(before.blocked).toBe(2); // active (IN_MOTION), past (PAST)
+
+    await w.asUser.mutation(api.routeAssignments.rotateAllLoads, { workosOrgId: ORG });
+    await drain(t);
+
+    for (const id of [w.robotNear, w.robotFar, load2]) {
+      expect((await loadState(t, id)).driver).toBe(w.driverB);
+    }
+    expect((await loadState(t, w.human)).driver).toBe(w.driverA);
+
+    const after = await w.asUser.query(api.routeAssignments.previewOrgRotation, { workosOrgId: ORG });
+    expect(after.outOfSync).toBe(0);
+
+    const settings = await w.asUser.query(api.routeAssignments.getSettings, { workosOrgId: ORG });
+    expect(settings?.lastBulkRotation?.rules).toBe(2);
+    expect(settings?.lastBulkRotation?.moved).toBe(3);
+    expect(settings?.lastBulkRotation?.held).toBe(2);
+    // And each rule still has its own breakdown.
+    const rule = await t.run((ctx) => ctx.db.get(w.routeId));
+    expect(rule?.lastRotation?.moved).toBe(2);
+  });
 });

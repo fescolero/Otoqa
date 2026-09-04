@@ -290,6 +290,18 @@ Reassigning A → B leaves the load `Assigned`, so the sweep's
 `ALREADY_ASSIGNED` guard protects the result; `autoAssignOptOut` is never
 involved.
 
+**Bulk.** A rotation usually touches several rules, and doing the re-sync
+one rule at a time was the first thing dispatch asked to change.
+`rotateAllLoads` → `runOrgRotation` walks every active rule with a
+resource, **sequentially** — two rules that now name the same driver must
+see each other's moves when the overlap pre-flight runs — and records one
+summary on `autoAssignmentSettings.lastBulkRotation`. `previewOrgRotation`
+answers "is anything out of sync" and drives the page banner: it shows the
+count and a *Re-sync all* button while loads sit on a previous assignee,
+and for a day afterwards shows what the run moved and what it held. The
+list gets a *Loads* column with the same per rule. Each rule also logs one
+`[rotation]` line, so the outcome is in the Convex logs as well as the app.
+
 Tests: `lib/assignHorizon.test.ts`, `autoAssignment.horizon.test.ts`,
 `routeRotation.test.ts`.
 

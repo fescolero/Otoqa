@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { internalAction, internalMutation, internalQuery } from './_generated/server';
-import type { MutationCtx, QueryCtx } from './_generated/server';
+import type { ActionCtx, MutationCtx, QueryCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Doc, Id } from './_generated/dataModel';
 import { routeServesDate } from './lib/routeMatch';
@@ -343,6 +343,81 @@ export const recordRotation = internalMutation({
   },
 });
 
+export type RotationOutcome = {
+  considered: number;
+  moved: number;
+  held: number;
+  byReason: Array<{ reason: string; count: number }>;
+};
+
+/**
+ * Rotate one rule: list its candidates, move them one mutation at a time,
+ * record the outcome on the rule. Shared by the single-rule action and the
+ * org-wide re-sync.
+ *
+ * Also logs one line per rule so the outcome is visible in the Convex
+ * logs without opening the app — holds are otherwise only stored, never
+ * thrown, since a held load is a reported decision rather than a failure.
+ */
+async function rotateRule(
+  ctx: ActionCtx,
+  args: {
+    routeId: Id<'routeAssignments'>;
+    previousDriverId?: Id<'drivers'>;
+    previousCarrierPartnershipId?: Id<'carrierPartnerships'>;
+    userId: string;
+    userName?: string;
+  },
+): Promise<RotationOutcome> {
+  const previous = {
+    previousDriverId: args.previousDriverId,
+    previousCarrierPartnershipId: args.previousCarrierPartnershipId,
+  };
+  const [candidates, preHolds] = await Promise.all([
+    ctx.runQuery(internal.routeRotation.listCandidates, { routeId: args.routeId, ...previous }),
+    ctx.runQuery(internal.routeRotation.tallyHolds, { routeId: args.routeId, ...previous }),
+  ]);
+
+  const byReason = new Map<string, number>(preHolds.map((h) => [h.reason, h.count]));
+  const tally = (reason: string) => byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
+
+  let moved = 0;
+  for (const loadId of candidates) {
+    try {
+      const r = await ctx.runMutation(internal.routeRotation.rotateOneLoad, {
+        loadId,
+        routeId: args.routeId,
+        ...previous,
+        userId: args.userId,
+        userName: args.userName,
+      });
+      if (r.moved) moved++;
+      else tally(r.reason);
+    } catch (err) {
+      console.error(`[rotation] rule ${args.routeId}: load ${loadId} failed:`, err);
+      tally('ERROR');
+    }
+  }
+
+  const held = [...byReason.values()].reduce((a, b) => a + b, 0);
+  const considered = moved + held;
+  const byReasonList = [...byReason.entries()]
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count);
+
+  await ctx.runMutation(internal.routeRotation.recordRotation, {
+    routeId: args.routeId,
+    lastRotation: { at: Date.now(), considered, moved, held, byReason: byReasonList },
+  });
+
+  console.log(
+    `[rotation] rule ${args.routeId}: ${moved} moved, ${held} held` +
+      (held > 0 ? ` (${byReasonList.map((r) => `${r.reason} ${r.count}`).join(', ')})` : ''),
+  );
+
+  return { considered, moved, held, byReason: byReasonList };
+}
+
 /**
  * The rotation itself. Scheduled (not inline in the rule edit) because
  * each move runs the full assignment cascade, pay recalculation included,
@@ -357,47 +432,94 @@ export const runRotation = internalAction({
     userId: v.string(),
     userName: v.optional(v.string()),
   },
+  handler: async (ctx, args): Promise<RotationOutcome> => rotateRule(ctx, args),
+});
+
+/** Active rules with a resource — the set an org-wide re-sync walks. */
+export const listOrgRuleIds = internalQuery({
+  args: { workosOrgId: v.string() },
+  handler: async (ctx, args): Promise<Id<'routeAssignments'>[]> => {
+    const rules = await ctx.db
+      .query('routeAssignments')
+      .withIndex('by_org_active', (q) => q.eq('workosOrgId', args.workosOrgId).eq('isActive', true))
+      .collect();
+    return rules.filter((r) => r.driverId || r.carrierPartnershipId).map((r) => r._id);
+  },
+});
+
+export const recordBulkRotation = internalMutation({
+  args: {
+    workosOrgId: v.string(),
+    lastBulkRotation: v.object({
+      at: v.number(),
+      rules: v.number(),
+      considered: v.number(),
+      moved: v.number(),
+      held: v.number(),
+      byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+    }),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const settings = await ctx.db
+      .query('autoAssignmentSettings')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .first();
+    if (!settings) return null;
+    await ctx.db.patch(settings._id, { lastBulkRotation: args.lastBulkRotation });
+    return null;
+  },
+});
+
+/**
+ * Org-wide re-sync: every active rule, one after another, each moving the
+ * upcoming loads it owns onto its current resource. Sequential on purpose
+ * — two rules that now name the same driver must see each other's moves
+ * when the overlap pre-flight runs, or both could book him for the same
+ * window. One summary lands on autoAssignmentSettings for the page banner;
+ * each rule still gets its own lastRotation.
+ */
+export const runOrgRotation = internalAction({
+  args: {
+    workosOrgId: v.string(),
+    userId: v.string(),
+    userName: v.optional(v.string()),
+  },
   handler: async (
     ctx,
     args,
-  ): Promise<{ considered: number; moved: number; held: number }> => {
-    const previous = {
-      previousDriverId: args.previousDriverId,
-      previousCarrierPartnershipId: args.previousCarrierPartnershipId,
-    };
-    const [candidates, preHolds] = await Promise.all([
-      ctx.runQuery(internal.routeRotation.listCandidates, { routeId: args.routeId, ...previous }),
-      ctx.runQuery(internal.routeRotation.tallyHolds, { routeId: args.routeId, ...previous }),
-    ]);
+  ): Promise<{ rules: number; considered: number; moved: number; held: number }> => {
+    const ruleIds = await ctx.runQuery(internal.routeRotation.listOrgRuleIds, {
+      workosOrgId: args.workosOrgId,
+    });
 
-    const byReason = new Map<string, number>(preHolds.map((h) => [h.reason, h.count]));
-    const tally = (reason: string) => byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
-
+    const byReason = new Map<string, number>();
+    let considered = 0;
     let moved = 0;
-    for (const loadId of candidates) {
+    let held = 0;
+
+    for (const routeId of ruleIds) {
       try {
-        const r = await ctx.runMutation(internal.routeRotation.rotateOneLoad, {
-          loadId,
-          routeId: args.routeId,
-          ...previous,
-          userId: args.userId,
-          userName: args.userName,
-        });
-        if (r.moved) moved++;
-        else tally(r.reason);
+        const r = await rotateRule(ctx, { routeId, userId: args.userId, userName: args.userName });
+        considered += r.considered;
+        moved += r.moved;
+        held += r.held;
+        for (const { reason, count } of r.byReason) {
+          byReason.set(reason, (byReason.get(reason) ?? 0) + count);
+        }
       } catch (err) {
-        console.error(`Rotation failed for load ${loadId}:`, err);
-        tally('ERROR');
+        console.error(`[rotation] org ${args.workosOrgId}: rule ${routeId} failed:`, err);
+        byReason.set('ERROR', (byReason.get('ERROR') ?? 0) + 1);
+        held++;
+        considered++;
       }
     }
 
-    const held = [...byReason.values()].reduce((a, b) => a + b, 0);
-    const considered = moved + held;
-
-    await ctx.runMutation(internal.routeRotation.recordRotation, {
-      routeId: args.routeId,
-      lastRotation: {
+    await ctx.runMutation(internal.routeRotation.recordBulkRotation, {
+      workosOrgId: args.workosOrgId,
+      lastBulkRotation: {
         at: Date.now(),
+        rules: ruleIds.length,
         considered,
         moved,
         held,
@@ -407,6 +529,10 @@ export const runRotation = internalAction({
       },
     });
 
-    return { considered, moved, held };
+    console.log(
+      `[rotation] org ${args.workosOrgId}: ${ruleIds.length} rules, ${moved} moved, ${held} held`,
+    );
+
+    return { rules: ruleIds.length, considered, moved, held };
   },
 });

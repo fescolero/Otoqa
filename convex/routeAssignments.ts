@@ -729,6 +729,100 @@ export const rotateLoads = mutation({
   },
 });
 
+/**
+ * Is anything out of sync across the org? Drives the page's "Re-sync all"
+ * banner: it appears when some rule owns upcoming loads that sit on a
+ * previous resource, and disappears once a re-sync has moved them.
+ *
+ * `outOfSync` is what a re-sync would move. `blocked` is what it could not
+ * (in motion, past, day-restricted) — ALREADY_ON_TARGET is not a block,
+ * it is the normal state, so it is left out of the count.
+ */
+export const previewOrgRotation = query({
+  args: { workosOrgId: v.string() },
+  returns: v.object({
+    outOfSync: v.number(),
+    blocked: v.number(),
+    rules: v.number(),
+    byRule: v.array(
+      v.object({
+        routeId: v.id('routeAssignments'),
+        name: v.optional(v.string()),
+        hcr: v.string(),
+        outOfSync: v.number(),
+        blocked: v.number(),
+      }),
+    ),
+  }),
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const rules = (
+      await ctx.db
+        .query('routeAssignments')
+        .withIndex('by_org_active', (q) => q.eq('workosOrgId', args.workosOrgId).eq('isActive', true))
+        .collect()
+    ).filter((r) => r.driverId || r.carrierPartnershipId);
+
+    const byRule: Array<{
+      routeId: Id<'routeAssignments'>;
+      name?: string;
+      hcr: string;
+      outOfSync: number;
+      blocked: number;
+    }> = [];
+    for (const rule of rules) {
+      const assessed = await assessRuleLoads(ctx, rule, targetOf(rule), undefined);
+      let outOfSync = 0;
+      let blocked = 0;
+      for (const a of assessed) {
+        if (a.verdict.eligible) outOfSync++;
+        else if (a.verdict.reason !== 'ALREADY_ON_TARGET') blocked++;
+      }
+      if (outOfSync > 0 || blocked > 0) {
+        byRule.push({ routeId: rule._id, name: rule.name, hcr: rule.hcr, outOfSync, blocked });
+      }
+    }
+
+    return {
+      outOfSync: byRule.reduce((n, r) => n + r.outOfSync, 0),
+      blocked: byRule.reduce((n, r) => n + r.blocked, 0),
+      rules: byRule.filter((r) => r.outOfSync > 0).length,
+      byRule,
+    };
+  },
+});
+
+/**
+ * Re-sync every active rule at once (routeRotation.runOrgRotation). The
+ * bulk form of rotateLoads, for after a rotation touched several rules.
+ */
+export const rotateAllLoads = mutation({
+  args: { workosOrgId: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'routeAssignment',
+      entityId: args.workosOrgId,
+      action: 'auto_assign_rotated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: 'Requested re-sync of upcoming loads for every active route rule',
+    });
+
+    await ctx.scheduler.runAfter(0, internal.routeRotation.runOrgRotation, {
+      workosOrgId: args.workosOrgId,
+      userId,
+      userName,
+    });
+    return null;
+  },
+});
+
 // Toggle active status
 export const toggleActive = mutation({
   args: {
@@ -821,6 +915,16 @@ export const getSettings = query({
       scheduleIntervalMinutes: v.optional(v.number()),
       lastScheduledRunAt: v.optional(v.number()),
       assignAheadDays: v.optional(v.number()),
+      lastBulkRotation: v.optional(
+        v.object({
+          at: v.number(),
+          rules: v.number(),
+          considered: v.number(),
+          moved: v.number(),
+          held: v.number(),
+          byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+        }),
+      ),
       lastRun: v.optional(
         v.object({
           at: v.number(),

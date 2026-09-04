@@ -1304,6 +1304,21 @@ export default defineSchema({
       }),
     ),
 
+    // Outcome of the most recent org-wide re-sync (routeRotation
+    // .runOrgRotation): every active rule's upcoming loads moved onto the
+    // rule's current resource in one go. Same shape of reasoning as
+    // lastRun — the answer to "did it work, and what stayed put".
+    lastBulkRotation: v.optional(
+      v.object({
+        at: v.number(),
+        rules: v.number(),
+        considered: v.number(),
+        moved: v.number(),
+        held: v.number(),
+        byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+      }),
+    ),
+
     // Audit
     updatedBy: v.string(),
     updatedAt: v.number(),
