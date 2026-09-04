@@ -10,7 +10,7 @@ import {
 } from './clerkSyncScheduler';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 import { logAudit } from './lib/audit';
-import { assertMirrorsEditable, stampNewDriverSummary, partnershipMirrorIsDocumentOwned } from './entityDocuments';
+import { assertMirrorsEditable, stampNewDriverSummary, partnershipMirrorIsDocumentOwned, sharedDocsFromOrg } from './entityDocuments';
 
 /**
  * Carrier Mobile API
@@ -1428,6 +1428,8 @@ export const updateDriver = mutation({
       
       const allPartnerships = [...partnerships, ...partnershipsByConvexId];
       const seenIds = new Set<string>();
+      // The carrier's shared set once, not once per partnership.
+      const fromOrg = updates.licenseExpiration !== undefined ? await sharedDocsFromOrg(ctx, org) : [];
       
       for (const partnership of allPartnerships) {
         if (seenIds.has(partnership._id)) continue;
@@ -1447,7 +1449,7 @@ export const updateDriver = mutation({
         // Document-owned once any CDL document exists (spec §6.3).
         if (
           updates.licenseExpiration !== undefined &&
-          !(await partnershipMirrorIsDocumentOwned(ctx, partnership, 'ownerDriverLicenseExpiration'))
+          !(await partnershipMirrorIsDocumentOwned(ctx, partnership, 'ownerDriverLicenseExpiration', org, fromOrg))
         ) {
           partnershipUpdates.ownerDriverLicenseExpiration = updates.licenseExpiration;
         }

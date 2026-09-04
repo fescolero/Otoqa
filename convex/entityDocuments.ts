@@ -681,6 +681,18 @@ async function documentOwnedMirrorTypes(
   return covered;
 }
 
+/** Driver-side counterpart for the partnership→driver sync: is this
+ *  driver's mirror document-owned? The sync then drops the field instead
+ *  of failing the broker's whole save over the carrier's document. */
+export async function driverMirrorIsDocumentOwned(
+  ctx: Ctx,
+  driver: Doc<'drivers'>,
+  field: keyof typeof DRIVER_MIRROR_TO_TYPE_KEY,
+): Promise<boolean> {
+  const owned = await documentOwnedMirrorTypes(ctx, 'driver', driver.organizationId, driver._id);
+  return owned.has(DRIVER_MIRROR_TO_TYPE_KEY[field]);
+}
+
 /**
  * For the legacy driver→partnership / org→partnership sync paths: is this
  * partnership mirror document-owned? A sync must then leave it alone —
@@ -1310,21 +1322,20 @@ export const legacyLoadKeysForOrg = internalQuery({
     const shapes = orgIdShapes(org);
     const prefixes = shapes.map((id) => `orgs/${id}/`);
     let pos: { i: number; c: string | null } = args.cursor ? JSON.parse(args.cursor) : { i: 0, c: null };
+    if (pos.i >= shapes.length) return { keys: [], nextCursor: null };
+    // Exactly ONE paginated read per invocation (Convex allows one per
+    // function, and a page may hold nothing legacy); the purge action
+    // drives the loop with the returned cursor.
+    const page = await ctx.db
+      .query('loadDocuments')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', shapes[pos.i]))
+      .paginate({ cursor: pos.c, numItems: 500 });
     const keys: string[] = [];
-    // Walk shapes until a page yields keys or every shape is exhausted, so
-    // an org with nothing legacy answers with a null cursor in one call.
-    while (pos.i < shapes.length) {
-      const page = await ctx.db
-        .query('loadDocuments')
-        .withIndex('by_org', (q) => q.eq('workosOrgId', shapes[pos.i]))
-        .paginate({ cursor: pos.c, numItems: 500 });
-      for (const d of page.page) {
-        const key = d.externalKey ?? (d.externalUrl ? keyFromExternalUrl(d.externalUrl) : null);
-        if (key && !prefixes.some((p) => key.startsWith(p))) keys.push(key);
-      }
-      pos = page.isDone ? { i: pos.i + 1, c: null } : { i: pos.i, c: page.continueCursor };
-      if (keys.length > 0) break;
+    for (const d of page.page) {
+      const key = d.externalKey ?? (d.externalUrl ? keyFromExternalUrl(d.externalUrl) : null);
+      if (key && !prefixes.some((p) => key.startsWith(p))) keys.push(key);
     }
+    pos = page.isDone ? { i: pos.i + 1, c: null } : { i: pos.i, c: page.continueCursor };
     // A null cursor means "nothing more": skip id shapes with no rows at all.
     while (pos.c === null && pos.i < shapes.length) {
       const any = await ctx.db
