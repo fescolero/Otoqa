@@ -1,6 +1,7 @@
 'use client';
 
 import { useRef, useState, useMemo, useCallback } from 'react';
+import { OnTimeChip } from '@/components/web/on-time-chip';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Id } from '@/convex/_generated/dataModel';
 import { Badge } from '@/components/ui/badge';
@@ -55,6 +56,9 @@ export interface AssignedLoad {
    *  on fallback paths that found the load without a leg. */
   truck?: { unitId: string; make?: string; model?: string } | null;
   trailer?: { unitId: string; size?: string; bodyType?: string } | null;
+  /** Delivery on-time summary stamped on the completed leg; null/absent
+   *  while the leg is open or when no delivery was evaluable. */
+  onTime?: { evaluated: number; onTime: number; maxLateMs: number } | null;
 }
 
 interface AssignedLoadsTableProps {
@@ -65,7 +69,7 @@ interface AssignedLoadsTableProps {
   showCarrierRate?: boolean;
 }
 
-type ColumnKey = 'orderNumber' | 'customer' | 'hcr' | 'trip' | 'route' | 'stops' | 'status' | 'tracking' | 'loadDate' | 'carrierRate';
+type ColumnKey = 'orderNumber' | 'customer' | 'hcr' | 'trip' | 'route' | 'stops' | 'status' | 'tracking' | 'onTime' | 'loadDate' | 'carrierRate';
 
 interface ColumnDef {
   key: ColumnKey;
@@ -86,6 +90,7 @@ const ALL_COLUMNS: ColumnDef[] = [
   { key: 'stops', label: 'Stops', flex: 'flex-[0.7]', align: 'center', defaultVisible: true },
   { key: 'status', label: 'Status', flex: 'flex-1', defaultVisible: true },
   { key: 'tracking', label: 'Tracking', flex: 'flex-1', defaultVisible: true },
+  { key: 'onTime', label: 'On-time', flex: 'flex-1', defaultVisible: true },
   { key: 'loadDate', label: 'Load Date', flex: 'flex-[1.2]', defaultVisible: true },
   { key: 'carrierRate', label: 'Rate', flex: 'flex-1', align: 'right', defaultVisible: true, requiresCarrierRate: true },
 ];
@@ -263,6 +268,8 @@ export function AssignedLoadsTable({
             {load.trackingStatus}
           </Badge>
         );
+      case 'onTime':
+        return <OnTimeChip onTime={load.onTime} />;
       case 'loadDate':
         return (
           <span className="text-sm text-muted-foreground">

@@ -49,6 +49,7 @@ import {
   resolveStatusId,
 } from '@/components/web';
 import { PayeeProfilesCard } from '@/components/web/pay-profiles/payee-profiles-card';
+import { OnTimeChip } from '@/components/web/on-time-chip';
 import { EntityDocumentsTab } from '@/components/web/documents/entity-documents-tab';
 import { useDriverDocuments } from '@/components/web/documents/use-entity-documents';
 import {
@@ -138,6 +139,13 @@ export default function DriverDetailPage() {
   // Assigned loads regardless of the Loads tab's filter, so flipping the
   // tab to Completed can't blank the card.
   const assignedLoadsData = useQuery(api.loads.getByDriver, { driverId, status: 'Assigned' });
+  // Calendar-year bounds in the viewer's local time, fixed for the
+  // component's life (a stale bound only matters across New Year's).
+  const yearBounds = React.useMemo(() => {
+    const y = new Date().getFullYear();
+    return { yearStartMs: new Date(y, 0, 1).getTime(), yearEndMs: new Date(y + 1, 0, 1).getTime() };
+  }, []);
+  const yearStats = useQuery(api.loads.getDriverYearStats, { driverId, ...yearBounds });
   const recentDriverLoads = useQuery(api.loads.getRecentByDriver, { driverId, limit: 4 });
   // Documents summary — same rows/status as the Documents tab (one source).
   // Held at 'skip' until the driver row is confirmed: listForEntity throws
@@ -906,6 +914,8 @@ export default function DriverDetailPage() {
       render: (r) => <span className="num">{r.firstStopDate ?? '—'}</span> },
     { key: 'status', label: 'Status', width: '110px',
       render: (r) => <Chip status={r.status === 'In Transit' ? 'active' : r.status === 'Delivered' ? 'delivered' : 'assigned'} label={r.status} /> },
+    { key: 'onTime', label: 'On-time', width: '110px',
+      render: (r) => <OnTimeChip onTime={r.onTime} /> },
   ];
   const recentTrips: RecentTripRow[] = ((recentDriverLoads ?? []) as AssignedLoad[])
     .map((l) => ({ ...l, id: l._id as unknown as string }));
@@ -920,11 +930,10 @@ export default function DriverDetailPage() {
 
       <QuickStats
         stats={[
-          { label: 'Active loads', value: assignedLoadsData ? String(inProgressLoads.length) : '—' },
-          { label: 'Loads YTD',    value: '—' },
-          { label: 'Miles YTD',    value: '—' },
+          { label: 'Loads YTD',    value: yearStats ? yearStats.loads.toLocaleString('en-US') : '—' },
+          { label: 'Miles YTD',    value: yearStats ? yearStats.miles.toLocaleString('en-US') : '—' },
           { label: 'Score',        value: '—' },
-          { label: 'On-time',      value: '—' },
+          { label: 'On-time',      value: yearStats?.onTimePct != null ? `${yearStats.onTimePct}%` : '—' },
         ]}
       />
 

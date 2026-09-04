@@ -7,6 +7,7 @@ import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
 import { paginationOptsValidator } from 'convex/server';
 import { parseStopDateTime, syncLegsAffectedByStop } from './_helpers/timeUtils';
+import { onTimePercent } from './_helpers/onTime';
 import { updateLoadCount } from './stats_helpers';
 import { recordLoadWritten } from './platformUsageHelpers';
 import { readScopedCounts, READ_FROM_CACHE_FLAG } from './loadStatusCounts';
@@ -2422,6 +2423,24 @@ const assignedLoadStatusValidator = v.union(
   v.literal('Expired'),
 );
 
+/**
+ * On-time summary a leg carries once completed (lib/legOnTime.ts), in the
+ * shape the web tables render as a badge. null until the leg completes or
+ * when no delivery on it was evaluable.
+ */
+function legOnTimePublic(leg: {
+  deliveriesEvaluated?: number;
+  deliveriesOnTime?: number;
+  deliveriesMaxLateMs?: number;
+}): { evaluated: number; onTime: number; maxLateMs: number } | null {
+  if (!leg.deliveriesEvaluated) return null;
+  return {
+    evaluated: leg.deliveriesEvaluated,
+    onTime: leg.deliveriesOnTime ?? 0,
+    maxLateMs: leg.deliveriesMaxLateMs ?? 0,
+  };
+}
+
 async function enrichLoadFromLeg(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ctx: any,
@@ -2435,6 +2454,9 @@ async function enrichLoadFromLeg(
     trailerId?: Id<'trailers'>;
     scheduledStartMs?: number;
     scheduledEndMs?: number;
+    deliveriesEvaluated?: number;
+    deliveriesOnTime?: number;
+    deliveriesMaxLateMs?: number;
   },
 ) {
   const load = await ctx.db.get(leg.loadId);
@@ -2474,6 +2496,7 @@ async function enrichLoadFromLeg(
     scheduledStartMs: leg.scheduledStartMs,
     scheduledEndMs: leg.scheduledEndMs,
     deliveredAt: load.deliveredAt as number | undefined,
+    onTime: legOnTimePublic(leg),
     truck: truck
       ? { unitId: truck.unitId as string, make: truck.make as string | undefined, model: truck.model as string | undefined }
       : null,
@@ -2517,6 +2540,8 @@ async function enrichLoadDirectly(ctx: any, load: any) {
     legStatus: 'PENDING',
     legLoadedMiles: load.effectiveMiles ?? 0,
     deliveredAt: load.deliveredAt as number | undefined,
+    // No leg on this path; getRecentByDriver overwrites when it has one.
+    onTime: null as ReturnType<typeof legOnTimePublic>,
     createdAt: load._creationTime as number,
   };
 }
@@ -2689,7 +2714,13 @@ export const getRecentByDriver = query({
     const seenLoadIds = new Set<string>();
     const candidates: Array<{
       load: any;
-      leg?: { status: string; legLoadedMiles: number };
+      leg?: {
+        status: string;
+        legLoadedMiles: number;
+        deliveriesEvaluated?: number;
+        deliveriesOnTime?: number;
+        deliveriesMaxLateMs?: number;
+      };
     }> = [];
 
     const recentLegs = await ctx.db
@@ -2703,7 +2734,16 @@ export const getRecentByDriver = query({
       seenLoadIds.add(leg.loadId);
       const load = await ctx.db.get(leg.loadId);
       if (!load) continue;
-      candidates.push({ load, leg: { status: leg.status, legLoadedMiles: leg.legLoadedMiles } });
+      candidates.push({
+        load,
+        leg: {
+          status: leg.status,
+          legLoadedMiles: leg.legLoadedMiles,
+          deliveriesEvaluated: leg.deliveriesEvaluated,
+          deliveriesOnTime: leg.deliveriesOnTime,
+          deliveriesMaxLateMs: leg.deliveriesMaxLateMs,
+        },
+      });
     }
 
     const loadStatuses = ['Open', 'Assigned', 'Completed', 'Canceled', 'Expired'] as const;
@@ -2746,10 +2786,78 @@ export const getRecentByDriver = query({
       if (leg) {
         enriched.legStatus = leg.status;
         enriched.legLoadedMiles = leg.legLoadedMiles;
+        enriched.onTime = legOnTimePublic(leg);
       }
       enrichedLoads.push(enriched);
     }
     return enrichedLoads;
+  },
+});
+
+/**
+ * Loads and loaded miles a driver completed in a calendar year — the
+ * "Loads YTD" / "Miles YTD" KPIs on the driver Overview.
+ *
+ * Walks COMPLETED legs through `by_driver_status_scheduled_start`, range-
+ * bounded to [yearStartMs, yearEndMs), so the read is proportional to one
+ * year of one driver's work. The caller passes local calendar-year bounds
+ * so "this year" is the viewer's, not the server's. A leg is attributed
+ * to the year it was scheduled to start (migration 010 backfilled that
+ * field onto every leg); a load split into several legs counts once.
+ * Loads that reached the driver without a dispatch leg (primaryDriverId /
+ * carrier-assignment fallbacks in getByDriver) are not counted here.
+ */
+export const getDriverYearStats = query({
+  args: {
+    driverId: v.id('drivers'),
+    yearStartMs: v.number(),
+    yearEndMs: v.number(),
+  },
+  returns: v.object({
+    loads: v.number(),
+    miles: v.number(),
+    /** Delivery stops with a window and an arrival record (denominator). */
+    deliveriesEvaluated: v.number(),
+    deliveriesOnTime: v.number(),
+    /** 0–100, or null when nothing this year was evaluable. */
+    onTimePct: v.union(v.number(), v.null()),
+  }),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
+
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver_status_scheduled_start', (q) =>
+        q
+          .eq('driverId', args.driverId)
+          .eq('status', 'COMPLETED')
+          .gte('scheduledStartMs', args.yearStartMs)
+          .lt('scheduledStartMs', args.yearEndMs),
+      )
+      .collect();
+
+    const loadIds = new Set<string>();
+    let miles = 0;
+    let deliveriesEvaluated = 0;
+    let deliveriesOnTime = 0;
+    for (const leg of legs) {
+      loadIds.add(leg.loadId);
+      miles += leg.legLoadedMiles ?? 0;
+      // Stamped at completion (lib/legOnTime.ts); undefined on legs that
+      // predate the stamp until migration 017 runs — those simply don't
+      // count toward the on-time denominator.
+      deliveriesEvaluated += leg.deliveriesEvaluated ?? 0;
+      deliveriesOnTime += leg.deliveriesOnTime ?? 0;
+    }
+    return {
+      loads: loadIds.size,
+      miles: Math.round(miles),
+      deliveriesEvaluated,
+      deliveriesOnTime,
+      onTimePct: onTimePercent(deliveriesEvaluated, deliveriesOnTime),
+    };
   },
 });
 
