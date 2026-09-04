@@ -49,7 +49,7 @@ import {
   keyFromExternalUrl,
   sanitizeFilename,
 } from './lib/r2';
-import { parseDateString } from './_helpers/dateUtils';
+import { parseDateString, utcMsToDateString } from './_helpers/dateUtils';
 import {
   computeMissingTypeKeys,
   computeNeedsDateTypeKeys,
@@ -416,8 +416,6 @@ async function writeDriverMirror(
     | 'twicExpiration';
   if (driver[field] === expirationDate) return;
   await ctx.db.patch(id, { [field]: expirationDate, updatedAt: Date.now() });
-  if (field === 'licenseExpiration') {
-  }
 }
 
 
@@ -672,7 +670,7 @@ async function activate(
         status: 'archived',
         archivedAt: now,
         archivedBy: who.userId,
-        archiveNote: `Replaced ${formatDate(now)}`,
+        archiveNote: `Replaced ${utcMsToDateString(now)}`,
         supersededById: doc._id,
       });
       replaced = prev;
@@ -719,9 +717,6 @@ async function activate(
   });
 }
 
-function formatDate(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
-}
 
 // ─── Internal: presign / finalize plumbing (called from 'use node') ──────
 
@@ -924,7 +919,7 @@ export const archive = mutation({
       status: 'archived',
       archivedAt: now,
       archivedBy: who.userId,
-      archiveNote: args.note?.trim() || `Archived ${formatDate(now)}`,
+      archiveNote: args.note?.trim() || `Archived ${utcMsToDateString(now)}`,
     });
     const catalog = await loadEffectiveCatalog(ctx, who.orgId, doc.entity);
     const type = catalog.find((t) => t.key === doc.typeKey);

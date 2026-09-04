@@ -138,7 +138,8 @@ export function ExportAllDocumentsButton({ orgLabel }: { orgLabel?: string }) {
         const bytes = new Uint8Array(await res.arrayBuffer());
         if (partBytes > 0 && partBytes + bytes.byteLength > PART_LIMIT) flush();
         let unique = path;
-        for (let i = 2; files[unique]; i++) unique = path.replace(/(\.[^.]*)?$/, `-${i}$1`);
+        // Suffix the file name, never a dotted folder segment ("J.B._Hunt").
+        for (let i = 2; files[unique]; i++) unique = path.replace(/(\.[^./]*)?$/, `-${i}$1`);
         files[unique] = bytes;
         partBytes += bytes.byteLength;
         manifest.push([unique, ...row.slice(1)]);

@@ -1,5 +1,6 @@
 import { Image } from 'react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system/legacy';
 
 // ============================================
 // UPLOAD IMAGE PREPARATION
@@ -67,13 +68,33 @@ export function isJpegSource(uri: string, mimeType?: string | null): boolean {
  * (ImagePicker assets and takePictureAsync results both do) to skip an
  * extra decode of the file. Pass `mimeType` when the picker reports it.
  */
+/**
+ * JPEG magic bytes (FF D8 FF) — for sources the picker reports no mime
+ * type for and whose URI has no suffix (some Android OEM pickers), so a
+ * genuine JPEG is neither re-encoded needlessly nor blocked when the
+ * manipulator hiccups. Any read failure just means "unknown".
+ */
+async function sniffIsJpeg(uri: string): Promise<boolean> {
+  try {
+    const b64 = await FileSystem.readAsStringAsync(uri, {
+      encoding: FileSystem.EncodingType.Base64,
+      position: 0,
+      length: 3,
+    });
+    // 3 bytes → 4 base64 chars; FF D8 FF encodes to "/9j/".
+    return b64.startsWith('/9j/');
+  } catch {
+    return false;
+  }
+}
+
 export async function prepareImageForUpload(
   uri: string,
   width?: number,
   height?: number,
   mimeType?: string | null,
 ): Promise<string> {
-  const alreadyJpeg = isJpegSource(uri, mimeType);
+  const alreadyJpeg = isJpegSource(uri, mimeType) || (await sniffIsJpeg(uri));
   try {
     let w = width;
     let h = height;

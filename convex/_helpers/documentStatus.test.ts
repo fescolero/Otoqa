@@ -143,6 +143,8 @@ describe('driverMissingKeys / countDriverAttention', () => {
 
   it('a "Needs date" type counts once, never when it is also missing or hidden', () => {
     expect(countDriverAttention({ missingDocTypeKeys: [], needsDateTypeKeys: ['medical'] }, today)).toBe(1);
+    // …and not again through its stale mirror date.
+    expect(countDriverAttention({ missingDocTypeKeys: [], needsDateTypeKeys: ['medical'], medicalExpiration: '2020-01-01' }, today)).toBe(1);
     expect(countDriverAttention({ missingDocTypeKeys: ['medical'], needsDateTypeKeys: ['medical'] }, today)).toBe(1);
     expect(countDriverAttention({ missingDocTypeKeys: [], needsDateTypeKeys: ['medical'] }, today, new Set(['medical']))).toBe(0);
   });
