@@ -146,7 +146,9 @@ export default function DriverDetailPage() {
     return { yearStartMs: new Date(y, 0, 1).getTime(), yearEndMs: new Date(y + 1, 0, 1).getTime() };
   }, []);
   const yearStats = useQuery(api.loads.getDriverYearStats, { driverId, ...yearBounds });
-  const recentDriverLoads = useQuery(api.loads.getRecentByDriver, { driverId, limit: 4 });
+  // Completed only — an Assigned load isn't a trip yet, and showing it
+  // under "Recent trips" read as if it had already run.
+  const recentDriverLoads = useQuery(api.loads.getRecentByDriver, { driverId, limit: 4, status: 'Completed' });
   // Documents summary — same rows/status as the Documents tab (one source).
   // Held at 'skip' until the driver row is confirmed: listForEntity throws
   // for a cross-org id, which must not pre-empt the "not found" state.
