@@ -26,7 +26,11 @@ vi.mock('@/components/web/comments-thread', () => ({
 // the SavedViewCreatePopover uses a mutation to insert one. Stub both so
 // the page renders deterministically with no persisted views.
 vi.mock('convex/react', () => ({
-  useQuery: () => ({ user: [], org: [] }),
+  // Unauthenticated in the harness: useAuthQuery holds its queries at
+  // 'skip' (the documents catalog → no hidden types), and the saved-views
+  // query gets the empty shape below.
+  useConvexAuth: () => ({ isAuthenticated: false, isLoading: false }),
+  useQuery: (_q: unknown, args: unknown) => (args === 'skip' ? undefined : { user: [], org: [] }),
   useMutation: () => vi.fn(),
 }));
 
