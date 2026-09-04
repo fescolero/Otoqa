@@ -231,9 +231,6 @@ export async function assertEntityAccess(
   return { ...who, owner };
 }
 
-/** Whether an organization document is visible to linked brokers: the
- *  type's default unless the document overrides it. Never true for a
- *  hidden type. */
 /** Can documents of this type reach linked brokers at all? Only the
  *  system company types that map onto a carrier type (`partnerTypeKey`);
  *  a custom company type has no counterpart on the broker's side. */
@@ -241,6 +238,9 @@ function isShareableType(type: EffectiveDocumentType | undefined): type is Effec
   return !!type && !type.hidden && !!type.partnerTypeKey;
 }
 
+/** Whether an organization document is visible to linked brokers: the
+ *  type's default unless the document overrides it. Never true for a
+ *  hidden or non-shareable type. */
 function isSharedByRule(doc: Doc<'entityDocuments'>, type: EffectiveDocumentType | undefined): boolean {
   if (doc.entity !== 'organization' || !isShareableType(type)) return false;
   return doc.shared ?? type.sharedByDefault;
@@ -496,8 +496,6 @@ export async function recomputePartnershipDocuments(
   }
 }
 
-/** A carrier org's organization documents changed (or its sharing did):
- *  every broker linked to it may see a different effective set. */
 /** Resummarize every partnership linked to a carrier org after anything
  *  on the carrier side changed (a document, a sharing flag, soft-delete /
  *  restore, purge). The org's shared set and each broker's catalog are
@@ -534,11 +532,14 @@ export async function recomputeEntitySummary(
   entity: DocumentEntity,
   entityId: string,
   catalog?: EffectiveDocumentType[],
+  /** The entity's active documents as they stand NOW, when the caller
+   *  already holds them (activate does) — saves the index re-read. */
+  activeIn?: Doc<'entityDocuments'>[],
 ): Promise<void> {
   switch (entity) {
     case 'driver': {
       const types = catalog ?? (await loadEffectiveCatalog(ctx, orgId, 'driver'));
-      const active = await activeDocsFor(ctx, orgId, 'driver', entityId);
+      const active = activeIn ?? (await activeDocsFor(ctx, orgId, 'driver', entityId));
       const missing = computeMissingTypeKeys(
         types,
         active.map((d) => ({ typeKey: d.typeKey, hasFile: !!d.externalKey })),
@@ -587,11 +588,16 @@ export async function assertMirrorsEditable(
   entity: 'driver' | 'carrier',
   orgId: string,
   entityId: string,
-  editedFields: readonly string[],
+  /** The update being applied (full-form saves resend every field). */
+  edits: Record<string, unknown>,
+  /** The row as stored — only a CHANGED mirror value is a mirror edit. */
+  current: Record<string, unknown>,
 ): Promise<void> {
   const mirrorToType: Record<string, string> =
     entity === 'driver' ? DRIVER_MIRROR_TO_TYPE_KEY : CARRIER_MIRROR_TO_TYPE_KEY;
-  const touched = editedFields.filter((f) => f in mirrorToType);
+  const touched = Object.keys(mirrorToType).filter(
+    (f) => edits[f] !== undefined && edits[f] !== (current[f] ?? undefined),
+  );
   if (touched.length === 0) return;
   const catalog = await loadEffectiveCatalog(ctx, orgId, entity);
   const own = await activeDocsFor(ctx, orgId, entity, entityId);
@@ -631,9 +637,10 @@ async function activate(
 
   // Singleton: the previous active row is superseded, never deleted.
   let replaced: Doc<'entityDocuments'> | null = null;
+  let activeBefore: Doc<'entityDocuments'>[] | undefined;
   if (type.singleton) {
-    const active = await activeDocsFor(ctx, doc.workosOrgId, doc.entity, doc.entityId);
-    for (const prev of active) {
+    activeBefore = await activeDocsFor(ctx, doc.workosOrgId, doc.entity, doc.entityId);
+    for (const prev of activeBefore) {
       if (prev.typeKey !== doc.typeKey || prev._id === doc._id) continue;
       await ctx.db.patch(prev._id, {
         status: 'archived',
@@ -658,7 +665,14 @@ async function activate(
   });
 
   if (doc.entity === 'driver') await writeDriverMirror(ctx, doc.entityId, type, dates.expirationDate);
-  await recomputeEntitySummary(ctx, doc.workosOrgId, doc.entity, doc.entityId, args.catalog);
+  // The active set after this activation, from the list already read —
+  // the superseded row out, this row in with its final fields.
+  const activated = await ctx.db.get(doc._id);
+  const activeAfter =
+    activeBefore && activated
+      ? [...activeBefore.filter((d) => d._id !== doc._id && d._id !== replaced?._id), activated]
+      : undefined;
+  await recomputeEntitySummary(ctx, doc.workosOrgId, doc.entity, doc.entityId, args.catalog, activeAfter);
 
   await logAudit(ctx, {
     organizationId: doc.workosOrgId,
@@ -1163,14 +1177,6 @@ export const dueForPurge = internalQuery({
 
 const PURGE_BATCH = 200;
 
-/**
- * Object keys referenced by the org's load documents that live OUTSIDE
- * the org prefix (legacy `pod-photos/` / `load-documents/` rows). The
- * purge action deletes these BEFORE any row is removed, so a failure
- * between the two steps leaves rows behind (re-listed next run), never
- * unreferenced bytes. Paged. Entity documents never need this — their
- * keys are always built under the prefix.
- */
 /** True only while the org is due AND still offboarding. Once `purgeAt`
  *  has passed, cancelOffboarding refuses (spec §7: the purge is committed),
  *  so this is defense in depth for the row/stamp steps — the first
@@ -1185,6 +1191,14 @@ export const isStillDueForPurge = internalQuery({
   handler: async (ctx, args) => stillDueForPurge(await ctx.db.get(args.organizationId), args.now),
 });
 
+/**
+ * Object keys referenced by the org's load documents that live OUTSIDE
+ * the org prefix (legacy `pod-photos/` / `load-documents/` rows). The
+ * purge action deletes these BEFORE any row is removed, so a failure
+ * between the two steps leaves rows behind (re-listed next run), never
+ * unreferenced bytes. Paged. Entity documents never need this — their
+ * keys are always built under the prefix.
+ */
 export const legacyLoadKeysForOrg = internalQuery({
   args: { organizationId: v.id('organizations'), cursor: v.optional(v.string()) },
   returns: v.object({ keys: v.array(v.string()), nextCursor: v.union(v.string(), v.null()) }),

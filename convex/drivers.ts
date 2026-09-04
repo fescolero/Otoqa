@@ -377,13 +377,7 @@ export const update = mutation({
     }
 
     // Expiration mirrors belong to the documents once a document exists.
-    await assertMirrorsEditable(
-      ctx,
-      'driver',
-      driver.organizationId,
-      id,
-      Object.entries(updates).filter(([, v]) => v !== undefined).map(([k]) => k),
-    );
+    await assertMirrorsEditable(ctx, 'driver', driver.organizationId, id, updates, driver);
 
     // Handle payPlanId separately (it's an Id type, not a string)
     if (payPlanId !== undefined) {

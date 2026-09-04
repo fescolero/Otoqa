@@ -141,6 +141,10 @@ describe('driverMissingKeys / countDriverAttention', () => {
     expect(countDriverAttention({ missingDocTypeKeys: [] }, today)).toBe(0);
   });
 
+  it('the unstamped-row fallback drops hidden types like a stamped summary would', () => {
+    expect(countDriverAttention({ missingDocTypeKeys: undefined }, today, new Set(['twic', 'hazmat']))).toBe(6);
+  });
+
   it('non-mirrored expiring types count through docExpirations (and a mirror is not double counted)', () => {
     const row = { missingDocTypeKeys: [], licenseExpiration: '2020-01-01', docExpirations: { hazmat: '2020-06-01', cdl: '2020-01-01' } };
     expect(countDriverAttention(row, today)).toBe(2);

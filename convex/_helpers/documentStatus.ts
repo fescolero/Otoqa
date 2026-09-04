@@ -11,12 +11,10 @@
  * `localTodayDateStr()`; Convex queries take it as an argument.
  */
 
-import { diffCalendarDays } from './dateUtils';
+import { getDateStatus } from './dateUtils';
 import type { DocumentEntity, MirrorField } from '../lib/documentTypeDefaults';
 import { DRIVER_MIRROR_TO_TYPE_KEY, type DriverMirrorField } from '../lib/documentTypeDefaults';
 
-export const EXPIRING_WITHIN_DAYS = 30;
-export const WARNING_WITHIN_DAYS = 60;
 
 export type DocumentStatus =
   | 'missing'
@@ -59,13 +57,8 @@ export function dateExpiryStatus(
   dateStr: string | undefined | null,
   todayStr: string,
 ): 'missing' | 'expired' | 'expiring' | 'warning' | 'valid' {
-  if (!dateStr) return 'missing';
-  const diff = diffCalendarDays(dateStr, todayStr);
-  if (diff === null) return 'missing';
-  if (diff < 0) return 'expired';
-  if (diff <= EXPIRING_WITHIN_DAYS) return 'expiring';
-  if (diff <= WARNING_WITHIN_DAYS) return 'warning';
-  return 'valid';
+  // One tiering for every date on the platform (dateUtils.getDateStatus).
+  return getDateStatus(dateStr ?? undefined, todayStr);
 }
 
 /**
@@ -185,7 +178,9 @@ export function countDriverAttention(
    *  are not compliance (the Documents tab shows nothing for them). */
   hiddenTypeKeys?: ReadonlySet<string>,
 ): number {
-  const missing = new Set(driverMissingKeys(row));
+  // The unstamped-row fallback lists every default type; hidden ones must
+  // drop out here exactly as they do from a stamped summary.
+  const missing = new Set(driverMissingKeys(row).filter((k) => !hiddenTypeKeys?.has(k)));
   let count = missing.size;
   // One date per type: the mirror fields (legacy rows) overlaid by the
   // per-type summary, which is written from the same documents and also

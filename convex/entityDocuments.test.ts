@@ -1157,6 +1157,9 @@ describe('second-review follow-ups', () => {
     await expect(
       t.withIdentity(EDITOR as never).mutation(api.drivers.update, { id: driverId, licenseExpiration: '2040-01-01' }),
     ).rejects.toThrow(/replace the document/);
+    // A full-form save that resends the unchanged value is not a mirror edit.
+    await t.withIdentity(EDITOR as never).mutation(api.drivers.update, { id: driverId, licenseExpiration: '2031-03-03', phone: '+15550001111' });
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.phone).toBe('+15550001111');
     // A mirror with no document behind it stays editable.
     await t.withIdentity(EDITOR as never).mutation(api.drivers.update, { id: driverId, medicalExpiration: '2030-01-01' });
     expect((await t.run((ctx) => ctx.db.get(driverId)))?.medicalExpiration).toBe('2030-01-01');

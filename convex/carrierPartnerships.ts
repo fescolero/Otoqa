@@ -755,7 +755,7 @@ export const update = mutation({
 
     // Expiration mirrors belong to the documents once one exists (own or
     // carrier-shared) for the type.
-    await assertMirrorsEditable(ctx, 'carrier', partnership.brokerOrgId, partnershipId, Object.keys(cleanUpdates));
+    await assertMirrorsEditable(ctx, 'carrier', partnership.brokerOrgId, partnershipId, cleanUpdates, partnership);
     await ctx.db.patch(partnershipId, cleanUpdates);
 
     // If marking as owner-operator and there's a linked carrier org, create/link driver record
@@ -878,6 +878,15 @@ export const update = mutation({
 
           // Only patch if there are actual driver field updates
           if (Object.keys(driverUpdates).length > 1) {
+            // The driver's CDL mirror is document-owned once a CDL exists.
+            await assertMirrorsEditable(
+              ctx,
+              'driver',
+              ownerDriver.organizationId,
+              ownerDriver._id,
+              driverUpdates,
+              ownerDriver,
+            );
             await ctx.db.patch(carrierOrg.ownerDriverId, driverUpdates);
           }
 
