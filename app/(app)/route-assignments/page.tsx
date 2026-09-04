@@ -636,13 +636,13 @@ export default function RouteAssignmentsPage() {
                         },
                         {
                           id: 'rotate',
-                          label: 'Re-sync upcoming loads',
+                          label: 'Re-sync this rule only',
                           icon: 'refresh' as const,
                           confirm: 'soft' as const,
-                          confirmTitle: 'Re-sync upcoming loads?',
+                          confirmTitle: 'Re-sync this rule only?',
                           confirmBody:
-                            'Releases the upcoming loads this rule auto-assigned that no longer match it, and auto-assigns them again. Loads in progress, past their pickup, or placed by a dispatcher are left alone.',
-                          confirmCta: 'Re-sync',
+                            'Releases the upcoming loads this rule auto-assigned that no longer match it, and auto-assigns them again. Loads in progress, past their pickup, or placed by a dispatcher are left alone. This does not clear leftovers no rule claims or run the sweep — use "Re-sync all rules" in the page header for that.',
+                          confirmCta: 'Re-sync this rule',
                         },
                       ]
                     : []),
@@ -732,7 +732,7 @@ export default function RouteAssignmentsPage() {
                   owns out-of-sync loads, but the org-wide run also clears
                   leftovers no rule claims and re-runs the sweep. */}
               <WBtn size="sm" leading="refresh" onClick={() => setConfirmBulkResync(true)}>
-                Re-sync all
+                Re-sync all rules
               </WBtn>
               <WBtn size="sm" leading="export">
                 Export
@@ -779,7 +779,7 @@ export default function RouteAssignmentsPage() {
             </div>
             <div className="flex-1" />
             <WBtn size="sm" variant="primary" leading="refresh" onClick={() => setConfirmBulkResync(true)}>
-              Re-sync all
+              Re-sync all rules
             </WBtn>
           </div>
         )}
@@ -1049,7 +1049,7 @@ export default function RouteAssignmentsPage() {
       <AlertDialog open={confirmBulkResync} onOpenChange={setConfirmBulkResync}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Re-sync upcoming loads for every rule?</AlertDialogTitle>
+            <AlertDialogTitle>Re-sync all rules?</AlertDialogTitle>
             <AlertDialogDescription>
               {orgRotation && orgRotation.outOfSync > 0
                 ? `Releases ${orgRotation.outOfSync} upcoming load${orgRotation.outOfSync === 1 ? '' : 's'} across ${orgRotation.rules} rule${orgRotation.rules === 1 ? '' : 's'} that no longer match, `
@@ -1062,7 +1062,7 @@ export default function RouteAssignmentsPage() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleBulkResync}>Re-sync all</AlertDialogAction>
+            <AlertDialogAction onClick={handleBulkResync}>Re-sync all rules</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

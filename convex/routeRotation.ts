@@ -302,7 +302,10 @@ const MAX_HELD_LISTED = 50;
 function summarize(moved: number, holds: HeldLoad[]): RotationOutcome & { heldLoads: HeldLoad[] } {
   const byReason = new Map<string, number>();
   for (const h of holds) byReason.set(h.reason, (byReason.get(h.reason) ?? 0) + 1);
-  const heldLoads = [...holds].sort((a, b) => (a.serviceDate ?? '').localeCompare(b.serviceDate ?? ''));
+  // Counted, but not listed: in-sync loads are not something to act on.
+  const heldLoads = holds
+    .filter((h) => h.reason !== 'IN_SYNC')
+    .sort((a, b) => (a.serviceDate ?? '').localeCompare(b.serviceDate ?? ''));
   return {
     considered: moved + holds.length,
     moved,
@@ -323,11 +326,15 @@ async function record(
     routeId,
     lastRotation: { at: Date.now(), ...outcome },
   });
+  // In-sync loads are the healthy state, not a problem to list.
+  const inSync = outcome.byReason.find((r) => r.reason === 'IN_SYNC')?.count ?? 0;
+  const attention = outcome.byReason.filter((r) => r.reason !== 'IN_SYNC');
   console.log(
-    `[rotation] rule ${routeId}: ${outcome.moved} re-placed, ${outcome.held} not` +
-      (outcome.held > 0 ? ` (${outcome.byReason.map((r) => `${r.reason} ${r.count}`).join(', ')})` : ''),
+    `[rotation] rule ${routeId}: ${outcome.moved} re-placed, ${inSync} in sync, ${outcome.held - inSync} need attention` +
+      (attention.length > 0 ? ` (${attention.map((r) => `${r.reason} ${r.count}`).join(', ')})` : ''),
   );
   for (const h of outcome.heldLoads) {
+    if (h.reason === 'IN_SYNC') continue;
     console.log(
       `[rotation]   #${h.orderNumber}${h.serviceDate ? ` on ${h.serviceDate}` : ''}: ${h.reason}` +
         (h.detail ? ` — ${h.detail}` : ''),
