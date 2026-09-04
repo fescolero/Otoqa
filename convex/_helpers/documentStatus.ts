@@ -174,7 +174,13 @@ export function driverMissingKeys(row: Pick<DriverAttentionInput, 'missingDocTyp
   return row.missingDocTypeKeys ?? [...DEFAULT_REQUIRED_DRIVER_TYPE_KEYS];
 }
 
-export function countDriverAttention(row: DriverAttentionInput, todayStr: string): number {
+export function countDriverAttention(
+  row: DriverAttentionInput,
+  todayStr: string,
+  /** Type keys hidden in Settings › Documents: their mirrors are kept but
+   *  are not compliance (the Documents tab shows nothing for them). */
+  hiddenTypeKeys?: ReadonlySet<string>,
+): number {
   const missing = new Set(driverMissingKeys(row));
   let count = missing.size;
   const mirrors: DriverMirrorField[] = [
@@ -184,7 +190,8 @@ export function countDriverAttention(row: DriverAttentionInput, todayStr: string
     'twicExpiration',
   ];
   for (const field of mirrors) {
-    if (missing.has(DRIVER_MIRROR_TO_TYPE_KEY[field])) continue;
+    const typeKey = DRIVER_MIRROR_TO_TYPE_KEY[field];
+    if (missing.has(typeKey) || hiddenTypeKeys?.has(typeKey)) continue;
     const s = dateExpiryStatus(row[field], todayStr);
     if (s === 'expired' || s === 'expiring') count++;
   }

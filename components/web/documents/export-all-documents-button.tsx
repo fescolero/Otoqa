@@ -67,10 +67,24 @@ export function ExportAllDocumentsButton({ orgLabel }: { orgLabel?: string }) {
   const run = async () => {
     setProgress({ done: 0, total: 0, failed: 0 });
     try {
-      const [entityDocs, loadDocs] = await Promise.all([
-        convex.query(api.entityDocuments.listAllForOrgExport, {}),
-        convex.query(api.loadDocuments.listAllForOrgExport, {}),
-      ]);
+      // Both listings are paged (a long-lived org has more rows than one
+      // query may read); walk the cursors before fetching any bytes.
+      const entityDocs = [];
+      for (let cursor: string | null = null; ; ) {
+        const page: Awaited<ReturnType<typeof convex.query<typeof api.entityDocuments.listAllForOrgExport>>> =
+          await convex.query(api.entityDocuments.listAllForOrgExport, { cursor: cursor ?? undefined });
+        entityDocs.push(...page.rows);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      const loadDocs = [];
+      for (let cursor: string | null = null; ; ) {
+        const page: Awaited<ReturnType<typeof convex.query<typeof api.loadDocuments.listAllForOrgExport>>> =
+          await convex.query(api.loadDocuments.listAllForOrgExport, { cursor: cursor ?? undefined });
+        loadDocs.push(...page.rows);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
       const loadFiles = loadDocs.filter((d) => d.hasFile);
       const total = entityDocs.length + loadFiles.length;
       if (total === 0) {

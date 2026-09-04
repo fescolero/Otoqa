@@ -67,3 +67,17 @@ export function useEntityDocuments(entity: DocumentEntity, entityId: string | un
 export function useDriverDocuments(driverId: string | undefined): EntityDocumentsState {
   return useEntityDocuments('driver', driverId);
 }
+
+/**
+ * Type keys hidden in Settings › Documents for drivers. Attention counts
+ * skip their mirror dates (a hidden type is not compliance), matching the
+ * server's countDriversByStatus. Empty until the catalog loads — the
+ * count can only go down once it does.
+ */
+export function useHiddenDriverTypeKeys(): ReadonlySet<string> {
+  const catalog = useAuthQuery(api.documentTypes.effectiveCatalog, { entity: 'driver' });
+  return React.useMemo(
+    () => new Set((catalog ?? []).filter((t) => t.hidden).map((t) => t.key)),
+    [catalog],
+  );
+}

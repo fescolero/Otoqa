@@ -65,58 +65,57 @@ async function purgeOne(
 ): Promise<{ stamped: boolean; objectsDeleted: number; rowsDeleted: number }> {
   let objectsDeleted = 0;
   let rowsDeleted = 0;
-  {
-      // Re-check right before touching anything (a cancel is refused once
-      // purgeAt has passed, so this only catches a stale listing).
-      const stillDue: boolean = await ctx.runQuery(internal.entityDocuments.isStillDueForPurge, {
-        organizationId: org.organizationId,
-        now: Date.now(),
-      });
-      if (!stillDue) return { stamped: false, objectsDeleted, rowsDeleted };
 
-      // 1. Bucket prefix.
-      if (org.workosOrgId) {
-        const prefix = `orgs/${org.workosOrgId}/`;
-        let token: string | undefined;
-        do {
-          const page = await listObjectKeys(prefix, token);
-          if (page.keys.length > 0) objectsDeleted += await deleteObjectsByKeys(page.keys);
-          token = page.nextToken;
-        } while (token);
-      }
+    // Re-check right before touching anything (a cancel is refused once
+    // purgeAt has passed, so this only catches a stale listing).
+    const stillDue: boolean = await ctx.runQuery(internal.entityDocuments.isStillDueForPurge, {
+      organizationId: org.organizationId,
+      now: Date.now(),
+    });
+    if (!stillDue) return { stamped: false, objectsDeleted, rowsDeleted };
 
-      // 2. Legacy-prefix objects referenced by load-document rows — deleted
-      //    BEFORE the rows so a failure here leaves the rows (re-listed
-      //    next run), never unreferenced bytes.
-      let cursor: string | null = null;
+    // 1. Bucket prefix.
+    if (org.workosOrgId) {
+      const prefix = `orgs/${org.workosOrgId}/`;
+      let token: string | undefined;
       do {
-        const page: { keys: string[]; nextCursor: string | null } = await ctx.runQuery(
-          internal.entityDocuments.legacyLoadKeysForOrg,
-          { organizationId: org.organizationId, cursor: cursor ?? undefined },
-        );
+        const page = await listObjectKeys(prefix, token);
         if (page.keys.length > 0) objectsDeleted += await deleteObjectsByKeys(page.keys);
-        cursor = page.nextCursor;
-      } while (cursor);
+        token = page.nextToken;
+      } while (token);
+    }
 
-      // 3. Rows, in batches until the mutation reports nothing left.
-      let done = false;
-      while (!done) {
-        const r: { deleted: number; done: boolean } = await ctx.runMutation(internal.entityDocuments.purgeOrgRows, {
-          organizationId: org.organizationId,
-        });
-        rowsDeleted += r.deleted;
-        done = r.done;
-      }
+    // 2. Legacy-prefix objects referenced by load-document rows — deleted
+    //    BEFORE the rows so a failure here leaves the rows (re-listed
+    //    next run), never unreferenced bytes.
+    let cursor: string | null = null;
+    do {
+      const page: { keys: string[]; nextCursor: string | null } = await ctx.runQuery(
+        internal.entityDocuments.legacyLoadKeysForOrg,
+        { organizationId: org.organizationId, cursor: cursor ?? undefined },
+      );
+      if (page.keys.length > 0) objectsDeleted += await deleteObjectsByKeys(page.keys);
+      cursor = page.nextCursor;
+    } while (cursor);
 
-      // 4. Stamp — false only if the org somehow stopped being due mid-run.
-      const stamped: boolean = await ctx.runMutation(internal.entityDocuments.markPurged, {
+    // 3. Rows, in batches until the mutation reports nothing left.
+    let done = false;
+    while (!done) {
+      const r: { deleted: number; done: boolean } = await ctx.runMutation(internal.entityDocuments.purgeOrgRows, {
         organizationId: org.organizationId,
       });
-      if (stamped) {
-        console.log(`[offboardingPurge] purged ${org.name} (${org.workosOrgId ?? org.organizationId})`);
-      } else {
-        console.warn(`[offboardingPurge] ${org.name} was no longer due mid-run; not stamped`);
-      }
-      return { stamped, objectsDeleted, rowsDeleted };
-  }
+      rowsDeleted += r.deleted;
+      done = r.done;
+    }
+
+    // 4. Stamp — false only if the org somehow stopped being due mid-run.
+    const stamped: boolean = await ctx.runMutation(internal.entityDocuments.markPurged, {
+      organizationId: org.organizationId,
+    });
+    if (stamped) {
+      console.log(`[offboardingPurge] purged ${org.name} (${org.workosOrgId ?? org.organizationId})`);
+    } else {
+      console.warn(`[offboardingPurge] ${org.name} was no longer due mid-run; not stamped`);
+    }
+    return { stamped, objectsDeleted, rowsDeleted };
 }
