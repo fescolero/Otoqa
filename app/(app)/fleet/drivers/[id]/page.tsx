@@ -900,7 +900,7 @@ export default function DriverDetailPage() {
           </DSCard>
         )}
 
-        <DSCard title="Compliance">
+        <DSCard title={<>Compliance <span className="num text-[var(--text-tertiary)] font-medium">· {complianceItems.length}</span></>}>
           <ComplianceMicroBars items={complianceItems} />
         </DSCard>
       </div>
