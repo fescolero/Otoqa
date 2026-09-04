@@ -21,7 +21,7 @@
  *     the partnership's mirrors and summary account for them (§6).
  */
 
-import { ConvexError, v } from 'convex/values';
+import { ConvexError, v, type Infer } from 'convex/values';
 import { internal } from './_generated/api';
 import type { Doc, Id } from './_generated/dataModel';
 import {
@@ -32,7 +32,13 @@ import {
   type MutationCtx,
   type QueryCtx,
 } from './_generated/server';
-import { assertOrgPermission, assertOrgPermissionOrNotFound, getCallerOrgId, requireCallerIdentity } from './lib/auth';
+import {
+  assertOrgPermission,
+  assertOrgPermissionOrNotFound,
+  getCallerOrgId,
+  isPermissionDenied,
+  requireCallerIdentity,
+} from './lib/auth';
 import { logAudit, type AuditEntityType } from './lib/audit';
 import {
   documentEntityValidator,
@@ -118,29 +124,7 @@ export const sharedDocumentValidator = v.object({
   typeName: v.string(),
 });
 
-type PublicDoc = {
-  _id: Id<'entityDocuments'>;
-  entity: DocumentEntity;
-  entityId: string;
-  typeKey: string;
-  status: 'pending' | 'active' | 'archived';
-  hasFile: boolean;
-  fileName?: string;
-  contentType?: string;
-  sizeBytes?: number;
-  issueDate?: string;
-  expirationDate?: string;
-  note?: string;
-  uploadedBy: string;
-  uploadedByName?: string;
-  uploadedAt: number;
-  activatedAt?: number;
-  archivedAt?: number;
-  archivedBy?: string;
-  archiveNote?: string;
-  supersededById?: Id<'entityDocuments'>;
-  shared?: boolean;
-};
+type PublicDoc = Infer<typeof entityDocumentValidator>;
 
 function toPublic(doc: Doc<'entityDocuments'>, type?: EffectiveDocumentType): PublicDoc {
   return {
@@ -259,8 +243,10 @@ export async function canAccessDocument(
   try {
     await assertEntityAccess(ctx, doc.entity, doc.entityId, intent);
     return true;
-  } catch {
-    /* fall through to the sharing path */
+  } catch (e) {
+    // An owner-org member without the permission hears exactly that, as
+    // listForEntity would say; anyone else falls through to the sharing path.
+    if (isPermissionDenied(e)) throw e;
   }
   if (intent !== 'view' || doc.entity !== 'organization' || doc.status !== 'active') return false;
 
@@ -361,7 +347,7 @@ interface SharedDoc extends PublicDoc {
 /** Everything a carrier org shares, mapped onto the carrier type keys it
  *  satisfies — identical for every partnership of that org, so callers
  *  that fan out over partnerships compute it once. */
-async function sharedDocsFromOrg(ctx: Ctx, org: Doc<'organizations'>): Promise<SharedDoc[]> {
+export async function sharedDocsFromOrg(ctx: Ctx, org: Doc<'organizations'>): Promise<SharedDoc[]> {
   if (!org.workosOrgId || org.isDeleted) return [];
   const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
   const rows = await activeDocsFor(ctx, org.workosOrgId, 'organization', org.workosOrgId);
@@ -645,6 +631,8 @@ async function documentOwnedMirrorTypes(
   entity: 'driver' | 'carrier',
   orgId: string,
   entityId: string,
+  linkedOrgIn?: Doc<'organizations'> | null,
+  fromOrgIn?: SharedDoc[],
 ): Promise<Set<string>> {
   const own = await activeDocsFor(ctx, orgId, entity, entityId);
   const covered = new Set(own.map((d) => d.typeKey));
@@ -652,8 +640,9 @@ async function documentOwnedMirrorTypes(
     const pid = ctx.db.normalizeId('carrierPartnerships', entityId);
     const p = pid ? await ctx.db.get(pid) : null;
     if (p) {
-      const org = p.carrierOrgId ? await orgByAnyId(ctx, p.carrierOrgId) : null;
-      for (const sd of await sharedDocsForPartnership(ctx, p, org)) covered.add(sd.partnerTypeKey);
+      const org =
+        linkedOrgIn !== undefined ? linkedOrgIn : p.carrierOrgId ? await orgByAnyId(ctx, p.carrierOrgId) : null;
+      for (const sd of await sharedDocsForPartnership(ctx, p, org, fromOrgIn)) covered.add(sd.partnerTypeKey);
       if (await linkedOwnerCdlExpiry(ctx, p, org)) covered.add(CARRIER_MIRROR_TO_TYPE_KEY.ownerDriverLicenseExpiration);
     }
   }
@@ -663,14 +652,25 @@ async function documentOwnedMirrorTypes(
 /**
  * For the legacy driver→partnership / org→partnership sync paths: is this
  * partnership mirror document-owned? A sync must then leave it alone —
- * recomputePartnershipDocuments is its only writer.
+ * recomputePartnershipDocuments is its only writer. Loops over one
+ * carrier's partnerships pass the org and its shared set (sharedDocsFromOrg)
+ * so they are resolved once.
  */
 export async function partnershipMirrorIsDocumentOwned(
   ctx: Ctx,
   partnership: Doc<'carrierPartnerships'>,
   field: keyof typeof CARRIER_MIRROR_TO_TYPE_KEY,
+  linkedOrg?: Doc<'organizations'> | null,
+  fromOrg?: SharedDoc[],
 ): Promise<boolean> {
-  const owned = await documentOwnedMirrorTypes(ctx, 'carrier', partnership.brokerOrgId, partnership._id);
+  const owned = await documentOwnedMirrorTypes(
+    ctx,
+    'carrier',
+    partnership.brokerOrgId,
+    partnership._id,
+    linkedOrg,
+    fromOrg,
+  );
   return owned.has(CARRIER_MIRROR_TO_TYPE_KEY[field]);
 }
 

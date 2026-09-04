@@ -483,14 +483,7 @@ export const getDocumentDownloadUrl = action({
       return { url: null, expiresAt: null };
     }
 
-    const { client, bucket } = createS3Client();
-    const expiresIn = 900; // 15 minutes
-    const url = await getSignedUrl(
-      client,
-      new GetObjectCommand({ Bucket: bucket, Key: key }),
-      { expiresIn },
-    );
-    return { url, expiresAt: Date.now() + expiresIn * 1000 };
+    return presignGet({ key });
   },
 });
 

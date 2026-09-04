@@ -6,7 +6,7 @@ import { logPlatformAudit } from '../lib/platformAudit';
 import { endSessionInternal } from '../driverSessions';
 import { GLOBAL_FLAG_SCOPE } from '../featureFlags';
 import { logAudit } from '../lib/audit';
-import { OFFBOARDING_RETENTION_MS, partnershipsLinkedToOrg } from '../lib/orgLookup';
+import { OFFBOARDING_RETENTION_MS, partnershipSharesDocuments, partnershipsLinkedToOrg } from '../lib/orgLookup';
 import { recomputeLinkedPartnerships } from '../entityDocuments';
 
 /**
@@ -560,9 +560,11 @@ export const startOffboarding = mutation({
       purgeAt,
       updatedAt: now,
     });
-    // Notify linked brokers through their partnership's activity trail.
+    // Notify linked brokers through their partnership's activity trail —
+    // only links that carry shared documents (a terminated or unaccepted
+    // link has nothing to save).
     let notified = 0;
-    for (const p of await partnershipsLinkedToOrg(ctx, org)) {
+    for (const p of (await partnershipsLinkedToOrg(ctx, org)).filter(partnershipSharesDocuments)) {
       await logAudit(ctx, {
         organizationId: p.brokerOrgId,
         entityType: 'carrierPartnership',
@@ -611,7 +613,7 @@ export const cancelOffboarding = mutation({
       purgeAt: undefined,
       updatedAt: Date.now(),
     });
-    for (const p of await partnershipsLinkedToOrg(ctx, org)) {
+    for (const p of (await partnershipsLinkedToOrg(ctx, org)).filter(partnershipSharesDocuments)) {
       await logAudit(ctx, {
         organizationId: p.brokerOrgId,
         entityType: 'carrierPartnership',

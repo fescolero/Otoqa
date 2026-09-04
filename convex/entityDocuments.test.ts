@@ -1226,6 +1226,16 @@ describe('second-review follow-ups', () => {
     expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2032-01-01');
   });
 
+  it('an org member without the permission hears the permission error on the signed-GET path, not "not found"', async () => {
+    const t = setup();
+    const driverId = await t.run((ctx) => insertDriver(ctx));
+    const docId = await uploadFor(t, EDITOR, 'driver', driverId, 'cdl', { expirationDate: '2031-01-01' });
+    const noFleet = { ...EDITOR, subject: 'user_no_fleet', permissions: [...permissionsForLevel('partners', 'view')] };
+    await expect(t.withIdentity(noFleet as never).query(internal.entityDocuments.getForAccess, { docId })).rejects.toThrow(
+      /fleet:view/,
+    );
+  });
+
   it('startOffboarding is idempotent: a repeat call neither re-notifies nor re-audits', async () => {
     const t = setup();
     const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
