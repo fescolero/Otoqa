@@ -977,8 +977,10 @@ export const listForEntity = query({
       if (p && partnershipSharesDocuments(p)) {
         const org = await orgByAnyId(ctx, p.carrierOrgId);
         shared = await sharedDocsForPartnership(ctx, p, org);
-        linkedCarrierName = org?.name;
-        if (org && isOffboarding(org) && org.purgeAt && org.offboardingStartedAt) {
+        // A soft-deleted carrier shares nothing (see sharedDocsForPartnership),
+        // so don't announce a link that carries nothing.
+        linkedCarrierName = org && !org.isDeleted ? org.name : undefined;
+        if (org && !org.isDeleted && isOffboarding(org) && org.purgeAt && org.offboardingStartedAt) {
           linkedCarrierOffboarding = { purgeAt: org.purgeAt, startedAt: org.offboardingStartedAt };
         }
       }
@@ -1388,13 +1390,15 @@ export const recomputeSummariesForOrg = internalMutation({
 /**
  * One-time backfill after deploy: stamp `missingDocTypeKeys` on every
  * driver so list pages stop relying on the "undefined = all missing"
- * fallback. Paged; re-runnable.
+ * fallback. Paged and self-scheduling: one run stamps the first page and
+ * schedules the rest, so the documented command finishes the whole table.
+ * Re-runnable (already-stamped rows are no-ops).
  *
  *   npx convex run entityDocuments:backfillDriverSummaries
  */
 export const backfillDriverSummaries = internalMutation({
   args: { cursor: v.optional(v.string()), batch: v.optional(v.number()) },
-  returns: v.object({ processed: v.number(), nextCursor: v.union(v.string(), v.null()) }),
+  returns: v.object({ processed: v.number(), nextCursor: v.union(v.string(), v.null()), scheduledNext: v.boolean() }),
   handler: async (ctx, args) => {
     const page = await ctx.db
       .query('drivers')
@@ -1411,19 +1415,27 @@ export const backfillDriverSummaries = internalMutation({
       await recomputeEntitySummary(ctx, d.organizationId, 'driver', d._id, catalog);
       processed++;
     }
-    return { processed, nextCursor: page.isDone ? null : page.continueCursor };
+    const nextCursor = page.isDone ? null : page.continueCursor;
+    if (nextCursor) {
+      await ctx.scheduler.runAfter(0, internal.entityDocuments.backfillDriverSummaries, {
+        cursor: nextCursor,
+        batch: args.batch,
+      });
+    }
+    return { processed, nextCursor, scheduledNext: nextCursor !== null };
   },
 });
 
 /**
  * Phase 2 backfill: stamp `missingDocTypeKeys` (and any effective mirrors
- * from shared carrier documents) on every partnership. Paged; re-runnable.
+ * from shared carrier documents) on every partnership. Paged and
+ * self-scheduling like backfillDriverSummaries; re-runnable.
  *
  *   npx convex run entityDocuments:backfillPartnershipSummaries
  */
 export const backfillPartnershipSummaries = internalMutation({
   args: { cursor: v.optional(v.string()), batch: v.optional(v.number()) },
-  returns: v.object({ processed: v.number(), nextCursor: v.union(v.string(), v.null()) }),
+  returns: v.object({ processed: v.number(), nextCursor: v.union(v.string(), v.null()), scheduledNext: v.boolean() }),
   handler: async (ctx, args) => {
     const page = await ctx.db
       .query('carrierPartnerships')
@@ -1439,7 +1451,14 @@ export const backfillPartnershipSummaries = internalMutation({
       await recomputePartnershipDocuments(ctx, p._id, catalog);
       processed++;
     }
-    return { processed, nextCursor: page.isDone ? null : page.continueCursor };
+    const nextCursor = page.isDone ? null : page.continueCursor;
+    if (nextCursor) {
+      await ctx.scheduler.runAfter(0, internal.entityDocuments.backfillPartnershipSummaries, {
+        cursor: nextCursor,
+        batch: args.batch,
+      });
+    }
+    return { processed, nextCursor, scheduledNext: nextCursor !== null };
   },
 });
 

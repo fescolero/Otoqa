@@ -125,7 +125,9 @@ export default function DriverDetailPage() {
   const driverLoadsData = useQuery(api.loads.getByDriver, { driverId, status: loadStatusFilter });
   const recentDriverLoads = useQuery(api.loads.getRecentByDriver, { driverId, limit: 4 });
   // Documents summary — same rows/status as the Documents tab (one source).
-  const driverDocs = useDriverDocuments(driverId);
+  // Held at 'skip' until the driver row is confirmed: listForEntity throws
+  // for a cross-org id, which must not pre-empt the "not found" state.
+  const driverDocs = useDriverDocuments(driver ? driverId : undefined);
 
   const deactivateDriver = useMutation(api.drivers.deactivate);
   const restoreDriver = useMutation(api.drivers.restore);

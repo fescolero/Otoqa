@@ -128,7 +128,9 @@ export function composeDocumentsViewModel(
   const counts: DocumentCounts = { total: rows.length, onFile: 0, valid: 0, expiring: 0, expired: 0, missing: 0 };
   let attention = 0;
   for (const r of rows) {
-    if (r.doc) counts.onFile++;
+    // A row can hold a document and still be Missing (a date-only entry
+    // after uploadRequired flipped back on) — never count it under both.
+    if (r.doc && r.status !== 'missing') counts.onFile++;
     switch (r.status) {
       case 'valid':
       case 'warning':
@@ -213,6 +215,14 @@ export function formatYmd(ymd?: string | null): string {
   if (!m) return ymd;
   const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+/** A stored timestamp shown as the viewer's calendar day (not UTC's). */
+export function formatTimestamp(ms?: number | null): string {
+  if (!ms) return '—';
+  const d = new Date(ms);
+  const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return formatYmd(ymd);
 }
 
 export function formatBytes(n?: number): string {

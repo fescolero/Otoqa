@@ -1123,6 +1123,28 @@ describe('second-review follow-ups', () => {
     expect(page.nextCursor).toBeNull();
   });
 
+  it('backfillDriverSummaries finishes the whole table from one command by scheduling later pages', async () => {
+    const t = setup();
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 7; i++) await insertDriver(ctx);
+    });
+    const first = await t.mutation(internal.entityDocuments.backfillDriverSummaries, { batch: 3 });
+    expect(first).toMatchObject({ processed: 3, scheduledNext: true });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const drivers = await t.run((ctx) => ctx.db.query('drivers').collect());
+    expect(drivers.every((d) => d.missingDocTypeKeys !== undefined)).toBe(true);
+  });
+
+  it('a soft-deleted carrier is not announced as linked', async () => {
+    const t = setup();
+    const { orgId, partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    await t.run((ctx) => ctx.db.patch(orgId, { isDeleted: true }));
+    const list = await t.withIdentity(BROKER_USER as never).query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(list.shared).toHaveLength(0);
+    expect(list.linkedCarrierName).toBeUndefined();
+  });
+
   it('startOffboarding is idempotent: a repeat call neither re-notifies nor re-audits', async () => {
     const t = setup();
     const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));

@@ -114,7 +114,9 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
   const partnership = useQuery(api.carrierPartnerships.get, { partnershipId });
   // Documents summary (same subscription the Documents tab uses) — for
   // the offboarding notice in the rail (documents-storage-spec.md §7).
-  const partnershipDocs = useEntityDocuments('carrier', partnershipId);
+  // Skipped until the partnership row is confirmed: listForEntity throws
+  // for a cross-org id, which must not pre-empt "Carrier not found".
+  const partnershipDocs = useEntityDocuments('carrier', partnership ? partnershipId : undefined);
 
   const [loadStatusFilter, setLoadStatusFilter] = React.useState<AssignedLoadStatus>('Assigned');
   const carrierLoads = useQuery(
@@ -679,7 +681,7 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
             items={[
               {
                 icon: 'alert',
-                text: `${partnershipDocs.linkedCarrierName ?? 'This carrier'} is offboarding. Shared documents are removed on ${formatDate(new Date(partnershipDocs.linkedCarrierOffboarding.purgeAt).toISOString().slice(0, 10))} — save copies from the Documents tab.`,
+                text: `${partnershipDocs.linkedCarrierName ?? 'This carrier'} is offboarding. Shared documents are removed on ${formatDate(partnershipDocs.linkedCarrierOffboarding.purgeAt)} — save copies from the Documents tab.`,
                 when: 'action needed',
               },
             ]}
