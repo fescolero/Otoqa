@@ -94,13 +94,14 @@ export function NowDriverInTransit({ load }: { load: DriverActiveLoad }) {
         </span>
         <Chip status="active" label="In transit" />
       </div>
-      <div className="text-[12.5px] text-foreground leading-[18px] mb-2.5">
-        {load.from} <span className="text-[var(--text-tertiary)]">→</span> {load.to}
-      </div>
       <div
         className="grid text-[12.5px] leading-[18px] items-baseline"
         style={{ gridTemplateColumns: 'auto 1fr', rowGap: 6, columnGap: 12 }}
       >
+        <div className="text-[var(--text-tertiary)]">Route</div>
+        <div className="text-foreground min-w-0 truncate">
+          {load.from} <span className="text-[var(--text-tertiary)]">→</span> {load.to}
+        </div>
         {load.truck && (
           <>
             <div className="text-[var(--text-tertiary)]">Truck</div>
