@@ -32,7 +32,7 @@ import {
   type MutationCtx,
   type QueryCtx,
 } from './_generated/server';
-import { assertOrgPermission, getCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { assertOrgPermission, assertOrgPermissionOrNotFound, getCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit, type AuditEntityType } from './lib/audit';
 import {
   documentEntityValidator,
@@ -40,6 +40,7 @@ import {
   loadEffectiveCatalog,
 } from './lib/documentCatalog';
 import type { DocumentEntity } from './lib/documentTypeDefaults';
+import { CARRIER_MIRROR_TO_TYPE_KEY, DRIVER_MIRROR_TO_TYPE_KEY } from './lib/documentTypeDefaults';
 import { isOffboarding, orgByAnyId, partnershipSharesDocuments, partnershipsLinkedToOrg } from './lib/orgLookup';
 import { logPlatformAudit } from './lib/platformAudit';
 import {
@@ -225,15 +226,8 @@ export async function assertEntityAccess(
 ): Promise<Caller & { owner: Owner }> {
   const owner = await resolveOwner(ctx, entity, entityId);
   if (!owner) throw new ConvexError('Not found');
-  let who: Caller;
-  try {
-    who = await assertOrgPermission(ctx, owner.orgId, `${PERMISSION_AREA[entity]}:${intent}`);
-  } catch (e) {
-    // Cross-org callers get the same answer as a missing row.
-    const msg = e instanceof ConvexError ? String(e.data) : '';
-    if (msg.includes('Not authorized')) throw new ConvexError('Not found');
-    throw e;
-  }
+  // Cross-org callers get the same answer as a missing row.
+  const who: Caller = await assertOrgPermissionOrNotFound(ctx, owner.orgId, `${PERMISSION_AREA[entity]}:${intent}`);
   return { ...who, owner };
 }
 
@@ -364,17 +358,11 @@ interface SharedDoc extends PublicDoc {
   raw: Doc<'entityDocuments'>;
 }
 
-/** The linked carrier org's shared organization documents, mapped onto
- *  the carrier type keys they satisfy on this partnership. Pass `linkedOrg`
- *  when the caller already resolved it (orgByAnyId is up to three reads). */
-async function sharedDocsForPartnership(
-  ctx: Ctx,
-  p: Doc<'carrierPartnerships'>,
-  linkedOrg?: Doc<'organizations'> | null,
-): Promise<SharedDoc[]> {
-  if (!partnershipSharesDocuments(p)) return [];
-  const org = linkedOrg === undefined ? await orgByAnyId(ctx, p.carrierOrgId) : linkedOrg;
-  if (!org?.workosOrgId || org.isDeleted) return [];
+/** Everything a carrier org shares, mapped onto the carrier type keys it
+ *  satisfies — identical for every partnership of that org, so callers
+ *  that fan out over partnerships compute it once. */
+async function sharedDocsFromOrg(ctx: Ctx, org: Doc<'organizations'>): Promise<SharedDoc[]> {
+  if (!org.workosOrgId || org.isDeleted) return [];
   const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
   const rows = await activeDocsFor(ctx, org.workosOrgId, 'organization', org.workosOrgId);
   const out: SharedDoc[] = [];
@@ -391,6 +379,21 @@ async function sharedDocsForPartnership(
     });
   }
   return out;
+}
+
+/** The linked carrier org's shared documents as seen from ONE partnership
+ *  (nothing unless the link shares). Pass `linkedOrg` / `fromOrg` when the
+ *  caller already resolved them (orgByAnyId is up to three reads). */
+async function sharedDocsForPartnership(
+  ctx: Ctx,
+  p: Doc<'carrierPartnerships'>,
+  linkedOrg?: Doc<'organizations'> | null,
+  fromOrg?: SharedDoc[],
+): Promise<SharedDoc[]> {
+  if (!partnershipSharesDocuments(p)) return [];
+  const org = linkedOrg === undefined ? await orgByAnyId(ctx, p.carrierOrgId) : linkedOrg;
+  if (!org?.workosOrgId || org.isDeleted) return [];
+  return fromOrg ?? sharedDocsFromOrg(ctx, org);
 }
 
 // ─── Mirrors + summaries ─────────────────────────────────────────────────
@@ -436,6 +439,13 @@ async function syncOwnerDriverLicense(
   }
 }
 
+function sameRecord(a: Record<string, string> | undefined, b: Record<string, string>): boolean {
+  if (!a) return false; // unstamped → stamp (even an empty map marks it computed)
+  const ak = Object.keys(a).sort();
+  const bk = Object.keys(b).sort();
+  return ak.length === bk.length && ak.every((k, i) => k === bk[i] && a[k] === b[k]);
+}
+
 function sameKeys(a: string[] | undefined, b: string[]): boolean {
   return !!a && a.length === b.length && a.every((k, i) => k === b[i]);
 }
@@ -453,12 +463,13 @@ export async function recomputePartnershipDocuments(
   ctx: MutationCtx,
   partnershipId: Id<'carrierPartnerships'>,
   catalogIn?: EffectiveDocumentType[],
+  sharedIn?: SharedDoc[],
 ): Promise<void> {
   const p = await ctx.db.get(partnershipId);
   if (!p) return;
   const catalog = catalogIn ?? (await loadEffectiveCatalog(ctx, p.brokerOrgId, 'carrier'));
   const own = await activeDocsFor(ctx, p.brokerOrgId, 'carrier', p._id);
-  const shared = await sharedDocsForPartnership(ctx, p);
+  const shared = sharedIn ?? (await sharedDocsForPartnership(ctx, p));
 
   const missing = computeMissingTypeKeys(catalog, [
     ...own.map((d) => ({ typeKey: d.typeKey, hasFile: !!d.externalKey })),
@@ -487,11 +498,22 @@ export async function recomputePartnershipDocuments(
 
 /** A carrier org's organization documents changed (or its sharing did):
  *  every broker linked to it may see a different effective set. */
-async function recomputeLinkedPartnerships(ctx: MutationCtx, orgWorkosId: string): Promise<void> {
-  const org = await orgByAnyId(ctx, orgWorkosId);
+/** Resummarize every partnership linked to a carrier org after anything
+ *  on the carrier side changed (a document, a sharing flag, soft-delete /
+ *  restore, purge). The org's shared set and each broker's catalog are
+ *  resolved once, not once per partnership. */
+export async function recomputeLinkedPartnerships(ctx: MutationCtx, orgAnyId: string): Promise<void> {
+  const org = await orgByAnyId(ctx, orgAnyId);
   if (!org) return;
+  const fromOrg = await sharedDocsFromOrg(ctx, org);
+  const catalogs = new Map<string, EffectiveDocumentType[]>();
   for (const p of await partnershipsLinkedToOrg(ctx, org)) {
-    await recomputePartnershipDocuments(ctx, p._id);
+    let catalog = catalogs.get(p.brokerOrgId);
+    if (!catalog) {
+      catalog = await loadEffectiveCatalog(ctx, p.brokerOrgId, 'carrier');
+      catalogs.set(p.brokerOrgId, catalog);
+    }
+    await recomputePartnershipDocuments(ctx, p._id, catalog, partnershipSharesDocuments(p) ? fromOrg : []);
   }
 }
 
@@ -521,12 +543,24 @@ export async function recomputeEntitySummary(
         types,
         active.map((d) => ({ typeKey: d.typeKey, hasFile: !!d.externalKey })),
       );
+      // Effective expiration per expiring type (latest wins for
+      // multi-document types) — list-row attention for the types that
+      // have no mirror field.
+      const docExpirations: Record<string, string> = {};
+      for (const d of active) {
+        const type = types.find((t) => t.key === d.typeKey);
+        if (!type?.expires || type.hidden || !d.expirationDate) continue;
+        const cur = docExpirations[d.typeKey];
+        if (!cur || d.expirationDate > cur) docExpirations[d.typeKey] = d.expirationDate;
+      }
       const id = ctx.db.normalizeId('drivers', entityId);
       if (!id) return;
       const driver = await ctx.db.get(id);
-      if (driver && !sameKeys(driver.missingDocTypeKeys, missing)) {
-        await ctx.db.patch(id, { missingDocTypeKeys: missing });
-      }
+      if (!driver) return;
+      const patch: Partial<Doc<'drivers'>> = {};
+      if (!sameKeys(driver.missingDocTypeKeys, missing)) patch.missingDocTypeKeys = missing;
+      if (!sameRecord(driver.docExpirations, docExpirations)) patch.docExpirations = docExpirations;
+      if (Object.keys(patch).length > 0) await ctx.db.patch(id, patch);
       return;
     }
     case 'carrier': {
@@ -537,6 +571,43 @@ export async function recomputeEntitySummary(
     case 'organization':
       await recomputeLinkedPartnerships(ctx, entityId);
       return;
+  }
+}
+
+/**
+ * Mirror fields (drivers.licenseExpiration…, carrierPartnerships.
+ * insuranceExpiration / ownerDriverLicenseExpiration) are written FROM the
+ * effective document. Once a document exists for the type, the field is
+ * read-only everywhere else — a second writer would put the list badges
+ * and the Documents tab in disagreement (spec §6.3). Rows with no
+ * document keep the field editable.
+ */
+export async function assertMirrorsEditable(
+  ctx: Ctx,
+  entity: 'driver' | 'carrier',
+  orgId: string,
+  entityId: string,
+  editedFields: readonly string[],
+): Promise<void> {
+  const mirrorToType: Record<string, string> =
+    entity === 'driver' ? DRIVER_MIRROR_TO_TYPE_KEY : CARRIER_MIRROR_TO_TYPE_KEY;
+  const touched = editedFields.filter((f) => f in mirrorToType);
+  if (touched.length === 0) return;
+  const catalog = await loadEffectiveCatalog(ctx, orgId, entity);
+  const own = await activeDocsFor(ctx, orgId, entity, entityId);
+  const covered = new Set(own.map((d) => d.typeKey));
+  if (entity === 'carrier') {
+    const pid = ctx.db.normalizeId('carrierPartnerships', entityId);
+    const p = pid ? await ctx.db.get(pid) : null;
+    if (p) for (const sd of await sharedDocsForPartnership(ctx, p)) covered.add(sd.partnerTypeKey);
+  }
+  for (const field of touched) {
+    const typeKey = mirrorToType[field];
+    if (!covered.has(typeKey)) continue;
+    const name = catalog.find((t) => t.key === typeKey)?.name ?? typeKey;
+    throw new ConvexError(
+      `${name} expiration comes from the ${name} document — replace the document from the Documents tab to change it`,
+    );
   }
 }
 

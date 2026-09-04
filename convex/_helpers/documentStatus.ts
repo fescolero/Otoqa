@@ -153,6 +153,10 @@ export function computeMissingTypeKeys(
  */
 export interface DriverAttentionInput {
   missingDocTypeKeys?: string[] | null;
+  /** typeKey → effective expiration for every expiring type with an
+   *  active document (written with the summary). Covers types that have
+   *  no mirror field (hazmat, custom types). */
+  docExpirations?: Record<string, string> | null;
   licenseExpiration?: string;
   medicalExpiration?: string;
   badgeExpiration?: string;
@@ -183,16 +187,21 @@ export function countDriverAttention(
 ): number {
   const missing = new Set(driverMissingKeys(row));
   let count = missing.size;
+  // One date per type: the mirror fields (legacy rows) overlaid by the
+  // per-type summary, which is written from the same documents and also
+  // covers the types that have no mirror.
+  const dates = new Map<string, string | undefined>();
   const mirrors: DriverMirrorField[] = [
     'licenseExpiration',
     'medicalExpiration',
     'badgeExpiration',
     'twicExpiration',
   ];
-  for (const field of mirrors) {
-    const typeKey = DRIVER_MIRROR_TO_TYPE_KEY[field];
+  for (const field of mirrors) dates.set(DRIVER_MIRROR_TO_TYPE_KEY[field], row[field]);
+  for (const [typeKey, date] of Object.entries(row.docExpirations ?? {})) dates.set(typeKey, date);
+  for (const [typeKey, date] of dates) {
     if (missing.has(typeKey) || hiddenTypeKeys?.has(typeKey)) continue;
-    const s = dateExpiryStatus(row[field], todayStr);
+    const s = dateExpiryStatus(date, todayStr);
     if (s === 'expired' || s === 'expiring') count++;
   }
   return count;

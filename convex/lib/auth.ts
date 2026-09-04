@@ -233,6 +233,25 @@ export async function assertOrgPermission(
 }
 
 /**
+ * assertOrgPermission whose cross-org refusal reads as "not found", so a
+ * caller cannot tell another org's row from a missing one.
+ */
+export async function assertOrgPermissionOrNotFound(
+  ctx: AnyCtx,
+  claimedOrgId: string,
+  slug: string,
+  notFoundMessage = 'Not found',
+): Promise<{ orgId: string; userId: string; userName: string | undefined; userEmail: string | undefined }> {
+  try {
+    return await assertOrgPermission(ctx, claimedOrgId, slug);
+  } catch (e) {
+    const msg = e instanceof ConvexError ? String(e.data) : '';
+    if (msg.includes('Not authorized')) throw new ConvexError(notFoundMessage);
+    throw e;
+  }
+}
+
+/**
  * Mobile Dispatch capabilities (split-plan §4.2, decision D9) mapped to
  * RBAC permission slugs for WorkOS staff callers. Clerk mobile callers
  * (the "Owner-operator" persona) hold every capability by definition.

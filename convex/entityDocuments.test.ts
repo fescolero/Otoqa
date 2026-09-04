@@ -1145,6 +1145,35 @@ describe('second-review follow-ups', () => {
     expect(list.linkedCarrierName).toBeUndefined();
   });
 
+  it('the summary stamps docExpirations for every expiring type, and drivers.update refuses to edit a mirrored date once a document exists', async () => {
+    const t = setup();
+    const driverId = await t.run((ctx) => insertDriver(ctx));
+    await uploadFor(t, EDITOR, 'driver', driverId, 'hazmat', { expirationDate: '2031-02-02' });
+    await uploadFor(t, EDITOR, 'driver', driverId, 'cdl', { expirationDate: '2031-03-03' });
+    const d = await t.run((ctx) => ctx.db.get(driverId));
+    expect(d?.docExpirations).toEqual({ hazmat: '2031-02-02', cdl: '2031-03-03' });
+    expect(d?.licenseExpiration).toBe('2031-03-03');
+
+    await expect(
+      t.withIdentity(EDITOR as never).mutation(api.drivers.update, { id: driverId, licenseExpiration: '2040-01-01' }),
+    ).rejects.toThrow(/replace the document/);
+    // A mirror with no document behind it stays editable.
+    await t.withIdentity(EDITOR as never).mutation(api.drivers.update, { id: driverId, medicalExpiration: '2030-01-01' });
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.medicalExpiration).toBe('2030-01-01');
+  });
+
+  it('soft-deleting and restoring a carrier org resummarizes its linked partnerships', async () => {
+    const t = setup();
+    const { orgId, partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.missingDocTypeKeys).not.toContain('coi');
+    const asStaff = t.withIdentity(STAFF as never);
+    await asStaff.mutation(api.platform.support.softDeleteOrg, { organizationId: orgId, reason: 'Test' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.missingDocTypeKeys).toContain('coi');
+    await asStaff.mutation(api.platform.support.restoreOrg, { organizationId: orgId, reason: 'Test' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.missingDocTypeKeys).not.toContain('coi');
+  });
+
   it('startOffboarding is idempotent: a repeat call neither re-notifies nor re-audits', async () => {
     const t = setup();
     const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));

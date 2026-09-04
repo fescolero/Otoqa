@@ -90,7 +90,16 @@ export function useUploadSequence() {
         }
 
         setPhase('finalizing');
-        return await steps.finalize(presigned, normalized);
+        try {
+          return await steps.finalize(presigned, normalized);
+        } catch (finalizeErr) {
+          // The object is in the bucket but was not recorded (dates
+          // rejected, type hidden meanwhile…): drop it now rather than
+          // leaving a pending row + object per retry until the sweep.
+          // cancel is a no-op once a row is active.
+          await steps.cancel(presigned).catch(() => undefined);
+          throw finalizeErr;
+        }
       } catch (e) {
         setError(convexErrorMessage(e) ?? (e instanceof Error ? e.message : 'Upload failed. Please try again.'));
         return undefined;

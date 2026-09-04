@@ -7,6 +7,7 @@ import { endSessionInternal } from '../driverSessions';
 import { GLOBAL_FLAG_SCOPE } from '../featureFlags';
 import { logAudit } from '../lib/audit';
 import { OFFBOARDING_RETENTION_MS, partnershipsLinkedToOrg } from '../lib/orgLookup';
+import { recomputeLinkedPartnerships } from '../entityDocuments';
 
 /**
  * Platform console — support operations (Phase 2). Staff-only, and every
@@ -493,6 +494,8 @@ export const softDeleteOrg = mutation({
       after: JSON.stringify({ isDeleted: true }),
       reason: args.reason,
     });
+    // A deleted carrier shares nothing — linked brokers' summaries change.
+    await recomputeLinkedPartnerships(ctx, org._id as string);
     return null;
   },
 });
@@ -522,6 +525,8 @@ export const restoreOrg = mutation({
       after: JSON.stringify({ isDeleted: false }),
       reason: args.reason,
     });
+    // Sharing resumes — linked brokers' summaries change back.
+    await recomputeLinkedPartnerships(ctx, org._id as string);
     return null;
   },
 });

@@ -376,6 +376,15 @@ The Documents tab badge and the attention item counts become live.
 
 ### 6.3 Effective status and mirrors
 
+- Mirror fields are written from the effective document only. Once a
+  document (own or carrier-shared) exists for the type, `drivers.update`
+  and `carrierPartnerships.update` refuse a direct edit of that mirror
+  (`assertMirrorsEditable`): replace the document instead. Rows with no
+  document keep the field editable.
+- `drivers.docExpirations` (typeKey → date) is stamped with the summary
+  so list-row attention covers expiring types that have no mirror field
+  (hazmat, custom types); `countDriverAttention` reads it over the mirrors.
+
 - For a type present from both sources, the effective status uses the
   **latest expiry** across the broker's active row and the carrier's shared
   active row. The row that won is marked as the source.

@@ -765,16 +765,20 @@ export default function DriverDetailPage() {
   // (including the ones that didn't get their own chip above).
   const docsAttention = driverDocs.attention;
   const docsCritical = docAlerts.some((r) => r.status === 'expired' || r.status === 'missing');
-  attentionItems.push({
-    tone: docsAttention === 0 ? 'ok' : docsCritical ? 'crit' : 'warn',
-    icon: docsAttention === 0 ? 'check' : 'file-text',
-    tab: 'documents',
-    title: `${driverDocs.counts.onFile} of ${driverDocs.counts.total} documents on file`,
-    detail:
-      docsAttention === 0
-        ? 'All current'
-        : `${docsAttention} need${docsAttention === 1 ? 's' : ''} attention`,
-  });
+  // Nothing to assert until the documents query resolves — an empty model
+  // must not read as "0 of 0 on file · All current".
+  if (!driverDocs.loading) {
+    attentionItems.push({
+      tone: docsAttention === 0 ? 'ok' : docsCritical ? 'crit' : 'warn',
+      icon: docsAttention === 0 ? 'check' : 'file-text',
+      tab: 'documents',
+      title: `${driverDocs.counts.onFile} of ${driverDocs.counts.total} documents on file`,
+      detail:
+        docsAttention === 0
+          ? 'All current'
+          : `${docsAttention} need${docsAttention === 1 ? 's' : ''} attention`,
+    });
+  }
 
   const headline = onLoad ? (
     <span>
@@ -786,17 +790,21 @@ export default function DriverDetailPage() {
       >
         {inTransitLoad?.orderNumber}
       </button>
-      {driverDocs.attention === 0
-        ? <>, all compliance current.</>
-        : <>, with compliance items needing attention before next dispatch.</>}
+      {driverDocs.loading
+        ? <>.</>
+        : driverDocs.attention === 0
+          ? <>, all compliance current.</>
+          : <>, with compliance items needing attention before next dispatch.</>}
     </span>
   ) : (
     <span>
       <strong className="text-foreground">{firstName}</strong> is{' '}
       <span style={{ color: '#0F8C5F', fontWeight: 500 }}>available</span> and ready to dispatch
-      {driverDocs.attention === 0
-        ? <> — all compliance current.</>
-        : <> — compliance items pending review.</>}
+      {driverDocs.loading
+        ? <>.</>
+        : driverDocs.attention === 0
+          ? <> — all compliance current.</>
+          : <> — compliance items pending review.</>}
     </span>
   );
 

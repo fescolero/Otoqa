@@ -174,9 +174,11 @@ export function ExportAllDocumentsButton({ orgLabel }: { orgLabel?: string }) {
       const fetched = failed ? `${done - failed} of ${total} documents (${failed} could not be fetched)` : `${total} documents`;
       if (built.length === 1) {
         // One file: the click that started the export covers this download.
+        // The URL stays alive (and a "Download again" button offered) until
+        // Done — revoking on a timer would abort a slow Save-As dialog.
         const only = { ...built[0], name: built[0].name.replace(/-part1\.zip$/, '.zip') };
+        setParts([only]);
         triggerDownload(only.url, only.name);
-        setTimeout(() => URL.revokeObjectURL(only.url), 10_000);
         toast.success(`Exported ${fetched}`);
       } else if (built.length > 1) {
         // Several files: browsers block automatic downloads after the first,
@@ -204,7 +206,7 @@ export function ExportAllDocumentsButton({ orgLabel }: { orgLabel?: string }) {
       </WBtn>
       {parts.map((p, i) => (
         <WBtn key={p.url} size="sm" variant="primary" leading="export" onClick={() => triggerDownload(p.url, p.name)}>
-          Download part {i + 1} of {parts.length}
+          {parts.length === 1 ? 'Download again' : `Download part ${i + 1} of ${parts.length}`}
         </WBtn>
       ))}
       {parts.length > 0 && (

@@ -2,7 +2,13 @@ import { ConvexError, v } from 'convex/values';
 import { internalMutation, internalQuery, mutation, query, type QueryCtx } from './_generated/server';
 import type { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
-import { assertOrgPermission, getCallerOrgId, requireCallerIdentity, requireCallerOrgId } from './lib/auth';
+import {
+  assertOrgPermission,
+  assertOrgPermissionOrNotFound,
+  getCallerOrgId,
+  requireCallerIdentity,
+  requireCallerOrgId,
+} from './lib/auth';
 import { logAudit } from './lib/audit';
 import { isStoredContentType, keyFromExternalUrl, webLoadDocTypeValidator as webDocType } from './lib/r2';
 import { resolveAuthenticatedDriver } from './driverMobile';
@@ -56,13 +62,7 @@ export const resolveLoadForWebUpload = internalQuery({
   handler: async (ctx, args) => {
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new ConvexError('Load not found');
-    try {
-      await assertOrgPermission(ctx, load.workosOrgId, 'loads:edit');
-    } catch (e) {
-      const msg = e instanceof ConvexError ? String(e.data) : '';
-      if (msg.includes('Not authorized')) throw new ConvexError('Load not found');
-      throw e;
-    }
+    await assertOrgPermissionOrNotFound(ctx, load.workosOrgId, 'loads:edit', 'Load not found');
     return { orgId: load.workosOrgId, orderNumber: load.orderNumber };
   },
 });

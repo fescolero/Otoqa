@@ -141,6 +141,11 @@ describe('driverMissingKeys / countDriverAttention', () => {
     expect(countDriverAttention({ missingDocTypeKeys: [] }, today)).toBe(0);
   });
 
+  it('non-mirrored expiring types count through docExpirations (and a mirror is not double counted)', () => {
+    const row = { missingDocTypeKeys: [], licenseExpiration: '2020-01-01', docExpirations: { hazmat: '2020-06-01', cdl: '2020-01-01' } };
+    expect(countDriverAttention(row, today)).toBe(2);
+  });
+
   it("a hidden type's stale mirror is not attention (the Documents tab shows nothing for it)", () => {
     const row = { missingDocTypeKeys: [], twicExpiration: '2020-01-01' };
     expect(countDriverAttention(row, today)).toBe(1);

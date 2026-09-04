@@ -3,7 +3,7 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
-import { recomputePartnershipDocuments, stampNewDriverSummary } from './entityDocuments';
+import { assertMirrorsEditable, recomputePartnershipDocuments, stampNewDriverSummary } from './entityDocuments';
 import {
   scheduleCreateClerkUserForDriver,
   scheduleSyncCarrierOwnerToClerk,
@@ -753,6 +753,9 @@ export const update = mutation({
       }
     }
 
+    // Expiration mirrors belong to the documents once one exists (own or
+    // carrier-shared) for the type.
+    await assertMirrorsEditable(ctx, 'carrier', partnership.brokerOrgId, partnershipId, Object.keys(cleanUpdates));
     await ctx.db.patch(partnershipId, cleanUpdates);
 
     // If marking as owner-operator and there's a linked carrier org, create/link driver record
