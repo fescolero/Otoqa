@@ -50,7 +50,17 @@ import {
 import { PayeeProfilesCard } from '@/components/web/pay-profiles/payee-profiles-card';
 import { EntityDocumentsTab } from '@/components/web/documents/entity-documents-tab';
 import { useDriverDocuments } from '@/components/web/documents/use-entity-documents';
-import { complianceChipForStatus, formatYmd as formatDocDate } from '@/components/web/documents/entity-documents-model';
+import {
+  complianceChipForStatus,
+  formatYmd as formatDocDate,
+  type DocumentRowModel,
+} from '@/components/web/documents/entity-documents-model';
+import {
+  dateExpiryStatus,
+  needsAttention as docNeedsAttention,
+  type DocumentStatus,
+} from '@/convex/_helpers/documentStatus';
+import type { DriverMirrorField } from '@/convex/lib/documentTypeDefaults';
 
 import { DeleteConfirmationDialog } from '@/components/drivers/delete-confirmation-dialog';
 import {
@@ -631,19 +641,42 @@ export default function DriverDetailPage() {
   const onLoad = Boolean(inTransitLoad);
   const firstName = driver.firstName || fullName.split(' ')[0];
 
+  // Driver-record "mirror" dates (licenseExpiration, medicalExpiration, …)
+  // are written by the document workflow, but day-one drivers imported
+  // with dates and no files still carry them. For a Missing row that date
+  // is the only context we have, so surface it (spec §5.3).
+  const DRIVER_MIRROR_FIELDS: readonly DriverMirrorField[] = [
+    'licenseExpiration',
+    'medicalExpiration',
+    'badgeExpiration',
+    'twicExpiration',
+  ];
+  const mirrorDateFor = (r: DocumentRowModel): string | undefined => {
+    const f = r.type.mirrorField;
+    if (!f || !(DRIVER_MIRROR_FIELDS as readonly string[]).includes(f)) return undefined;
+    return driver[f as DriverMirrorField] || undefined;
+  };
+  /** Effective expiry for a row: the document's own date, else the
+   *  archived predecessor's, else the driver-record mirror. */
+  const effectiveExpiry = (r: DocumentRowModel): string | undefined =>
+    r.doc?.expirationDate ?? r.lastArchived?.expirationDate ?? mirrorDateFor(r);
+
   // Compliance items — one per visible document type, status from the
   // shared status module (Missing renders as expired-tone).
-  const complianceItems: ComplianceItem[] = driverDocs.rows.map((r) => ({
-    label: r.type.name,
-    number:
-      r.type.key === 'cdl'
-        ? driver.licenseNumber ?? '—'
-        : r.doc ? (r.doc.fileName ?? '—') : 'Not on file',
-    expires: r.type.expires
-      ? r.doc?.expirationDate ? formatDocDate(r.doc.expirationDate) : '—'
-      : r.doc?.issueDate ? `Issued ${formatDocDate(r.doc.issueDate)}` : '—',
-    status: complianceChipForStatus(r.status),
-  }));
+  const complianceItems: ComplianceItem[] = driverDocs.rows.map((r) => {
+    const exp = effectiveExpiry(r);
+    return {
+      label: r.type.name,
+      number:
+        r.type.key === 'cdl'
+          ? driver.licenseNumber ?? '—'
+          : r.doc ? (r.doc.fileName ?? '—') : 'Not on file',
+      expires: r.type.expires
+        ? exp ? formatDocDate(exp) : '—'
+        : r.doc?.issueDate ? `Issued ${formatDocDate(r.doc.issueDate)}` : '—',
+      status: complianceChipForStatus(r.status),
+    };
+  });
 
   // Attention items — same chips the design source emits, derived from
   // our real data. Each item carries a `tab` so the band navigates.
@@ -674,14 +707,64 @@ export default function DriverDetailPage() {
       detail: 'Clerk sync failed — driver will see "Not Registered". Resync from Profile.',
     });
 
-  // Documents roll up into ONE summary chip (not one chip per document —
-  // that wrapped the band onto a second row and pushed the page down).
-  // The chip's tone is the worst document status; the Compliance card
-  // below and the Documents tab carry the per-document detail.
+  // Documents: the WORST few get their own chip, everything else rolls
+  // into the summary chip. Capped so the band never wraps to a second
+  // row (design: load · alert · alert · summary).
+  const MAX_DOC_ALERT_CHIPS = 2;
+  const DOC_SEVERITY: Partial<Record<DocumentStatus, number>> = {
+    expired: 4,
+    missing: 3,
+    needs_date: 2,
+    expiring: 1,
+  };
+  const docAlerts = driverDocs.rows
+    .filter((r) => docNeedsAttention(r.status))
+    .sort(
+      (a, b) =>
+        (DOC_SEVERITY[b.status] ?? 0) - (DOC_SEVERITY[a.status] ?? 0) ||
+        a.type.sortOrder - b.type.sortOrder,
+    );
+  for (const r of docAlerts.slice(0, MAX_DOC_ALERT_CHIPS)) {
+    const exp = effectiveExpiry(r);
+    const expLabel = exp ? formatDocDate(exp) : undefined;
+    const expExpired = exp ? dateExpiryStatus(exp, driverDocs.today) === 'expired' : false;
+    let title: string;
+    let detail: string;
+    switch (r.status) {
+      case 'expired':
+        title = `${r.type.name} expired`;
+        detail = expLabel ? `Expired ${expLabel} · renewal required` : 'Renewal required';
+        break;
+      case 'expiring':
+        title = `${r.type.name} expiring`;
+        detail = expLabel ? `Expires ${expLabel} · renew soon` : 'Renew soon';
+        break;
+      case 'needs_date':
+        title = `${r.type.name} needs a date`;
+        detail = 'Enter the expiration date on the document';
+        break;
+      default: // missing
+        title = `${r.type.name} missing`;
+        detail = r.lastArchived?.expirationDate
+          ? `Last on file expired ${expLabel}`
+          : expLabel
+            ? `${expExpired ? 'Expired' : 'Expires'} ${expLabel} · no file uploaded`
+            : 'Upload the document and enter its date';
+    }
+    attentionItems.push({
+      tone: r.status === 'expired' || r.status === 'missing' ? 'crit' : 'warn',
+      icon: r.type.key === 'cdl' ? 'shield' : 'alert',
+      tab: 'documents',
+      title,
+      detail,
+    });
+  }
+
+  // Summary chip — always last, always dynamic: "N of M on file" from the
+  // same view-model as the Documents tab, and how many still need work
+  // (including the ones that didn't get their own chip above).
   const docsAttention = driverDocs.attention;
-  const docsCritical = driverDocs.rows.some(
-    (r) => r.status === 'expired' || r.status === 'missing',
-  );
+  const docsCritical = docAlerts.some((r) => r.status === 'expired' || r.status === 'missing');
   attentionItems.push({
     tone: docsAttention === 0 ? 'ok' : docsCritical ? 'crit' : 'warn',
     icon: docsAttention === 0 ? 'check' : 'file-text',
@@ -690,7 +773,7 @@ export default function DriverDetailPage() {
     detail:
       docsAttention === 0
         ? 'All current'
-        : `${docsAttention} need attention — open Documents`,
+        : `${docsAttention} need${docsAttention === 1 ? 's' : ''} attention`,
   });
 
   const headline = onLoad ? (
