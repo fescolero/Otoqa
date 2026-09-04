@@ -480,4 +480,55 @@ describe('rotation on rule edit', () => {
     expect(r.action).toBe('ASSIGNED_DRIVER');
     expect((await loadState(t, w.robotNear))).toMatchObject({ driver: w.driverB, route: rule2 });
   });
+
+  it('re-sync all clears a pre-provenance robot load no rule claims, unblocking the driver', async () => {
+    const t = setup();
+    const w = await buildWorld(t);
+    // A load the sweep placed on Sam on robotNear's day, with its
+    // provenance stripped (assigned before provenance existed), whose
+    // rule then stopped covering that day. Dana's rule → Sam: robotNear
+    // would be blocked by it.
+    const { legacy } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const legacyRule: Id<'routeAssignments'> = await ctx.db.insert('routeAssignments', {
+        workosOrgId: ORG, hcr: '96036', driverId: w.driverB, priority: 1, isActive: true,
+        name: 'Sam 96036', createdBy: USER, createdAt: now, updatedAt: now,
+      });
+      const legacy = await seedLoad(ctx, w.customerId, 'LEGACY', daysFromNow(2), '96036');
+      return { legacy, legacyRule };
+    });
+    expect((await t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: legacy, userId: 'system' })).action)
+      .toBe('ASSIGNED_DRIVER');
+    const nearDow = new Date(`${daysFromNow(2)}T00:00:00.000Z`).getUTCDay();
+    await t.run(async (ctx) => {
+      await ctx.db.patch(legacy, { autoAssignedRouteId: undefined, autoAssignedAt: undefined });
+      const rule = (await ctx.db.query('routeAssignments').withIndex('by_org_hcr', (q) => q.eq('workosOrgId', ORG).eq('hcr', '96036')).first())!;
+      await ctx.db.patch(rule._id, { activeDays: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== nearDow) });
+    });
+    await w.asUser.mutation(api.routeAssignments.update, { id: w.routeId, driverId: w.driverB });
+    await drain(t);
+
+    await w.asUser.mutation(api.routeAssignments.rotateAllLoads, { workosOrgId: ORG });
+    await drain(t);
+
+    const leg = await t.run((ctx) => ctx.db.get(legacy));
+    expect(leg?.status).toBe('Open');
+    expect(leg?.autoAssignOptOut).toBeUndefined();
+    expect((await loadState(t, w.robotNear)).driver).toBe(w.driverB);
+    const settings = await w.asUser.query(api.routeAssignments.getSettings, { workosOrgId: ORG });
+    expect(settings?.lastBulkRotation?.byReason).toContainEqual({ reason: 'UNCLAIMED_RELEASED', count: 1 });
+  });
+
+  it('an overlap names the rule that placed the other load, or says none did', async () => {
+    const t = setup();
+    const w = await buildWorld(t);
+    const clash = await t.run((ctx) => seedLoad(ctx, w.customerId, 'CLASH', daysFromNow(2)));
+    await w.asUser.mutation(api.dispatchLegs.assignDriver, {
+      loadId: clash, driverId: w.driverB, userId: USER, workosOrgId: ORG,
+    });
+    await rotateTo(t, w, w.driverB);
+    const rule = await t.run((ctx) => ctx.db.get(w.routeId));
+    const held = rule?.lastRotation?.heldLoads?.find((h) => h.reason === 'OVERLAP_CONFLICT');
+    expect(held?.detail).toMatch(/Load #ORD-CLASH — not placed by a rule/);
+  });
 });

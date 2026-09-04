@@ -218,14 +218,24 @@ async function decideAndAssign(
     });
 
     if (result.status === 'OVERLAP') {
-      const conflicts = (result.overlaps ?? [])
-        .map((o: OverlapInfo) => `Load #${o.orderNumber ?? o.loadId}`)
-        .join(', ');
+      // Name each conflicting load's owner: the rule that placed it, or
+      // "not placed by a rule" (a dispatcher's, or a pre-provenance
+      // leftover). That is what decides whether the overlap is the rules
+      // contradicting each other or something a re-sync should clear.
+      const conflicts: string[] = [];
+      for (const o of result.overlaps ?? []) {
+        const other = await ctx.db.get(o.loadId as Id<'loadInformation'>);
+        const rule = other?.autoAssignedRouteId ? await ctx.db.get(other.autoAssignedRouteId) : null;
+        const owner = rule
+          ? `rule "${rule.name ?? `${rule.hcr}${rule.tripNumber ? ` / ${rule.tripNumber}` : ''}`}"`
+          : 'not placed by a rule';
+        conflicts.push(`Load #${o.orderNumber ?? o.loadId} — ${owner}`);
+      }
       return {
         success: false,
         loadId,
         action: 'OVERLAP_CONFLICT',
-        message: `${driver.firstName} ${driver.lastName} is already booked across this load's window (${conflicts})`,
+        message: `${driver.firstName} ${driver.lastName} is already booked across this load's window (${conflicts.join('; ')})`,
         routeAssignmentId: routeAssignment._id,
         driverId: routeAssignment.driverId,
       };

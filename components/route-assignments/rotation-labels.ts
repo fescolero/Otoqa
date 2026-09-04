@@ -19,6 +19,7 @@ export const ROTATION_REASON_LABELS: Record<string, string> = {
   OVERLAP_CONFLICT: 'released — assignee already booked, left open',
   DRIVER_INACTIVE: 'released — driver inactive, left open',
   CARRIER_INACTIVE: 'released — carrier inactive, left open',
+  UNCLAIMED_RELEASED: 'released — assigned before rules had days, no rule claims it now',
   OPTED_OUT: 'excluded from auto-assignment',
   ALREADY_ASSIGNED: 'already assigned',
   ERROR: 'error',

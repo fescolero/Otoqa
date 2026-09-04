@@ -3,9 +3,11 @@ import { internalAction, internalMutation, internalQuery } from './_generated/se
 import type { ActionCtx, MutationCtx, QueryCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Doc, Id } from './_generated/dataModel';
-import { routeServesDate } from './lib/routeMatch';
+import { matchRouteAssignment, routeServesDate } from './lib/routeMatch';
 import { serviceDateOf } from './lib/assignHorizon';
 import { unassignLoadResources } from './dispatchLegs';
+import { getLoadFacets } from './lib/loadFacets';
+import { ASSIGNMENT_ACTIONS, isRobotActor } from './lib/robotActors';
 
 /**
  * Route re-sync — when a rule changes, the loads it placed are released
@@ -383,6 +385,91 @@ export const runRotation = internalAction({
   },
 });
 
+/**
+ * Robot-assigned loads that carry no provenance (assigned before it
+ * existed) and that no rule claims today. They sit on a driver for no
+ * reason the rules can state, and they block everything a re-sync tries
+ * to place on him. Decided from the audit trail (lib/robotActors.ts):
+ * the load's most recent assignment row must be the robot's. A
+ * dispatcher's load never qualifies.
+ */
+async function isUnclaimedRobotLoad(
+  ctx: QueryCtx | MutationCtx,
+  load: Doc<'loadInformation'>,
+  today: string,
+): Promise<boolean> {
+  if (load.status !== 'Assigned') return false;
+  if (load.autoAssignedRouteId !== undefined) return false;
+  if (!load.primaryDriverId && !load.primaryCarrierPartnershipId) return false;
+  if (!load.firstStopDate || load.firstStopDate < today) return false;
+
+  const legs = await ctx.db
+    .query('dispatchLegs')
+    .withIndex('by_load', (q) => q.eq('loadId', load._id))
+    .collect();
+  if (legs.some((l) => l.status === 'ACTIVE' || l.status === 'COMPLETED')) return false;
+
+  const history = await ctx.db
+    .query('auditLog')
+    .withIndex('by_org_entity', (q) =>
+      q.eq('organizationId', load.workosOrgId).eq('entityType', 'load').eq('entityId', load._id),
+    )
+    .order('desc')
+    .collect();
+  const latest = history.find((row) => ASSIGNMENT_ACTIONS.has(row.action));
+  if (!latest) return false;
+  if (latest.action !== 'driver_assigned' && latest.action !== 'carrier_assigned') return false;
+  if (!isRobotActor(latest)) return false;
+
+  const facets = await getLoadFacets(ctx, load._id);
+  if (!facets.hcr) return true;
+  const match = await matchRouteAssignment(ctx, {
+    workosOrgId: load.workosOrgId,
+    hcr: facets.hcr,
+    trip: facets.trip,
+    serviceDate: load.firstStopDate,
+  });
+  return match.route === null;
+}
+
+export const listUnclaimedRobotLoads = internalQuery({
+  args: { workosOrgId: v.string() },
+  handler: async (ctx, args): Promise<Id<'loadInformation'>[]> => {
+    const today = serviceDateOf(Date.now());
+    const loads = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_org_status_first_stop', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('status', 'Assigned').gte('firstStopDate', today),
+      )
+      .collect();
+    const out: Id<'loadInformation'>[] = [];
+    for (const load of loads) {
+      if (load.autoAssignedRouteId !== undefined) continue; // cheap pre-filter
+      if (await isUnclaimedRobotLoad(ctx, load, today)) out.push(load._id);
+    }
+    return out;
+  },
+});
+
+export const releaseUnclaimedOne = internalMutation({
+  args: { loadId: v.id('loadInformation'), userId: v.string(), userName: v.optional(v.string()) },
+  handler: async (ctx, args): Promise<{ released: boolean; orderNumber?: string; serviceDate?: string }> => {
+    const load = await ctx.db.get(args.loadId);
+    if (!load) return { released: false };
+    if (!(await isUnclaimedRobotLoad(ctx, load, serviceDateOf(Date.now())))) {
+      return { released: false, orderNumber: load.orderNumber, serviceDate: load.firstStopDate };
+    }
+    const r = await unassignLoadResources(
+      ctx,
+      load._id,
+      { userId: args.userId, userName: args.userName ?? 'Route re-sync' },
+      'auto-assigned before rules had service days; no rule claims this load now',
+      false,
+    );
+    return { released: r.status === 'SUCCESS', orderNumber: load.orderNumber, serviceDate: load.firstStopDate };
+  },
+});
+
 /** Every rule with a resource — the set an org-wide re-sync walks. A
  *  paused rule is included: its loads should be released too. */
 export const listOrgRuleIds = internalQuery({
@@ -421,7 +508,9 @@ export const recordBulkRotation = internalMutation({
 });
 
 /**
- * Org-wide re-sync. Phase 1 releases every out-of-sync load under every
+ * Org-wide re-sync. Phase 0 releases robot-assigned loads that no rule
+ * claims (pre-provenance leftovers — they would block everything placed
+ * on their driver). Phase 1 releases every out-of-sync load under every
  * rule; phase 2 re-places them. Splitting the phases across rules is what
  * makes a driver exchange between two rules work: by the time anything is
  * re-placed, both drivers are free of the loads that are leaving them.
@@ -443,6 +532,25 @@ export const runOrgRotation = internalAction({
     });
     const actor = { userId: args.userId, userName: args.userName };
 
+    // Phase 0 — unclaimed robot loads. Released and left Open (nothing
+    // claims them, so there is nothing to re-place them under); counted
+    // in the org summary so the banner says they were cleared.
+    const unclaimedIds = await ctx.runQuery(internal.routeRotation.listUnclaimedRobotLoads, {
+      workosOrgId: args.workosOrgId,
+    });
+    let unclaimedReleased = 0;
+    for (const loadId of unclaimedIds) {
+      try {
+        const r = await ctx.runMutation(internal.routeRotation.releaseUnclaimedOne, { loadId, ...actor });
+        if (r.released) {
+          unclaimedReleased++;
+          console.log(`[rotation]   released unclaimed #${r.orderNumber} on ${r.serviceDate}: no rule claims it`);
+        }
+      } catch (err) {
+        console.error(`[rotation] org ${args.workosOrgId}: release of unclaimed ${loadId} failed:`, err);
+      }
+    }
+
     // Phase 1 — release, every rule.
     const perRule = new Map<Id<'routeAssignments'>, { released: Released[]; holds: HeldLoad[] }>();
     for (const routeId of ruleIds) {
@@ -459,9 +567,10 @@ export const runOrgRotation = internalAction({
     // that day); it is still counted for the rule that released it, since
     // that is the change the user made.
     const byReason = new Map<string, number>();
-    let considered = 0;
+    let considered = unclaimedReleased;
     let moved = 0;
-    let held = 0;
+    let held = unclaimedReleased;
+    if (unclaimedReleased > 0) byReason.set('UNCLAIMED_RELEASED', unclaimedReleased);
     for (const [routeId, phase] of perRule) {
       const { moved: m, open } = await replacePhase(ctx, phase.released, actor);
       const outcome = summarize(m, [...phase.holds, ...open]);
@@ -489,7 +598,8 @@ export const runOrgRotation = internalAction({
     });
 
     console.log(
-      `[rotation] org ${args.workosOrgId}: ${ruleIds.length} rules, ${moved} re-placed, ${held} not`,
+      `[rotation] org ${args.workosOrgId}: ${ruleIds.length} rules, ${moved} re-placed, ${held} not` +
+        (unclaimedReleased > 0 ? ` (${unclaimedReleased} unclaimed released)` : ''),
     );
     return { rules: ruleIds.length, considered, moved, held };
   },

@@ -6,6 +6,7 @@ import { getLoadFacets } from '../lib/loadFacets';
 import { matchRouteAssignment } from '../lib/routeMatch';
 import { unassignLoadResources } from '../dispatchLegs';
 import { serviceDateOf } from '../lib/assignHorizon';
+import { ASSIGNMENT_ACTIONS, isRobotActor } from '../lib/robotActors';
 
 /**
  * Migration: stamp `autoAssignedRouteId` / `autoAssignedAt` onto Assigned
@@ -59,15 +60,6 @@ import { serviceDateOf } from '../lib/assignHorizon';
  */
 
 const BATCH_SIZE = 50;
-
-const SYSTEM_ACTORS = new Set(['system', 'fourkites-sync', 'recurring-generator']);
-const SYSTEM_NAMES = new Set([
-  'Auto-Assignment System',
-  'Scheduled Auto-Assignment',
-  'FourKites Sync',
-  'FourKites Sync (Promotion)',
-  'Recurring Load Generator',
-]);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const self: any = (internal as any)['migrations/018_backfill_auto_assign_provenance'];
@@ -182,21 +174,14 @@ export const backfillBatch = internalMutation({
         )
         .order('desc')
         .collect();
-      const latest = history.find(
-        (row) =>
-          row.action === 'driver_assigned' ||
-          row.action === 'carrier_assigned' ||
-          row.action === 'resource_unassigned' ||
-          row.action === 'auto_assign_rotated',
-      );
+      const latest = history.find((row) => ASSIGNMENT_ACTIONS.has(row.action));
       if (!latest) {
         counts.skippedNoAudit++;
         continue;
       }
       const robot =
         (latest.action === 'driver_assigned' || latest.action === 'carrier_assigned') &&
-        (SYSTEM_ACTORS.has(latest.performedBy) ||
-          (latest.performedByName !== undefined && SYSTEM_NAMES.has(latest.performedByName)));
+        isRobotActor(latest);
       if (!robot) {
         counts.skippedHuman++;
         continue;
