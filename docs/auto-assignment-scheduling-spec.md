@@ -302,6 +302,20 @@ and for a day afterwards shows what the run moved and what it held. The
 list gets a *Loads* column with the same per rule. Each rule also logs one
 `[rotation]` line, so the outcome is in the Convex logs as well as the app.
 
+**Swaps.** The first production re-sync moved nothing: 21 of 23 holds were
+`OVERLAP_CONFLICT`, every one against the same driver, and the loads
+blocking him were the ones the rotation wanted to move *off* him under
+other rules. A rotation is very often an exchange, and when the two loads
+overlap in time neither can move first. After the per-rule pass,
+`runOrgRotation` builds the conflict graph from the held loads: a group
+whose conflicts are **all** themselves waiting to move is exchanged in one
+transaction (`swapLoads`), each member's overlap pre-flight ignoring the
+other members (`assignDriverInternal.overlapIgnoreLoadIds`), and any
+failure throws so the whole exchange rolls back — a half-done swap can
+never leave a double-booking behind. A conflict with a load that is *not*
+moving (hand-placed, in motion) keeps the group held: that one is a
+dispatcher's call, and every held load now names what it collided with.
+
 Tests: `lib/assignHorizon.test.ts`, `autoAssignment.horizon.test.ts`,
 `routeRotation.test.ts`.
 

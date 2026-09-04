@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalAction, internalMutation, internalQuery } from './_generated/server';
 import type { ActionCtx, MutationCtx, QueryCtx } from './_generated/server';
 import { internal } from './_generated/api';
@@ -215,10 +215,157 @@ export const listHolds = internalQuery({
   },
 });
 
+type MoveResult =
+  | { moved: true; orderNumber: string; serviceDate?: string }
+  | {
+      moved: false;
+      reason: RotationHoldReason;
+      orderNumber?: string;
+      serviceDate?: string;
+      detail?: string;
+      /** For OVERLAP_CONFLICT: the loads on the target that collide. */
+      conflictLoadIds?: Id<'loadInformation'>[];
+    };
+
 /**
- * Move one load. Re-classifies inside the transaction so a load that
- * started moving between the listing and now is left alone.
+ * Move one load onto its rule's current resource. Re-classifies inside
+ * the transaction so a load that started moving between the listing and
+ * now is left alone.
+ *
+ * `overlapIgnoreLoadIds` is for swaps: loads the caller is moving off the
+ * target in the same transaction, so they must not count as conflicts.
  */
+async function moveOne(
+  ctx: MutationCtx,
+  args: {
+    loadId: Id<'loadInformation'>;
+    routeId: Id<'routeAssignments'>;
+    previous?: RotationTarget;
+    userId: string;
+    userName?: string;
+    overlapIgnoreLoadIds?: Id<'loadInformation'>[];
+  },
+): Promise<MoveResult> {
+  const rule = await ctx.db.get(args.routeId);
+  const load = await ctx.db.get(args.loadId);
+  if (!rule || !load || load.autoAssignedRouteId !== rule._id) {
+    return { moved: false, reason: 'MOVED_BY_HUMAN', orderNumber: load?.orderNumber };
+  }
+  const who = { orderNumber: load.orderNumber, serviceDate: load.firstStopDate };
+
+  const [legs, carrierAssignments] = await Promise.all([
+    ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q) => q.eq('loadId', load._id))
+      .collect(),
+    ctx.db
+      .query('loadCarrierAssignments')
+      .withIndex('by_load', (q) => q.eq('loadId', load._id))
+      .collect(),
+  ]);
+  const target = targetOf(rule);
+  const verdict = classifyForRotation({
+    load,
+    legs,
+    carrierAssignments,
+    rule,
+    target,
+    previous: args.previous,
+    today: serviceDateOf(Date.now()),
+  });
+  if (!verdict.eligible) return { moved: false, reason: verdict.reason, ...who };
+
+  const now = Date.now();
+  const actor = { assignedBy: args.userId, assignedByName: args.userName ?? 'Route rotation' };
+
+  // Leaving a carrier: the AWARDED row is what the carrier's mobile app
+  // shows, and neither assign helper touches it. Close it out first so
+  // the old carrier stops seeing a load that is no longer theirs.
+  const closeCarrierAward = async () => {
+    for (const a of carrierAssignments) {
+      if (a.status === 'AWARDED') {
+        await ctx.db.patch(a._id, {
+          status: 'CANCELED',
+          canceledAt: now,
+          canceledBy: args.userId,
+          canceledByParty: 'BROKER',
+          cancellationReason: 'OTHER',
+          cancellationNotes: `Route rule "${rule.name ?? rule.hcr}" rotated to a different resource`,
+        });
+      }
+    }
+  };
+
+  if (target.driverId) {
+    const driver = await ctx.db.get(target.driverId);
+    if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
+      return { moved: false, reason: 'TARGET_INACTIVE', ...who };
+    }
+    await closeCarrierAward();
+    const result = await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
+      loadId: load._id,
+      driverId: target.driverId,
+      truckId: driver.currentTruckId,
+      ...actor,
+      // Same rule as auto-assignment: the robot never double-books.
+      blockOnOverlap: true,
+      overlapIgnoreLoadIds: args.overlapIgnoreLoadIds,
+      autoAssignedRouteId: rule._id,
+    });
+    if (result.status === 'OVERLAP') {
+      // Name the loads the driver already has across this window. This
+      // is what decides whether the conflict is real: a dispatcher can
+      // look at both and, if the windows are soft, place it by hand.
+      const overlaps = result.overlaps ?? [];
+      const conflicts = overlaps
+        .map((o) => `#${o.orderNumber ?? o.loadId} (${Math.round(o.overlapMinutes)} min)`)
+        .join(', ');
+      return {
+        moved: false,
+        reason: 'OVERLAP_CONFLICT',
+        ...who,
+        detail: `${driver.firstName} ${driver.lastName} already has ${conflicts}`,
+        conflictLoadIds: overlaps.map((o) => o.loadId as Id<'loadInformation'>),
+      };
+    }
+    if (result.status !== 'SUCCESS') {
+      return { moved: false, reason: 'ERROR', ...who, detail: result.message };
+    }
+  } else if (target.carrierPartnershipId) {
+    const carrier = await ctx.db.get(target.carrierPartnershipId);
+    if (!carrier || carrier.status !== 'ACTIVE') {
+      return { moved: false, reason: 'TARGET_INACTIVE', ...who };
+    }
+    await closeCarrierAward();
+    const result = await ctx.runMutation(internal.dispatchLegs.assignCarrierInternal, {
+      loadId: load._id,
+      carrierPartnershipId: target.carrierPartnershipId,
+      ...actor,
+      autoAssignedRouteId: rule._id,
+    });
+    if (result.status !== 'SUCCESS') {
+      return { moved: false, reason: 'ERROR', ...who, detail: result.message };
+    }
+  } else {
+    return { moved: false, reason: 'TARGET_INACTIVE', ...who };
+  }
+
+  await logAudit(ctx, {
+    organizationId: load.workosOrgId,
+    entityType: 'load',
+    entityId: load._id,
+    entityName: load.internalId,
+    action: 'auto_assign_rotated',
+    performedBy: args.userId,
+    performedByName: args.userName ?? 'Route rotation',
+    description: `Moved load ${load.orderNumber} to the current resource on route rule "${rule.name ?? rule.hcr}"`,
+    changedFields: ['primaryDriverId', 'primaryCarrierPartnershipId'],
+  });
+
+  return { moved: true, ...who };
+}
+
+/** Move one load, one transaction. */
 export const rotateOneLoad = internalMutation({
   args: {
     loadId: v.id('loadInformation'),
@@ -227,133 +374,54 @@ export const rotateOneLoad = internalMutation({
     userId: v.string(),
     userName: v.optional(v.string()),
   },
+  handler: async (ctx, args): Promise<MoveResult> =>
+    moveOne(ctx, {
+      loadId: args.loadId,
+      routeId: args.routeId,
+      previous: previousFrom(args),
+      userId: args.userId,
+      userName: args.userName,
+    }),
+});
+
+/**
+ * Exchange a set of loads in ONE transaction.
+ *
+ * The case: rule A now names the driver rule B used to, and vice versa,
+ * and the two loads run at overlapping times on the same day. Moved one
+ * at a time, each is blocked by the other still sitting on its target.
+ * Here every move's overlap check ignores the other members of the group
+ * — they are leaving in this same transaction — and if any move fails the
+ * whole thing throws and rolls back, so a half-done swap can never leave
+ * a real double-booking behind.
+ */
+export const swapLoads = internalMutation({
+  args: {
+    moves: v.array(v.object({ loadId: v.id('loadInformation'), routeId: v.id('routeAssignments') })),
+    userId: v.string(),
+    userName: v.optional(v.string()),
+  },
   handler: async (
     ctx,
     args,
-  ): Promise<
-    | { moved: true; orderNumber: string; serviceDate?: string }
-    | {
-        moved: false;
-        reason: RotationHoldReason;
-        orderNumber?: string;
-        serviceDate?: string;
-        detail?: string;
-      }
-  > => {
-    const rule = await ctx.db.get(args.routeId);
-    const load = await ctx.db.get(args.loadId);
-    if (!rule || !load || load.autoAssignedRouteId !== rule._id) {
-      return { moved: false, reason: 'MOVED_BY_HUMAN', orderNumber: load?.orderNumber };
-    }
-    const who = { orderNumber: load.orderNumber, serviceDate: load.firstStopDate };
-
-    const [legs, carrierAssignments] = await Promise.all([
-      ctx.db
-        .query('dispatchLegs')
-        .withIndex('by_load', (q) => q.eq('loadId', load._id))
-        .collect(),
-      ctx.db
-        .query('loadCarrierAssignments')
-        .withIndex('by_load', (q) => q.eq('loadId', load._id))
-        .collect(),
-    ]);
-    const target = targetOf(rule);
-    const verdict = classifyForRotation({
-      load,
-      legs,
-      carrierAssignments,
-      rule,
-      target,
-      previous: previousFrom(args),
-      today: serviceDateOf(Date.now()),
-    });
-    if (!verdict.eligible) return { moved: false, reason: verdict.reason, ...who };
-
-    const now = Date.now();
-    const actor = { assignedBy: args.userId, assignedByName: args.userName ?? 'Route rotation' };
-
-    // Leaving a carrier: the AWARDED row is what the carrier's mobile app
-    // shows, and neither assign helper touches it. Close it out first so
-    // the old carrier stops seeing a load that is no longer theirs.
-    const closeCarrierAward = async () => {
-      for (const a of carrierAssignments) {
-        if (a.status === 'AWARDED') {
-          await ctx.db.patch(a._id, {
-            status: 'CANCELED',
-            canceledAt: now,
-            canceledBy: args.userId,
-            canceledByParty: 'BROKER',
-            cancellationReason: 'OTHER',
-            cancellationNotes: `Route rule "${rule.name ?? rule.hcr}" rotated to a different resource`,
-          });
-        }
-      }
-    };
-
-    if (target.driverId) {
-      const driver = await ctx.db.get(target.driverId);
-      if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
-        return { moved: false, reason: 'TARGET_INACTIVE', ...who };
-      }
-      await closeCarrierAward();
-      const result = await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
-        loadId: load._id,
-        driverId: target.driverId,
-        truckId: driver.currentTruckId,
-        ...actor,
-        // Same rule as auto-assignment: the robot never double-books.
-        blockOnOverlap: true,
-        autoAssignedRouteId: rule._id,
+  ): Promise<Array<{ routeId: Id<'routeAssignments'>; orderNumber: string; serviceDate?: string }>> => {
+    const group = args.moves.map((m) => m.loadId);
+    const done: Array<{ routeId: Id<'routeAssignments'>; orderNumber: string; serviceDate?: string }> = [];
+    for (const m of args.moves) {
+      const r = await moveOne(ctx, {
+        loadId: m.loadId,
+        routeId: m.routeId,
+        userId: args.userId,
+        userName: args.userName,
+        overlapIgnoreLoadIds: group.filter((id) => id !== m.loadId),
       });
-      if (result.status === 'OVERLAP') {
-        // Name the loads the driver already has across this window. This
-        // is what decides whether the conflict is real: a dispatcher can
-        // look at both and, if the windows are soft, place it by hand.
-        const conflicts = (result.overlaps ?? [])
-          .map((o) => `#${o.orderNumber ?? o.loadId} (${Math.round(o.overlapMinutes)} min)`)
-          .join(', ');
-        return {
-          moved: false,
-          reason: 'OVERLAP_CONFLICT',
-          ...who,
-          detail: `${driver.firstName} ${driver.lastName} already has ${conflicts}`,
-        };
+      if (!r.moved) {
+        // Throwing rolls back every move made so far in this transaction.
+        throw new ConvexError(`swap aborted at ${r.orderNumber ?? m.loadId}: ${r.reason}${r.detail ? ` — ${r.detail}` : ''}`);
       }
-      if (result.status !== 'SUCCESS') {
-        return { moved: false, reason: 'ERROR', ...who, detail: result.message };
-      }
-    } else if (target.carrierPartnershipId) {
-      const carrier = await ctx.db.get(target.carrierPartnershipId);
-      if (!carrier || carrier.status !== 'ACTIVE') {
-        return { moved: false, reason: 'TARGET_INACTIVE', ...who };
-      }
-      await closeCarrierAward();
-      const result = await ctx.runMutation(internal.dispatchLegs.assignCarrierInternal, {
-        loadId: load._id,
-        carrierPartnershipId: target.carrierPartnershipId,
-        ...actor,
-        autoAssignedRouteId: rule._id,
-      });
-      if (result.status !== 'SUCCESS') {
-        return { moved: false, reason: 'ERROR', ...who, detail: result.message };
-      }
-    } else {
-      return { moved: false, reason: 'TARGET_INACTIVE', ...who };
+      done.push({ routeId: m.routeId, orderNumber: r.orderNumber, serviceDate: r.serviceDate });
     }
-
-    await logAudit(ctx, {
-      organizationId: load.workosOrgId,
-      entityType: 'load',
-      entityId: load._id,
-      entityName: load.internalId,
-      action: 'auto_assign_rotated',
-      performedBy: args.userId,
-      performedByName: args.userName ?? 'Route rotation',
-      description: `Moved load ${load.orderNumber} to the current resource on route rule "${rule.name ?? rule.hcr}"`,
-      changedFields: ['primaryDriverId', 'primaryCarrierPartnershipId'],
-    });
-
-    return { moved: true, ...who };
+    return done;
   },
 });
 
@@ -391,6 +459,17 @@ export type RotationOutcome = {
   moved: number;
   held: number;
   byReason: Array<{ reason: string; count: number }>;
+  /** Loads moved this run (including ones credited via `alreadyMoved`),
+   *  so a later pass can carry them forward instead of re-counting them
+   *  as ALREADY_ON_TARGET holds. */
+  movedLoads: Array<{ orderNumber: string; serviceDate?: string }>;
+  /** Loads this rule wanted to move but could not because of an overlap,
+   *  with what they collided with — the input to swap detection. */
+  overlapHolds: Array<{
+    loadId: Id<'loadInformation'>;
+    orderNumber: string;
+    conflictLoadIds: Id<'loadInformation'>[];
+  }>;
 };
 
 /**
@@ -410,23 +489,30 @@ async function rotateRule(
     previousCarrierPartnershipId?: Id<'carrierPartnerships'>;
     userId: string;
     userName?: string;
+    /** Loads a swap already moved for this rule (org re-sync). They now
+     *  classify as ALREADY_ON_TARGET; count them as moved instead. */
+    alreadyMoved?: Array<{ orderNumber: string; serviceDate?: string }>;
   },
 ): Promise<RotationOutcome> {
   const previous = {
     previousDriverId: args.previousDriverId,
     previousCarrierPartnershipId: args.previousCarrierPartnershipId,
   };
-  const [candidates, preHolds] = await Promise.all([
+  const [candidates, rawHolds] = await Promise.all([
     ctx.runQuery(internal.routeRotation.listCandidates, { routeId: args.routeId, ...previous }),
     ctx.runQuery(internal.routeRotation.listHolds, { routeId: args.routeId, ...previous }),
   ]);
+  const swapped = new Set((args.alreadyMoved ?? []).map((m) => m.orderNumber));
+  const preHolds = rawHolds.filter((h) => !(swapped.has(h.orderNumber) && h.reason === 'ALREADY_ON_TARGET'));
 
   const heldLoads: HeldLoad[] = [...preHolds];
+  const overlapHolds: RotationOutcome['overlapHolds'] = [];
   const byReason = new Map<string, number>();
   const tally = (reason: string) => byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
   for (const h of preHolds) tally(h.reason);
 
-  let moved = 0;
+  const movedLoads: RotationOutcome['movedLoads'] = [...(args.alreadyMoved ?? [])];
+  let moved = swapped.size;
   for (const loadId of candidates) {
     try {
       const r = await ctx.runMutation(internal.routeRotation.rotateOneLoad, {
@@ -438,6 +524,7 @@ async function rotateRule(
       });
       if (r.moved) {
         moved++;
+        movedLoads.push({ orderNumber: r.orderNumber, serviceDate: r.serviceDate });
       } else {
         tally(r.reason);
         heldLoads.push({
@@ -446,6 +533,13 @@ async function rotateRule(
           reason: r.reason,
           detail: r.detail,
         });
+        if (r.reason === 'OVERLAP_CONFLICT' && r.conflictLoadIds) {
+          overlapHolds.push({
+            loadId,
+            orderNumber: r.orderNumber ?? String(loadId),
+            conflictLoadIds: r.conflictLoadIds,
+          });
+        }
       }
     } catch (err) {
       console.error(`[rotation] rule ${args.routeId}: load ${loadId} failed:`, err);
@@ -485,7 +579,7 @@ async function rotateRule(
     );
   }
 
-  return { considered, moved, held, byReason: byReasonList };
+  return { considered, moved, held, byReason: byReasonList, movedLoads, overlapHolds };
 }
 
 /**
@@ -541,6 +635,9 @@ export const recordBulkRotation = internalMutation({
   },
 });
 
+/** Largest exchange group the swap phase will attempt. */
+const MAX_SWAP_GROUP = 8;
+
 /**
  * Org-wide re-sync: every active rule, one after another, each moving the
  * upcoming loads it owns onto its current resource. Sequential on purpose
@@ -548,6 +645,18 @@ export const recordBulkRotation = internalMutation({
  * when the overlap pre-flight runs, or both could book him for the same
  * window. One summary lands on autoAssignmentSettings for the page banner;
  * each rule still gets its own lastRotation.
+ *
+ * Then the swap phase. A rotation is very often an exchange — rule A now
+ * names the driver rule B had and vice versa — and when the two loads
+ * overlap in time, neither can move first: each is blocked by the other
+ * still sitting on its target. Pass 1 leaves both held on OVERLAP with
+ * the other named as the conflict. Any held load whose conflicts are ALL
+ * themselves loads waiting to move (closure over the conflict graph) is
+ * exchanged with them in one transaction (swapLoads). A conflict with a
+ * load that is NOT moving — a hand-placed one, say — keeps the group
+ * held; that is a real double-booking for a dispatcher to judge.
+ * Affected rules are then re-run so their records and any loads freed by
+ * the swap catch up.
  */
 export const runOrgRotation = internalAction({
   args: {
@@ -558,31 +667,110 @@ export const runOrgRotation = internalAction({
   handler: async (
     ctx,
     args,
-  ): Promise<{ rules: number; considered: number; moved: number; held: number }> => {
+  ): Promise<{ rules: number; considered: number; moved: number; held: number; swapped: number }> => {
     const ruleIds = await ctx.runQuery(internal.routeRotation.listOrgRuleIds, {
       workosOrgId: args.workosOrgId,
     });
+    const actor = { userId: args.userId, userName: args.userName };
+
+    // Pass 1 — every rule on its own.
+    const outcomes = new Map<Id<'routeAssignments'>, RotationOutcome>();
+    const failed = new Set<Id<'routeAssignments'>>();
+    for (const routeId of ruleIds) {
+      try {
+        outcomes.set(routeId, await rotateRule(ctx, { routeId, ...actor }));
+      } catch (err) {
+        console.error(`[rotation] org ${args.workosOrgId}: rule ${routeId} failed:`, err);
+        failed.add(routeId);
+      }
+    }
+
+    // Swap phase — exchange groups of mutually-blocked loads.
+    const waiting = new Map<
+      Id<'loadInformation'>,
+      { routeId: Id<'routeAssignments'>; conflicts: Id<'loadInformation'>[] }
+    >();
+    for (const [routeId, o] of outcomes) {
+      for (const h of o.overlapHolds) waiting.set(h.loadId, { routeId, conflicts: h.conflictLoadIds });
+    }
+
+    const swappedByRule = new Map<Id<'routeAssignments'>, Array<{ orderNumber: string; serviceDate?: string }>>();
+    const resolved = new Set<Id<'loadInformation'>>();
+    let swapped = 0;
+    for (const [seed] of waiting) {
+      if (resolved.has(seed)) continue;
+      // Closure: every conflict must itself be waiting to move.
+      const group: Id<'loadInformation'>[] = [];
+      const queue = [seed];
+      let valid = true;
+      while (queue.length > 0 && valid) {
+        const id = queue.shift()!;
+        if (group.includes(id)) continue;
+        const w = waiting.get(id);
+        if (!w || resolved.has(id)) { valid = false; break; }
+        group.push(id);
+        if (group.length > MAX_SWAP_GROUP) { valid = false; break; }
+        queue.push(...w.conflicts);
+      }
+      if (!valid || group.length < 2) continue;
+
+      try {
+        const done = await ctx.runMutation(internal.routeRotation.swapLoads, {
+          moves: group.map((loadId) => ({ loadId, routeId: waiting.get(loadId)!.routeId })),
+          ...actor,
+        });
+        for (const d of done) {
+          const list = swappedByRule.get(d.routeId) ?? [];
+          list.push({ orderNumber: d.orderNumber, serviceDate: d.serviceDate });
+          swappedByRule.set(d.routeId, list);
+        }
+        for (const id of group) resolved.add(id);
+        swapped += done.length;
+        console.log(
+          `[rotation] swapped ${done.length} loads: ${done.map((d) => `#${d.orderNumber}`).join(' ⇄ ')}`,
+        );
+      } catch (err) {
+        // Rolled back; every member stays held with its pass-1 reason.
+        console.warn(`[rotation] swap of ${group.length} loads not possible:`, String(err));
+      }
+    }
+
+    // Pass 2 — rules the swap touched, or that still hold overlaps (a swap
+    // may have freed their target): refresh their records.
+    if (swapped > 0) {
+      for (const [routeId, o] of outcomes) {
+        if (!swappedByRule.has(routeId) && o.overlapHolds.length === 0) continue;
+        try {
+          outcomes.set(
+            routeId,
+            await rotateRule(ctx, {
+              routeId,
+              ...actor,
+              alreadyMoved: [...o.movedLoads, ...(swappedByRule.get(routeId) ?? [])],
+            }),
+          );
+        } catch (err) {
+          console.error(`[rotation] org ${args.workosOrgId}: rule ${routeId} pass 2 failed:`, err);
+        }
+      }
+    }
 
     const byReason = new Map<string, number>();
     let considered = 0;
     let moved = 0;
     let held = 0;
-
-    for (const routeId of ruleIds) {
-      try {
-        const r = await rotateRule(ctx, { routeId, userId: args.userId, userName: args.userName });
-        considered += r.considered;
-        moved += r.moved;
-        held += r.held;
-        for (const { reason, count } of r.byReason) {
-          byReason.set(reason, (byReason.get(reason) ?? 0) + count);
-        }
-      } catch (err) {
-        console.error(`[rotation] org ${args.workosOrgId}: rule ${routeId} failed:`, err);
-        byReason.set('ERROR', (byReason.get('ERROR') ?? 0) + 1);
-        held++;
-        considered++;
+    for (const o of outcomes.values()) {
+      considered += o.considered;
+      moved += o.moved;
+      held += o.held;
+      for (const { reason, count } of o.byReason) {
+        byReason.set(reason, (byReason.get(reason) ?? 0) + count);
       }
+    }
+    if (failed.size > 0) {
+      byReason.set('ERROR', (byReason.get('ERROR') ?? 0) + failed.size);
+      held += failed.size;
+      considered += failed.size;
     }
 
     await ctx.runMutation(internal.routeRotation.recordBulkRotation, {
@@ -600,9 +788,9 @@ export const runOrgRotation = internalAction({
     });
 
     console.log(
-      `[rotation] org ${args.workosOrgId}: ${ruleIds.length} rules, ${moved} moved, ${held} held`,
+      `[rotation] org ${args.workosOrgId}: ${ruleIds.length} rules, ${moved} moved (${swapped} by swap), ${held} held`,
     );
 
-    return { rules: ruleIds.length, considered, moved, held };
+    return { rules: ruleIds.length, considered, moved, held, swapped };
   },
 });
