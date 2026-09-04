@@ -5,6 +5,7 @@ import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
 import { matchRouteAssignment } from './lib/routeMatch';
+import { horizonEndDate, isBeyondHorizon } from './lib/assignHorizon';
 import { logAudit } from './lib/audit';
 import type { OverlapInfo } from './_helpers/timeUtils';
 
@@ -25,6 +26,7 @@ type AutoAssignResult = {
     | 'OPTED_OUT'
     | 'DAY_RESTRICTED'
     | 'NO_SERVICE_DATE'
+    | 'BEYOND_HORIZON'
     | 'OVERLAP_CONFLICT'
     | 'DRIVER_INACTIVE'
     | 'CARRIER_INACTIVE'
@@ -46,6 +48,7 @@ const autoAssignResultValidator = v.object({
     v.literal('OPTED_OUT'),
     v.literal('DAY_RESTRICTED'),
     v.literal('NO_SERVICE_DATE'),
+    v.literal('BEYOND_HORIZON'),
     v.literal('OVERLAP_CONFLICT'),
     v.literal('DRIVER_INACTIVE'),
     v.literal('CARRIER_INACTIVE'),
@@ -71,8 +74,239 @@ export const getAutoAssignmentSettings = internalQuery({
 });
 
 /**
+ * The assignment decision, shared by the scheduled sweep (autoAssignLoad)
+ * and the on-create trigger (triggerAutoAssignmentForLoad).
+ *
+ * These used to be two near-identical copies. The service-day work already
+ * showed how that ends (see lib/routeMatch.ts: four drifting matchers), and
+ * the horizon and provenance below would have had to be added to both. One
+ * body, two entry points that differ only in which settings flag gates them
+ * and whether declines are noted on the load.
+ */
+async function decideAndAssign(
+  ctx: MutationCtx,
+  args: {
+    load: Doc<'loadInformation'>;
+    settings: Doc<'autoAssignmentSettings'>;
+    userId: string;
+    userName?: string;
+    /** On-create path only — the sweep would rewrite the same audit row
+     *  every cycle (see noteDecline). */
+    noteDeclines: boolean;
+  },
+): Promise<AutoAssignResult> {
+  const { load, settings } = args;
+  const loadId = load._id;
+
+  // Skip if already assigned
+  if (load.status === 'Assigned' || load.primaryDriverId || load.primaryCarrierPartnershipId) {
+    return {
+      success: false,
+      loadId,
+      action: 'ALREADY_ASSIGNED',
+      message: 'Load is already assigned',
+    };
+  }
+
+  // Skip if a human deliberately returned this load to Open (R11).
+  // getOpenLoadsWithHcr already filters these out; this is the guard for
+  // anything that reaches the mutation directly.
+  if (load.autoAssignOptOut) {
+    return {
+      success: false,
+      loadId,
+      action: 'OPTED_OUT',
+      message: 'Auto-assignment was turned off for this load after a manual unassignment',
+    };
+  }
+
+  // Not yet due. Not a decline — the sweep re-evaluates every cycle and
+  // takes the load the day it crosses the horizon. Checked before the
+  // facet read because it is the cheapest test and, with a horizon set,
+  // the most common outcome for a freshly imported schedule.
+  if (isBeyondHorizon(load.firstStopDate, settings.assignAheadDays)) {
+    return {
+      success: false,
+      loadId,
+      action: 'BEYOND_HORIZON',
+      message: `Load runs on ${load.firstStopDate}, more than ${settings.assignAheadDays} day${settings.assignAheadDays === 1 ? '' : 's'} out — will be assigned once it comes due`,
+    };
+  }
+
+  // Read facets from tags. Skip if no HCR.
+  // (routeAssignments still uses its own hcr/tripNumber columns + indexes
+  // — we're only swapping the read of the load's own facets.)
+  const loadFacets = await getLoadFacets(ctx, loadId);
+  if (!loadFacets.hcr) {
+    return {
+      success: false,
+      loadId,
+      action: 'NO_MATCH',
+      message: 'Load has no HCR - cannot auto-assign',
+    };
+  }
+
+  // Find the route rule — shared matcher, see lib/routeMatch.ts
+  const match = await matchRouteAssignment(ctx, {
+    workosOrgId: load.workosOrgId,
+    hcr: loadFacets.hcr,
+    trip: loadFacets.trip,
+    // The route calendar is evaluated against the load's SERVICE date,
+    // not the clock — see lib/routeMatch.ts.
+    serviceDate: load.firstStopDate,
+  });
+  const routeAssignment = match.route;
+
+  if (!routeAssignment) {
+    if (match.declinedBecause === 'NO_SERVICE_DATE') {
+      if (args.noteDeclines) {
+        await noteDecline(ctx, load, 'NO_SERVICE_DATE',
+          `Auto-assignment skipped: the route for HCR ${loadFacets.hcr} runs only on set days and this load has no service date yet`);
+      }
+      return {
+        success: false,
+        loadId,
+        action: 'NO_SERVICE_DATE',
+        message: `Route for HCR ${loadFacets.hcr} runs only on set days, and this load has no service date yet`,
+      };
+    }
+    if (match.declinedBecause === 'CALENDAR') {
+      if (args.noteDeclines) {
+        await noteDecline(ctx, load, 'DAY_RESTRICTED',
+          `Auto-assignment skipped: no route for HCR ${loadFacets.hcr} runs on ${load.firstStopDate}`);
+      }
+      return {
+        success: false,
+        loadId,
+        action: 'DAY_RESTRICTED',
+        message: `No route for HCR ${loadFacets.hcr} runs on ${load.firstStopDate}`,
+      };
+    }
+    return {
+      success: false,
+      loadId,
+      action: 'NO_MATCH',
+      message: `No route assignment found for HCR ${loadFacets.hcr}${loadFacets.trip ? ` / Trip ${loadFacets.trip}` : ''}`,
+    };
+  }
+
+  // Assign to driver or carrier based on route assignment
+  if (routeAssignment.driverId) {
+    // Check if driver is still active
+    const driver = await ctx.db.get(routeAssignment.driverId);
+    if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
+      return {
+        success: false,
+        loadId,
+        action: 'DRIVER_INACTIVE',
+        message: `Driver for route ${routeAssignment.name || routeAssignment.hcr} is inactive or deleted. Please update the route assignment.`,
+        routeAssignmentId: routeAssignment._id,
+        driverId: routeAssignment.driverId,
+      };
+    }
+
+    const result = await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
+      loadId,
+      driverId: routeAssignment.driverId,
+      truckId: driver.currentTruckId,
+      assignedBy: args.userId,
+      assignedByName: args.userName ?? 'Auto-Assignment System',
+      // The robot does not get to double-book. A dispatcher may.
+      blockOnOverlap: true,
+      // Provenance: this rule owns the load until a person touches it.
+      autoAssignedRouteId: routeAssignment._id,
+    });
+
+    if (result.status === 'OVERLAP') {
+      const conflicts = (result.overlaps ?? [])
+        .map((o: OverlapInfo) => `Load #${o.orderNumber ?? o.loadId}`)
+        .join(', ');
+      return {
+        success: false,
+        loadId,
+        action: 'OVERLAP_CONFLICT',
+        message: `${driver.firstName} ${driver.lastName} is already booked across this load's window (${conflicts})`,
+        routeAssignmentId: routeAssignment._id,
+        driverId: routeAssignment.driverId,
+      };
+    }
+
+    if (result.status === 'SUCCESS') {
+      // No overlap note: blockOnOverlap means a conflicting assignment
+      // returned OVERLAP above and never got here.
+      return {
+        success: true,
+        loadId,
+        action: 'ASSIGNED_DRIVER',
+        message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}`,
+        routeAssignmentId: routeAssignment._id,
+        driverId: routeAssignment.driverId,
+      };
+    }
+    return {
+      success: false,
+      loadId,
+      action: 'ERROR',
+      message: result.message ?? 'Failed to assign driver',
+      routeAssignmentId: routeAssignment._id,
+      driverId: routeAssignment.driverId,
+    };
+  }
+
+  if (routeAssignment.carrierPartnershipId) {
+    // Check if carrier is still active
+    const carrier = await ctx.db.get(routeAssignment.carrierPartnershipId);
+    if (!carrier || carrier.status !== 'ACTIVE') {
+      return {
+        success: false,
+        loadId,
+        action: 'CARRIER_INACTIVE',
+        message: `Carrier for route ${routeAssignment.name || routeAssignment.hcr} is inactive. Please update the route assignment.`,
+        routeAssignmentId: routeAssignment._id,
+        carrierPartnershipId: routeAssignment.carrierPartnershipId,
+      };
+    }
+
+    const result = await ctx.runMutation(internal.dispatchLegs.assignCarrierInternal, {
+      loadId,
+      carrierPartnershipId: routeAssignment.carrierPartnershipId,
+      assignedBy: args.userId,
+      assignedByName: args.userName ?? 'Auto-Assignment System',
+      autoAssignedRouteId: routeAssignment._id,
+    });
+
+    if (result.status === 'SUCCESS') {
+      return {
+        success: true,
+        loadId,
+        action: 'ASSIGNED_CARRIER',
+        message: `Auto-assigned to carrier ${carrier.carrierName}`,
+        routeAssignmentId: routeAssignment._id,
+        carrierPartnershipId: routeAssignment.carrierPartnershipId,
+      };
+    }
+    return {
+      success: false,
+      loadId,
+      action: 'ERROR',
+      message: result.message ?? 'Failed to assign carrier',
+      routeAssignmentId: routeAssignment._id,
+      carrierPartnershipId: routeAssignment.carrierPartnershipId,
+    };
+  }
+
+  return {
+    success: false,
+    loadId,
+    action: 'ERROR',
+    message: 'Route assignment has no driver or carrier configured',
+    routeAssignmentId: routeAssignment._id,
+  };
+}
+
+/**
  * Auto-assign a single load based on its HCR + Trip
- * Called after load creation or during scheduled runs
+ * Called during scheduled runs (and by anything else holding a load id)
  */
 export const autoAssignLoad = internalMutation({
   args: {
@@ -81,7 +315,6 @@ export const autoAssignLoad = internalMutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<AutoAssignResult> => {
-    // 1. Get the load
     const load = await ctx.db.get(args.loadId);
     if (!load) {
       return {
@@ -92,42 +325,6 @@ export const autoAssignLoad = internalMutation({
       };
     }
 
-    // 2. Skip if already assigned
-    if (load.status === 'Assigned' || load.primaryDriverId || load.primaryCarrierPartnershipId) {
-      return {
-        success: false,
-        loadId: args.loadId,
-        action: 'ALREADY_ASSIGNED',
-        message: 'Load is already assigned',
-      };
-    }
-
-    // 2b. Skip if a human deliberately returned this load to Open (R11).
-    // getOpenLoadsWithHcr already filters these out; this is the guard for
-    // anything that reaches the mutation directly.
-    if (load.autoAssignOptOut) {
-      return {
-        success: false,
-        loadId: args.loadId,
-        action: 'OPTED_OUT',
-        message: 'Auto-assignment was turned off for this load after a manual unassignment',
-      };
-    }
-
-    // 3. Read facets from tags. Skip if no HCR.
-    // (routeAssignments still uses its own hcr/tripNumber columns + indexes
-    // — we're only swapping the read of the load's own facets.)
-    const loadFacets = await getLoadFacets(ctx, load._id);
-    if (!loadFacets.hcr) {
-      return {
-        success: false,
-        loadId: args.loadId,
-        action: 'NO_MATCH',
-        message: 'Load has no HCR - cannot auto-assign',
-      };
-    }
-
-    // 4. Check if auto-assignment is enabled for this org
     const settings = await ctx.db
       .query('autoAssignmentSettings')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', load.workosOrgId))
@@ -142,152 +339,13 @@ export const autoAssignLoad = internalMutation({
       };
     }
 
-    // 5. Find the route rule — shared matcher, see lib/routeMatch.ts
-    const match = await matchRouteAssignment(ctx, {
-      workosOrgId: load.workosOrgId,
-      hcr: loadFacets.hcr,
-      trip: loadFacets.trip,
-      // The route calendar is evaluated against the load's SERVICE date,
-      // not the clock — see lib/routeMatch.ts.
-      serviceDate: load.firstStopDate,
+    return decideAndAssign(ctx, {
+      load,
+      settings,
+      userId: args.userId,
+      userName: args.userName,
+      noteDeclines: false,
     });
-    const routeAssignment = match.route;
-
-    if (!routeAssignment) {
-      if (match.declinedBecause === 'NO_SERVICE_DATE') {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'NO_SERVICE_DATE',
-          message: `Route for HCR ${loadFacets.hcr} runs only on set days, and this load has no service date yet`,
-        };
-      }
-      if (match.declinedBecause === 'CALENDAR') {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'DAY_RESTRICTED',
-          message: `No route for HCR ${loadFacets.hcr} runs on ${load.firstStopDate}`,
-        };
-      }
-      return {
-        success: false,
-        loadId: args.loadId,
-        action: 'NO_MATCH',
-        message: `No route assignment found for HCR ${loadFacets.hcr}${loadFacets.trip ? ` / Trip ${loadFacets.trip}` : ''}`,
-      };
-    }
-
-    // 6. Assign to driver or carrier based on route assignment
-    if (routeAssignment.driverId) {
-      // Check if driver is still active
-      const driver = await ctx.db.get(routeAssignment.driverId);
-      if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'DRIVER_INACTIVE',
-          message: `Driver for route ${routeAssignment.name || routeAssignment.hcr} is inactive or deleted. Please update the route assignment.`,
-          routeAssignmentId: routeAssignment._id,
-          driverId: routeAssignment.driverId,
-        };
-      }
-
-      const result = await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
-        loadId: args.loadId,
-        driverId: routeAssignment.driverId,
-        truckId: driver.currentTruckId,
-        assignedBy: args.userId,
-        assignedByName: args.userName ?? 'Auto-Assignment System',
-        // The robot does not get to double-book. A dispatcher may.
-        blockOnOverlap: true,
-      });
-
-      if (result.status === 'OVERLAP') {
-        const conflicts = (result.overlaps ?? [])
-          .map((o: OverlapInfo) => `Load #${o.orderNumber ?? o.loadId}`)
-          .join(', ');
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'OVERLAP_CONFLICT',
-          message: `${driver.firstName} ${driver.lastName} is already booked across this load's window (${conflicts})`,
-          routeAssignmentId: routeAssignment._id,
-          driverId: routeAssignment.driverId,
-        };
-      }
-
-      if (result.status === 'SUCCESS') {
-        // No overlap note: blockOnOverlap means a conflicting assignment
-        // returned OVERLAP above and never got here.
-        return {
-          success: true,
-          loadId: args.loadId,
-          action: 'ASSIGNED_DRIVER',
-          message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}`,
-          routeAssignmentId: routeAssignment._id,
-          driverId: routeAssignment.driverId,
-        };
-      } else {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'ERROR',
-          message: result.message ?? 'Failed to assign driver',
-          routeAssignmentId: routeAssignment._id,
-          driverId: routeAssignment.driverId,
-        };
-      }
-    } else if (routeAssignment.carrierPartnershipId) {
-      // Check if carrier is still active
-      const carrier = await ctx.db.get(routeAssignment.carrierPartnershipId);
-      if (!carrier || carrier.status !== 'ACTIVE') {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'CARRIER_INACTIVE',
-          message: `Carrier for route ${routeAssignment.name || routeAssignment.hcr} is inactive. Please update the route assignment.`,
-          routeAssignmentId: routeAssignment._id,
-          carrierPartnershipId: routeAssignment.carrierPartnershipId,
-        };
-      }
-
-      // Call existing assignCarrier mutation
-      const result = await ctx.runMutation(internal.dispatchLegs.assignCarrierInternal, {
-        loadId: args.loadId,
-        carrierPartnershipId: routeAssignment.carrierPartnershipId,
-        assignedBy: args.userId,
-        assignedByName: args.userName ?? 'Auto-Assignment System',
-      });
-
-      if (result.status === 'SUCCESS') {
-        return {
-          success: true,
-          loadId: args.loadId,
-          action: 'ASSIGNED_CARRIER',
-          message: `Auto-assigned to carrier ${carrier.carrierName}`,
-          routeAssignmentId: routeAssignment._id,
-          carrierPartnershipId: routeAssignment.carrierPartnershipId,
-        };
-      } else {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'ERROR',
-          message: result.message ?? 'Failed to assign carrier',
-          routeAssignmentId: routeAssignment._id,
-          carrierPartnershipId: routeAssignment.carrierPartnershipId,
-        };
-      }
-    }
-
-    return {
-      success: false,
-      loadId: args.loadId,
-      action: 'ERROR',
-      message: 'Route assignment has no driver or carrier configured',
-      routeAssignmentId: routeAssignment._id,
-    };
   },
 });
 
@@ -323,9 +381,14 @@ export const autoAssignPendingLoads = internalAction({
       };
     }
 
-    // 2. Get all Open loads that have HCR
+    // 2. Get all Open loads that have HCR — bounded to the horizon when
+    // one is set, so a month of imported schedule is not re-read hourly.
     const openLoads = await ctx.runQuery(internal.autoAssignment.getOpenLoadsWithHcr, {
       workosOrgId: args.workosOrgId,
+      maxFirstStopDate:
+        settings.assignAheadDays !== undefined
+          ? horizonEndDate(settings.assignAheadDays)
+          : undefined,
     });
 
     const results: AutoAssignResult[] = [];
@@ -364,6 +427,7 @@ export const autoAssignPendingLoads = internalAction({
             result.action === 'OPTED_OUT' ||
             result.action === 'DAY_RESTRICTED' ||
             result.action === 'NO_SERVICE_DATE' ||
+            result.action === 'BEYOND_HORIZON' ||
             result.action === 'OVERLAP_CONFLICT'
           ) {
             skipped++;
@@ -426,12 +490,31 @@ const AUTO_ASSIGN_BATCH_SIZE = 4000;
 export const getOpenLoadsWithHcr = internalQuery({
   args: {
     workosOrgId: v.string(),
+    // Inclusive upper bound on firstStopDate (YYYY-MM-DD) — the assignment
+    // horizon. Loads with NO firstStopDate sort before every string in the
+    // index, so a `lte` range keeps them, which matches isBeyondHorizon:
+    // an undated load is never "too far out".
+    maxFirstStopDate: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const loads = await ctx.db
-      .query('loadInformation')
-      .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', 'Open'))
-      .collect();
+    const maxDate = args.maxFirstStopDate;
+    const loads =
+      maxDate !== undefined
+        ? await ctx.db
+            .query('loadInformation')
+            .withIndex('by_org_status_first_stop', (q) =>
+              q
+                .eq('workosOrgId', args.workosOrgId)
+                .eq('status', 'Open')
+                .lte('firstStopDate', maxDate),
+            )
+            .collect()
+        : await ctx.db
+            .query('loadInformation')
+            .withIndex('by_status', (q) =>
+              q.eq('workosOrgId', args.workosOrgId).eq('status', 'Open'),
+            )
+            .collect();
 
     // Drop loads a human opted out of (R11) BEFORE the facet fan-out —
     // they can never be assigned, so paying a tag read for each is waste.
@@ -511,7 +594,6 @@ export const triggerAutoAssignmentForLoad = internalMutation({
       return null;
     }
 
-    // Trigger auto-assignment (inline to avoid circular reference)
     const load = await ctx.db.get(args.loadId);
     if (!load) {
       return {
@@ -522,183 +604,12 @@ export const triggerAutoAssignmentForLoad = internalMutation({
       };
     }
 
-    // Skip if already assigned
-    if (load.status === 'Assigned' || load.primaryDriverId || load.primaryCarrierPartnershipId) {
-      return {
-        success: false,
-        loadId: args.loadId,
-        action: 'ALREADY_ASSIGNED',
-        message: 'Load is already assigned',
-      };
-    }
-
-    // Skip if a human deliberately returned this load to Open (R11).
-    if (load.autoAssignOptOut) {
-      return {
-        success: false,
-        loadId: args.loadId,
-        action: 'OPTED_OUT',
-        message: 'Auto-assignment was turned off for this load after a manual unassignment',
-      };
-    }
-
-    // Read facets from tags. Skip if no HCR.
-    const loadFacets = await getLoadFacets(ctx, load._id);
-    if (!loadFacets.hcr) {
-      return {
-        success: false,
-        loadId: args.loadId,
-        action: 'NO_MATCH',
-        message: 'Load has no HCR - cannot auto-assign',
-      };
-    }
-
-    // Find the route rule — shared matcher, see lib/routeMatch.ts
-    const match = await matchRouteAssignment(ctx, {
-      workosOrgId: load.workosOrgId,
-      hcr: loadFacets.hcr,
-      trip: loadFacets.trip,
-      // The route calendar is evaluated against the load's SERVICE date,
-      // not the clock — see lib/routeMatch.ts.
-      serviceDate: load.firstStopDate,
+    return decideAndAssign(ctx, {
+      load,
+      settings,
+      userId: args.userId,
+      userName: args.userName,
+      noteDeclines: true,
     });
-    const routeAssignment = match.route;
-
-    if (!routeAssignment) {
-      if (match.declinedBecause === 'NO_SERVICE_DATE') {
-        await noteDecline(ctx, load, 'NO_SERVICE_DATE',
-          `Auto-assignment skipped: the route for HCR ${loadFacets.hcr} runs only on set days and this load has no service date yet`);
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'NO_SERVICE_DATE',
-          message: `Route for HCR ${loadFacets.hcr} runs only on set days, and this load has no service date yet`,
-        };
-      }
-      if (match.declinedBecause === 'CALENDAR') {
-        await noteDecline(ctx, load, 'DAY_RESTRICTED',
-          `Auto-assignment skipped: no route for HCR ${loadFacets.hcr} runs on ${load.firstStopDate}`);
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'DAY_RESTRICTED',
-          message: `No route for HCR ${loadFacets.hcr} runs on ${load.firstStopDate}`,
-        };
-      }
-      return {
-        success: false,
-        loadId: args.loadId,
-        action: 'NO_MATCH',
-        message: `No route assignment found for HCR ${loadFacets.hcr}`,
-      };
-    }
-
-    // Assign to driver or carrier
-    if (routeAssignment.driverId) {
-      const driver = await ctx.db.get(routeAssignment.driverId);
-      if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'DRIVER_INACTIVE',
-          message: `Driver for route is inactive or deleted`,
-          routeAssignmentId: routeAssignment._id,
-          driverId: routeAssignment.driverId,
-        };
-      }
-
-      const result = await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
-        loadId: args.loadId,
-        driverId: routeAssignment.driverId,
-        truckId: driver.currentTruckId,
-        assignedBy: args.userId,
-        assignedByName: args.userName ?? 'Auto-Assignment System',
-        // The robot does not get to double-book. A dispatcher may.
-        blockOnOverlap: true,
-      });
-
-      if (result.status === 'OVERLAP') {
-        const conflicts = (result.overlaps ?? [])
-          .map((o: OverlapInfo) => `Load #${o.orderNumber ?? o.loadId}`)
-          .join(', ');
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'OVERLAP_CONFLICT',
-          message: `${driver.firstName} ${driver.lastName} is already booked across this load's window (${conflicts})`,
-          routeAssignmentId: routeAssignment._id,
-          driverId: routeAssignment.driverId,
-        };
-      }
-
-      if (result.status === 'SUCCESS') {
-        // No overlap note: blockOnOverlap means a conflicting assignment
-        // returned OVERLAP above and never got here.
-        return {
-          success: true,
-          loadId: args.loadId,
-          action: 'ASSIGNED_DRIVER',
-          message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}`,
-          routeAssignmentId: routeAssignment._id,
-          driverId: routeAssignment.driverId,
-        };
-      } else {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'ERROR',
-          message: result.message ?? 'Failed to assign driver',
-          routeAssignmentId: routeAssignment._id,
-          driverId: routeAssignment.driverId,
-        };
-      }
-    } else if (routeAssignment.carrierPartnershipId) {
-      const carrier = await ctx.db.get(routeAssignment.carrierPartnershipId);
-      if (!carrier || carrier.status !== 'ACTIVE') {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'CARRIER_INACTIVE',
-          message: `Carrier for route is inactive`,
-          routeAssignmentId: routeAssignment._id,
-          carrierPartnershipId: routeAssignment.carrierPartnershipId,
-        };
-      }
-
-      const result = await ctx.runMutation(internal.dispatchLegs.assignCarrierInternal, {
-        loadId: args.loadId,
-        carrierPartnershipId: routeAssignment.carrierPartnershipId,
-        assignedBy: args.userId,
-        assignedByName: args.userName ?? 'Auto-Assignment System',
-      });
-
-      if (result.status === 'SUCCESS') {
-        return {
-          success: true,
-          loadId: args.loadId,
-          action: 'ASSIGNED_CARRIER',
-          message: `Auto-assigned to carrier ${carrier.carrierName}`,
-          routeAssignmentId: routeAssignment._id,
-          carrierPartnershipId: routeAssignment.carrierPartnershipId,
-        };
-      } else {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'ERROR',
-          message: result.message ?? 'Failed to assign carrier',
-          routeAssignmentId: routeAssignment._id,
-          carrierPartnershipId: routeAssignment.carrierPartnershipId,
-        };
-      }
-    }
-
-    return {
-      success: false,
-      loadId: args.loadId,
-      action: 'ERROR',
-      message: 'Route assignment has no driver or carrier configured',
-      routeAssignmentId: routeAssignment._id,
-    };
   },
 });

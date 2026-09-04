@@ -3,6 +3,7 @@
 import * as React from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
+import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import {
   Select,
@@ -45,6 +46,7 @@ const ACTION_LABELS: Record<string, string> = {
   OPTED_OUT: 'Excluded after a manual unassignment',
   DAY_RESTRICTED: "Route doesn't run on that day",
   NO_SERVICE_DATE: 'No pickup date yet',
+  BEYOND_HORIZON: 'Not due yet (beyond the assignment horizon)',
   OVERLAP_CONFLICT: 'Driver already booked',
   DRIVER_INACTIVE: 'Driver inactive',
   CARRIER_INACTIVE: 'Carrier inactive',
@@ -79,6 +81,9 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
   const [triggerOnCreate, setTriggerOnCreate] = React.useState(false);
   const [scheduledEnabled, setScheduledEnabled] = React.useState(false);
   const [scheduleInterval, setScheduleInterval] = React.useState('60');
+  // Assignment horizon in days. Empty string = no limit (the stored field
+  // is absent). Kept as text so the input can be cleared mid-edit.
+  const [assignAhead, setAssignAhead] = React.useState('');
 
   // Update local state when settings load
   React.useEffect(() => {
@@ -87,8 +92,14 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
       setTriggerOnCreate(settings.triggerOnCreate);
       setScheduledEnabled(settings.scheduledEnabled);
       setScheduleInterval(settings.scheduleIntervalMinutes?.toString() || '60');
+      setAssignAhead(settings.assignAheadDays === undefined ? '' : String(settings.assignAheadDays));
     }
   }, [settings]);
+
+  const parsedAssignAhead = assignAhead.trim() === '' ? null : parseInt(assignAhead, 10);
+  const assignAheadInvalid =
+    parsedAssignAhead !== null &&
+    (!Number.isInteger(parsedAssignAhead) || parsedAssignAhead < 0 || parsedAssignAhead > 365);
 
   const updateSettings = useMutation(api.routeAssignments.updateSettings);
 
@@ -101,12 +112,18 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
         triggerOnCreate,
         scheduledEnabled,
         scheduleIntervalMinutes: parseInt(scheduleInterval) || 60,
+        // null clears the horizon; a number sets it.
+        assignAheadDays: parsedAssignAhead,
         updatedBy: userId,
       });
       toast.success('Auto-assignment settings saved');
     } catch (error) {
       console.error('Failed to save settings:', error);
-      toast.error('Failed to save settings');
+      const message =
+        error instanceof Error && 'data' in error && typeof (error as { data?: unknown }).data === 'string'
+          ? ((error as { data: string }).data)
+          : 'Failed to save settings';
+      toast.error(message);
     } finally {
       setIsSaving(false);
     }
@@ -116,7 +133,8 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
     ? enabled !== settings.enabled ||
       triggerOnCreate !== settings.triggerOnCreate ||
       scheduledEnabled !== settings.scheduledEnabled ||
-      parseInt(scheduleInterval) !== (settings.scheduleIntervalMinutes || 60)
+      parseInt(scheduleInterval) !== (settings.scheduleIntervalMinutes || 60) ||
+      (parsedAssignAhead ?? undefined) !== settings.assignAheadDays
     : true;
 
   return (
@@ -213,6 +231,52 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
                 disabled={!enabled}
               />
             </div>
+
+            {/* Assignment horizon. Without one, an import carrying next
+                month's schedule commits drivers to all of it on the spot,
+                and a driver rotation then has to unwind every load. */}
+            <div className="flex items-center justify-between gap-6">
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="assignAheadDays">Assignment Horizon</Label>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Info className="h-4 w-4 text-muted-foreground cursor-help" />
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs">
+                        <p>
+                          Only assign loads whose pickup date is within this many days. Loads
+                          further out stay Open and are picked up by the scheduled run once they
+                          come due. Leave blank for no limit.
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  {scheduledEnabled
+                    ? 'Assign loads up to this many days before pickup'
+                    : 'Requires Scheduled Processing — the scheduled run assigns deferred loads'}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="assignAheadDays"
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={365}
+                  placeholder="No limit"
+                  className="w-24 text-right"
+                  value={assignAhead}
+                  onChange={(e) => setAssignAhead(e.target.value)}
+                  disabled={!enabled || !scheduledEnabled}
+                  aria-invalid={assignAheadInvalid}
+                />
+                <span className="text-sm text-muted-foreground">days</span>
+              </div>
+            </div>
           </div>
 
           {/* Last run — without this, a rule that silently matches nothing
@@ -255,7 +319,7 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
 
           {/* Save Button */}
           <div className="flex justify-end pt-4">
-            <Button onClick={handleSave} disabled={isSaving || !hasChanges}>
+            <Button onClick={handleSave} disabled={isSaving || !hasChanges || assignAheadInvalid}>
               {isSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Save Settings
             </Button>

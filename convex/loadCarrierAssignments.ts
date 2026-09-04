@@ -1195,6 +1195,8 @@ export const cancelAssignment = mutation({
       status: 'Open',
       trackingStatus: 'Pending',
       autoAssignOptOut: true,
+      autoAssignedRouteId: undefined,
+      autoAssignedAt: undefined,
       updatedAt: now,
     });
 

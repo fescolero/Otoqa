@@ -1601,6 +1601,8 @@ async function releasePartnershipAssignments(
             // guard, but the reopened load can still match a *driver* route
             // rule. A bulk termination should not silently redispatch.
             autoAssignOptOut: true,
+            autoAssignedRouteId: undefined,
+            autoAssignedAt: undefined,
             updatedAt: now,
           });
           loadsReopened++;

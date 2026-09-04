@@ -81,6 +81,7 @@ export type AuditAction =
   | 'expired'
   | 'expiry_warned'
   | 'auto_assign_skipped'
+  | 'auto_assign_rotated'
   | 'archived'
   // Entity documents (documents-storage-spec.md §8). Logged on the PARENT
   // entity (driver / carrierPartnership / organization) so the parent's

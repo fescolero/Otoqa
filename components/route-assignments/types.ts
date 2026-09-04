@@ -31,6 +31,14 @@ export interface RouteAssignment {
   customExclusions?: string[];
   name?: string;
   notes?: string;
+  // Outcome of the last driver rotation (convex/routeRotation.ts).
+  lastRotation?: {
+    at: number;
+    considered: number;
+    moved: number;
+    held: number;
+    byReason: Array<{ reason: string; count: number }>;
+  };
   createdBy: string;
   createdAt: number;
   updatedAt: number;

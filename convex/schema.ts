@@ -1160,6 +1160,21 @@ export default defineSchema({
     name: v.optional(v.string()), // Friendly name like "John's Amazon Route"
     notes: v.optional(v.string()),
 
+    // Outcome of the most recent rotation — re-pointing the upcoming loads
+    // this rule auto-assigned at its new driver/carrier (routeRotation.ts).
+    // One object per rule, overwritten each time, same shape of reasoning
+    // as autoAssignmentSettings.lastRun: enough to answer "did it move
+    // them, and why not", without a log table.
+    lastRotation: v.optional(
+      v.object({
+        at: v.number(),
+        considered: v.number(),
+        moved: v.number(),
+        held: v.number(),
+        byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+      }),
+    ),
+
     // Audit
     createdBy: v.string(),
     createdAt: v.number(),
@@ -1259,6 +1274,14 @@ export default defineSchema({
     scheduledEnabled: v.boolean(), // Run on schedule
     scheduleIntervalMinutes: v.optional(v.number()), // Minutes between scheduled runs
     lastScheduledRunAt: v.optional(v.number()), // Last scheduled run timestamp (ms)
+
+    // Assignment horizon: do not assign a load whose firstStopDate is more
+    // than this many days out. Anchored to the load's service date, not
+    // the clock — see lib/assignHorizon.ts. Absent = no limit (every
+    // pre-existing row). Only meaningful with scheduledEnabled, since the
+    // sweep is what picks a deferred load up once it comes due;
+    // updateSettings refuses the combination without it.
+    assignAheadDays: v.optional(v.number()),
 
     // Outcome of the most recent scheduled sweep (R9). Before this, the run
     // counted its results, console.log'd a line and dropped them — so a rule
@@ -1636,6 +1659,15 @@ export default defineSchema({
     // Cleared via loads.setAutoAssignOptOut.
     autoAssignOptOut: v.optional(v.boolean()),
 
+    // Auto-assignment provenance. Which route rule placed this load, and
+    // when. Written only by the auto-assignment paths; cleared by every
+    // human assign / reassign / unassign, so "present" means "the robot put
+    // it here and nobody has touched it since". That is what lets a driver
+    // rotation re-point exactly the loads the rule owns and nothing a
+    // dispatcher decided by hand — see routeRotation.ts.
+    autoAssignedRouteId: v.optional(v.id('routeAssignments')),
+    autoAssignedAt: v.optional(v.number()),
+
     // Denormalized First Stop Date (for efficient date range filtering)
     // Source of truth: loadStops where sequenceNumber = 1, windowBeginDate
     // Format: YYYY-MM-DD string (undefined if no stops or TBD)
@@ -1710,7 +1742,9 @@ export default defineSchema({
     .index('by_org_first_stop_date', ['workosOrgId', 'firstStopDate'])
     .index('by_org_tracking_status', ['workosOrgId', 'trackingStatus'])
     .index('by_primary_driver_status', ['primaryDriverId', 'status'])
-    .index('by_org_status_first_stop', ['workosOrgId', 'status', 'firstStopDate']),
+    .index('by_org_status_first_stop', ['workosOrgId', 'status', 'firstStopDate'])
+    // Rotation: "every load this rule placed that is still Assigned".
+    .index('by_auto_assigned_route_status', ['autoAssignedRouteId', 'status']),
 
   loadStops: defineTable({
     // Load Reference
