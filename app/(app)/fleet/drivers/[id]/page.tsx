@@ -51,7 +51,6 @@ import { PayeeProfilesCard } from '@/components/web/pay-profiles/payee-profiles-
 import { EntityDocumentsTab } from '@/components/web/documents/entity-documents-tab';
 import { useDriverDocuments } from '@/components/web/documents/use-entity-documents';
 import { complianceChipForStatus, formatYmd as formatDocDate } from '@/components/web/documents/entity-documents-model';
-import { needsAttention as docNeedsAttention } from '@/convex/_helpers/documentStatus';
 
 import { DeleteConfirmationDialog } from '@/components/drivers/delete-confirmation-dialog';
 import {
@@ -664,20 +663,6 @@ export default function DriverDetailPage() {
       detail: driver.city ? `Last seen in ${driver.city}` : 'Ready for next dispatch',
     });
   }
-  for (const r of driverDocs.rows) {
-    if (!docNeedsAttention(r.status)) continue;
-    const crit = r.status === 'expired' || r.status === 'missing';
-    const title =
-      r.status === 'missing' ? `${r.type.name} missing`
-      : r.status === 'needs_date' ? `${r.type.name} needs a date`
-      : r.status === 'expired' ? `${r.type.name} expired`
-      : `${r.type.name} expiring soon`;
-    const detail =
-      r.status === 'missing'
-        ? r.lastArchived?.expirationDate ? `Last on file expired ${formatDocDate(r.lastArchived.expirationDate)}` : 'Upload the document and enter its date'
-        : r.doc?.expirationDate ? formatDocDate(r.doc.expirationDate) : undefined;
-    attentionItems.push({ tone: crit ? 'crit' : 'warn', icon: r.type.key === 'cdl' ? 'shield' : 'alert', tab: 'documents', title, detail });
-  }
   if (driver.clerkSyncStatus === 'failed')
     attentionItems.push({
       tone: 'crit',
@@ -687,13 +672,23 @@ export default function DriverDetailPage() {
       detail: 'Clerk sync failed — driver will see "Not Registered". Resync from Profile.',
     });
 
+  // Documents roll up into ONE summary chip (not one chip per document —
+  // that wrapped the band onto a second row and pushed the page down).
+  // The chip's tone is the worst document status; the Compliance card
+  // below and the Documents tab carry the per-document detail.
   const docsAttention = driverDocs.attention;
+  const docsCritical = driverDocs.rows.some(
+    (r) => r.status === 'expired' || r.status === 'missing',
+  );
   attentionItems.push({
-    tone: 'info',
-    icon: 'file-text',
+    tone: docsAttention === 0 ? 'ok' : docsCritical ? 'crit' : 'warn',
+    icon: docsAttention === 0 ? 'check' : 'file-text',
     tab: 'documents',
     title: `${driverDocs.counts.onFile} of ${driverDocs.counts.total} documents on file`,
-    detail: docsAttention > 0 ? `${docsAttention} need attention` : 'all current',
+    detail:
+      docsAttention === 0
+        ? 'All current'
+        : `${docsAttention} need attention — open Documents`,
   });
 
   const headline = onLoad ? (
