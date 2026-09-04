@@ -87,9 +87,9 @@ function NextLoadRow({ next }: { next: DriverNextLoad }) {
 export function NowDriverInTransit({ load }: { load: DriverActiveLoad }) {
   return (
     <div>
-      <div className="flex items-center justify-between gap-2 mb-2.5">
+      <div className="flex items-center gap-2 mb-2.5">
         <span className="text-[12.5px] text-[var(--text-secondary)] min-w-0 truncate">
-          on{' '}
+          Current load{' '}
           <span className="num text-[var(--accent)] font-medium">{load.id}</span>
         </span>
         <Chip status="active" label="In transit" />
@@ -173,7 +173,7 @@ export function NowDriverAvailable({
 }: NowDriverAvailableProps) {
   return (
     <div>
-      <div className="flex items-center justify-between gap-2 mb-2.5">
+      <div className="flex items-center gap-2 mb-2.5">
         <span className="text-[12.5px] text-[var(--text-secondary)] min-w-0 truncate">Ready to dispatch</span>
         <Chip status="valid" label="Available" />
       </div>
