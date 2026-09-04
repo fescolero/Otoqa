@@ -26,6 +26,11 @@ function daysFromNow(n: number): string {
   return serviceDateOf(Date.now() + n * DAY_MS);
 }
 
+// Schema-typed test instance. `ReturnType<typeof convexTest>` alone loses
+// the schema generic, and with it every table index in `t.run` callbacks.
+const setup = () => convexTest(schema);
+type T = ReturnType<typeof setup>;
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function seedOrg(ctx: any) {
   const now = Date.now();
@@ -86,7 +91,7 @@ type World = Awaited<ReturnType<typeof buildWorld>>;
 
 /** A rule on Dana with a spread of loads in every state the rotation
  *  must distinguish. */
-async function buildWorld(t: ReturnType<typeof convexTest>) {
+async function buildWorld(t: T) {
   const seeded = await t.run(async (ctx) => {
     const org = await seedOrg(ctx);
     return {
@@ -124,7 +129,7 @@ async function buildWorld(t: ReturnType<typeof convexTest>) {
   return { ...seeded, asUser };
 }
 
-async function loadState(t: ReturnType<typeof convexTest>, id: Id<'loadInformation'>) {
+async function loadState(t: T, id: Id<'loadInformation'>) {
   const load = await t.run((ctx) => ctx.db.get(id));
   return {
     driver: load?.primaryDriverId,
@@ -135,14 +140,14 @@ async function loadState(t: ReturnType<typeof convexTest>, id: Id<'loadInformati
 
 describe('provenance', () => {
   it('is stamped by auto-assignment and absent on a hand assignment', async () => {
-    const t = convexTest(schema);
+    const t = setup();
     const w = await buildWorld(t);
     expect((await loadState(t, w.robotNear)).route).toBe(w.routeId);
     expect((await loadState(t, w.human)).route).toBeUndefined();
   });
 
   it('is cleared when a dispatcher reassigns or unassigns', async () => {
-    const t = convexTest(schema);
+    const t = setup();
     const w = await buildWorld(t);
 
     await w.asUser.mutation(api.dispatchLegs.assignDriver, {
@@ -162,10 +167,10 @@ describe('provenance', () => {
 describe('rotation on rule edit', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
-  const drain = (t: ReturnType<typeof convexTest>) =>
+  const drain = (t: T) =>
     t.finishAllScheduledFunctions(vi.runAllTimers);
 
-  async function rotateTo(t: ReturnType<typeof convexTest>, w: World, driverId: Id<'drivers'>) {
+  async function rotateTo(t: T, w: World, driverId: Id<'drivers'>) {
     await w.asUser.mutation(api.routeAssignments.update, {
       id: w.routeId, driverId, reassignFutureLoads: true,
     });
@@ -173,7 +178,7 @@ describe('rotation on rule edit', () => {
   }
 
   it('previews the exact set before saving', async () => {
-    const t = convexTest(schema);
+    const t = setup();
     const w = await buildWorld(t);
 
     const preview = await w.asUser.query(api.routeAssignments.previewRotation, {
@@ -188,7 +193,7 @@ describe('rotation on rule edit', () => {
   });
 
   it('moves the robot\'s upcoming loads to the new driver and nothing else', async () => {
-    const t = convexTest(schema);
+    const t = setup();
     const w = await buildWorld(t);
 
     await rotateTo(t, w, w.driverB);
@@ -219,7 +224,7 @@ describe('rotation on rule edit', () => {
   });
 
   it('does nothing unless asked', async () => {
-    const t = convexTest(schema);
+    const t = setup();
     const w = await buildWorld(t);
 
     await w.asUser.mutation(api.routeAssignments.update, { id: w.routeId, driverId: w.driverB });
@@ -231,7 +236,7 @@ describe('rotation on rule edit', () => {
   });
 
   it('holds a load the new driver is already booked across, and reports it', async () => {
-    const t = convexTest(schema);
+    const t = setup();
     const w = await buildWorld(t);
 
     // Sam already has a hand-assigned load on robotNear's day.
@@ -249,7 +254,7 @@ describe('rotation on rule edit', () => {
   });
 
   it('re-sync moves whatever the rule owns that is not on its current driver', async () => {
-    const t = convexTest(schema);
+    const t = setup();
     const w = await buildWorld(t);
 
     // Rule was edited earlier WITHOUT a rotation.
@@ -273,7 +278,7 @@ describe('rotation on rule edit', () => {
   });
 
   it('a rotated load is not the sweep\'s to undo', async () => {
-    const t = convexTest(schema);
+    const t = setup();
     const w = await buildWorld(t);
     await rotateTo(t, w, w.driverB);
 
