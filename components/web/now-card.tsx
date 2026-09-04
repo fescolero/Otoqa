@@ -27,14 +27,61 @@ import * as React from 'react';
 import { Chip } from './chip';
 import { cn } from '@/lib/utils';
 
+/** The load queued after the current one (or, for an available driver,
+ *  the first one on the board). Rendered as a "Next load" row. */
+export interface DriverNextLoad {
+  id: string;
+  route: string;
+  pickupWhen?: string;
+  onOpen?: () => void;
+}
+
 export interface DriverActiveLoad {
   id: string;
   from: string;
   to: string;
   truck?: string;
   trailer?: string;
+  /** Scheduled pickup, when the ETA is unknown or separate. */
+  pickup?: string;
   eta?: string;
+  miles?: string;
   hosRemaining?: string;
+  nextLoad?: DriverNextLoad;
+}
+
+function NextLoadRow({ next }: { next: DriverNextLoad }) {
+  const body = (
+    <>
+      <span className="num text-[var(--accent)] font-medium">{next.id}</span>
+      <span className="text-[var(--text-tertiary)]"> · {next.route}</span>
+    </>
+  );
+  return (
+    <>
+      <div className="text-[var(--text-tertiary)]">Next load</div>
+      <div className="min-w-0">
+        <div className="truncate">
+          {next.onOpen ? (
+            <button
+              type="button"
+              onClick={next.onOpen}
+              className="focus-ring hover:underline bg-transparent border-0 p-0 cursor-pointer text-left text-inherit"
+            >
+              {body}
+            </button>
+          ) : (
+            body
+          )}
+        </div>
+        {next.pickupWhen && (
+          <div className="text-[11px] text-[var(--text-tertiary)]">
+            Pickup <span className="num">{next.pickupWhen}</span>
+          </div>
+        )}
+      </div>
+    </>
+  );
 }
 
 export function NowDriverInTransit({ load }: { load: DriverActiveLoad }) {
@@ -66,10 +113,22 @@ export function NowDriverInTransit({ load }: { load: DriverActiveLoad }) {
             <div className="num truncate">{load.trailer}</div>
           </>
         )}
+        {load.pickup && (
+          <>
+            <div className="text-[var(--text-tertiary)]">Pickup</div>
+            <div className="num">{load.pickup}</div>
+          </>
+        )}
         {load.eta && (
           <>
             <div className="text-[var(--text-tertiary)]">ETA</div>
             <div className="num">{load.eta}</div>
+          </>
+        )}
+        {load.miles && (
+          <>
+            <div className="text-[var(--text-tertiary)]">Miles</div>
+            <div className="num">{load.miles}</div>
           </>
         )}
         {load.hosRemaining && (
@@ -78,6 +137,7 @@ export function NowDriverInTransit({ load }: { load: DriverActiveLoad }) {
             <div className="num" style={{ color: '#0F8C5F' }}>{load.hosRemaining} remaining</div>
           </>
         )}
+        {load.nextLoad && <NextLoadRow next={load.nextLoad} />}
       </div>
     </div>
   );
@@ -97,6 +157,8 @@ interface NowDriverAvailableProps {
   lastLoad?: { id: string; deliveredOn: string };
   idleSince?: string;
   equipment?: string;
+  /** Assigned but not yet started — what the driver rolls on next. */
+  nextLoad?: DriverNextLoad;
   matchedLoads?: DriverMatchedLoad[];
 }
 
@@ -106,6 +168,7 @@ export function NowDriverAvailable({
   lastLoad,
   idleSince,
   equipment,
+  nextLoad,
   matchedLoads,
 }: NowDriverAvailableProps) {
   return (
@@ -151,6 +214,7 @@ export function NowDriverAvailable({
             <div>{equipment}</div>
           </>
         )}
+        {nextLoad && <NextLoadRow next={nextLoad} />}
       </div>
 
       {matchedLoads && matchedLoads.length > 0 && (

@@ -14,7 +14,7 @@ export {
   NowDriverAvailable,
   NowDriverInTransit,
 } from './now-card';
-export type { DriverActiveLoad, DriverMatchedLoad } from './now-card';
+export type { DriverActiveLoad, DriverMatchedLoad, DriverNextLoad } from './now-card';
 export { QuickStats } from './quick-stats';
 export type { QuickStat, DeltaTone } from './quick-stats';
 export { RouteProgressBar } from './route-progress-bar';

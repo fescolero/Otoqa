@@ -39,6 +39,7 @@ import {
   NowDriverAvailable,
   NowDriverInTransit,
   type DriverActiveLoad,
+  type DriverNextLoad,
   QuickStats,
   StatusHistoryCard,
   type StatusHistoryEntry,
@@ -133,6 +134,10 @@ export default function DriverDetailPage() {
   const allDrivers = useQuery(api.drivers.list, organizationId ? { organizationId, includeDeleted: true } : 'skip');
   const [loadStatusFilter, setLoadStatusFilter] = React.useState<AssignedLoadStatus>('Assigned');
   const driverLoadsData = useQuery(api.loads.getByDriver, { driverId, status: loadStatusFilter });
+  // The Overview "Now" card and the Active-loads stat read the driver's
+  // Assigned loads regardless of the Loads tab's filter, so flipping the
+  // tab to Completed can't blank the card.
+  const assignedLoadsData = useQuery(api.loads.getByDriver, { driverId, status: 'Assigned' });
   const recentDriverLoads = useQuery(api.loads.getRecentByDriver, { driverId, limit: 4 });
   // Documents summary — same rows/status as the Documents tab (one source).
   // Held at 'skip' until the driver row is confirmed: listForEntity throws
@@ -634,12 +639,54 @@ export default function DriverDetailPage() {
   // Now block flips between in-transit and Available without manual
   // wiring. We treat any 'In Transit' / 'Picked Up' / 'En Route' tracking
   // status as "active"; otherwise fall back to Available.
-  const inTransitLoad = ((driverLoadsData ?? []) as AssignedLoad[]).find((l) => {
+  const assignedLoads = (assignedLoadsData ?? []) as AssignedLoad[];
+  const inTransitLoad = assignedLoads.find((l) => {
     const t = (l.trackingStatus || '').toLowerCase();
     return t === 'in transit' || t === 'picked up' || t === 'en route';
   });
   const onLoad = Boolean(inTransitLoad);
   const firstName = driver.firstName || fullName.split(' ')[0];
+
+  // Next load: the earliest-scheduled Assigned load that isn't the one in
+  // progress. Prefer the leg's scheduled start, else the first-stop date.
+  const startKeyOf = (l: AssignedLoad): number =>
+    l.scheduledStartMs ??
+    (l.firstStopDate ? Date.parse(`${l.firstStopDate}T00:00:00`) : Number.POSITIVE_INFINITY);
+  const nextLoad = assignedLoads
+    .filter((l) => l._id !== inTransitLoad?._id)
+    .sort((a, b) => startKeyOf(a) - startKeyOf(b))[0];
+  const lastCompletedLoad = ((recentDriverLoads ?? []) as AssignedLoad[]).find(
+    (l) => l.status === 'Completed',
+  );
+
+  const routeOf = (l: AssignedLoad): string =>
+    [l.origin?.city, l.destination?.city].filter(Boolean).join(' → ') || '—';
+  const placeOf = (p?: { city?: string; state?: string } | null): string =>
+    [p?.city, p?.state].filter(Boolean).join(', ') || '—';
+  const formatMs = (ms?: number): string | undefined =>
+    ms
+      ? new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+      : undefined;
+  const truckLabel = (t?: AssignedLoad['truck']): string | undefined => {
+    if (!t) return undefined;
+    const spec = [t.make, t.model].filter(Boolean).join(' ');
+    return spec ? `${t.unitId} · ${spec}` : t.unitId;
+  };
+  const trailerLabel = (t?: AssignedLoad['trailer']): string | undefined => {
+    if (!t) return undefined;
+    const spec = [t.size, t.bodyType].filter(Boolean).join(' ');
+    return spec ? `${t.unitId} · ${spec}` : t.unitId;
+  };
+  const nextLoadRow: DriverNextLoad | undefined = nextLoad
+    ? {
+        id: nextLoad.orderNumber,
+        route: routeOf(nextLoad),
+        pickupWhen:
+          formatMs(nextLoad.scheduledStartMs) ??
+          (nextLoad.firstStopDate ? formatDate(nextLoad.firstStopDate) : undefined),
+        onOpen: () => router.push(`/loads/${nextLoad._id}`),
+      }
+    : undefined;
 
   // Driver-record "mirror" dates (licenseExpiration, medicalExpiration, …)
   // are written by the document workflow, but day-one drivers imported
@@ -864,7 +911,7 @@ export default function DriverDetailPage() {
 
       <QuickStats
         stats={[
-          { label: 'Active loads', value: onLoad ? '1' : '0' },
+          { label: 'Active loads', value: assignedLoadsData ? String(assignedLoads.length) : '—' },
           { label: 'Loads YTD',    value: '—' },
           { label: 'Miles YTD',    value: '—' },
           { label: 'Score',        value: '—' },
@@ -872,35 +919,61 @@ export default function DriverDetailPage() {
         ]}
       />
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
+      {/* Default grid alignment (stretch) so Now and Compliance share a
+          row height; each card fills its cell. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {onLoad && inTransitLoad ? (
           <DSCard
             title="Now"
+            className="h-full"
             action={<WBtn size="sm" leading="arrow-up-right" onClick={() => router.push(`/loads/${inTransitLoad._id}`)}>Open trip</WBtn>}
           >
             <NowDriverInTransit
               load={{
                 id: inTransitLoad.orderNumber,
-                from: [inTransitLoad.origin?.city, inTransitLoad.origin?.state].filter(Boolean).join(', ') || '—',
-                to: [inTransitLoad.destination?.city, inTransitLoad.destination?.state].filter(Boolean).join(', ') || '—',
-                eta: inTransitLoad.firstStopDate,
-              } as DriverActiveLoad}
+                from: placeOf(inTransitLoad.origin),
+                to: placeOf(inTransitLoad.destination),
+                truck: truckLabel(inTransitLoad.truck),
+                trailer: trailerLabel(inTransitLoad.trailer),
+                pickup: inTransitLoad.firstStopDate ? formatDate(inTransitLoad.firstStopDate) : undefined,
+                eta: formatMs(inTransitLoad.scheduledEndMs),
+                miles:
+                  inTransitLoad.legLoadedMiles > 0
+                    ? `${Math.round(inTransitLoad.legLoadedMiles).toLocaleString('en-US')} mi`
+                    : undefined,
+                nextLoad: nextLoadRow,
+              } satisfies DriverActiveLoad}
             />
           </DSCard>
         ) : (
           <DSCard
             title="Now"
+            className="h-full"
             action={<WBtn size="sm" leading="plus" onClick={() => setActiveSection('loads')}>Assign load</WBtn>}
           >
             <NowDriverAvailable
               location={[driver.city, driver.state].filter(Boolean).join(', ') || undefined}
               hosAvailable="—"
               equipment={driver.licenseClass ?? undefined}
+              lastLoad={
+                lastCompletedLoad
+                  ? {
+                      id: lastCompletedLoad.orderNumber,
+                      deliveredOn: lastCompletedLoad.deliveredAt
+                        ? new Date(lastCompletedLoad.deliveredAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                        : formatDate(lastCompletedLoad.firstStopDate),
+                    }
+                  : undefined
+              }
+              nextLoad={nextLoadRow}
             />
           </DSCard>
         )}
 
-        <DSCard title={<>Compliance <span className="num text-[var(--text-tertiary)] font-medium">· {complianceItems.length}</span></>}>
+        <DSCard
+          title={<>Compliance <span className="num text-[var(--text-tertiary)] font-medium">· {complianceItems.length}</span></>}
+          className="h-full"
+        >
           <ComplianceMicroBars items={complianceItems} />
         </DSCard>
       </div>
