@@ -38,6 +38,12 @@ export interface RouteAssignment {
     moved: number;
     held: number;
     byReason: Array<{ reason: string; count: number }>;
+    heldLoads?: Array<{
+      orderNumber: string;
+      serviceDate?: string;
+      reason: string;
+      detail?: string;
+    }>;
   };
   createdBy: string;
   createdAt: number;

@@ -191,20 +191,27 @@ export const listCandidates = internalQuery({
   },
 });
 
-/** Hold counts for the whole set, for the action's tally. */
-export const tallyHolds = internalQuery({
+export type HeldLoad = {
+  orderNumber: string;
+  serviceDate?: string;
+  reason: string;
+  detail?: string;
+};
+
+/** Loads the assessment holds before anything is attempted, with why. */
+export const listHolds = internalQuery({
   args: { routeId: v.id('routeAssignments'), ...previousValidator },
-  handler: async (ctx, args): Promise<Array<{ reason: string; count: number }>> => {
+  handler: async (ctx, args): Promise<HeldLoad[]> => {
     const rule = await ctx.db.get(args.routeId);
     if (!rule) return [];
     const assessed = await assessRuleLoads(ctx, rule, targetOf(rule), previousFrom(args));
-    const counts = new Map<string, number>();
-    for (const a of assessed) {
-      if (!a.verdict.eligible) {
-        counts.set(a.verdict.reason, (counts.get(a.verdict.reason) ?? 0) + 1);
-      }
-    }
-    return [...counts.entries()].map(([reason, count]) => ({ reason, count }));
+    return assessed
+      .filter((a) => !a.verdict.eligible)
+      .map((a) => ({
+        orderNumber: a.load.orderNumber,
+        serviceDate: a.load.firstStopDate,
+        reason: a.verdict.eligible ? '' : a.verdict.reason,
+      }));
   },
 });
 
@@ -223,12 +230,22 @@ export const rotateOneLoad = internalMutation({
   handler: async (
     ctx,
     args,
-  ): Promise<{ moved: true } | { moved: false; reason: RotationHoldReason }> => {
+  ): Promise<
+    | { moved: true; orderNumber: string; serviceDate?: string }
+    | {
+        moved: false;
+        reason: RotationHoldReason;
+        orderNumber?: string;
+        serviceDate?: string;
+        detail?: string;
+      }
+  > => {
     const rule = await ctx.db.get(args.routeId);
     const load = await ctx.db.get(args.loadId);
     if (!rule || !load || load.autoAssignedRouteId !== rule._id) {
-      return { moved: false, reason: 'MOVED_BY_HUMAN' };
+      return { moved: false, reason: 'MOVED_BY_HUMAN', orderNumber: load?.orderNumber };
     }
+    const who = { orderNumber: load.orderNumber, serviceDate: load.firstStopDate };
 
     const [legs, carrierAssignments] = await Promise.all([
       ctx.db
@@ -250,7 +267,7 @@ export const rotateOneLoad = internalMutation({
       previous: previousFrom(args),
       today: serviceDateOf(Date.now()),
     });
-    if (!verdict.eligible) return { moved: false, reason: verdict.reason };
+    if (!verdict.eligible) return { moved: false, reason: verdict.reason, ...who };
 
     const now = Date.now();
     const actor = { assignedBy: args.userId, assignedByName: args.userName ?? 'Route rotation' };
@@ -276,7 +293,7 @@ export const rotateOneLoad = internalMutation({
     if (target.driverId) {
       const driver = await ctx.db.get(target.driverId);
       if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
-        return { moved: false, reason: 'TARGET_INACTIVE' };
+        return { moved: false, reason: 'TARGET_INACTIVE', ...who };
       }
       await closeCarrierAward();
       const result = await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
@@ -288,12 +305,27 @@ export const rotateOneLoad = internalMutation({
         blockOnOverlap: true,
         autoAssignedRouteId: rule._id,
       });
-      if (result.status === 'OVERLAP') return { moved: false, reason: 'OVERLAP_CONFLICT' };
-      if (result.status !== 'SUCCESS') return { moved: false, reason: 'ERROR' };
+      if (result.status === 'OVERLAP') {
+        // Name the loads the driver already has across this window. This
+        // is what decides whether the conflict is real: a dispatcher can
+        // look at both and, if the windows are soft, place it by hand.
+        const conflicts = (result.overlaps ?? [])
+          .map((o) => `#${o.orderNumber ?? o.loadId} (${Math.round(o.overlapMinutes)} min)`)
+          .join(', ');
+        return {
+          moved: false,
+          reason: 'OVERLAP_CONFLICT',
+          ...who,
+          detail: `${driver.firstName} ${driver.lastName} already has ${conflicts}`,
+        };
+      }
+      if (result.status !== 'SUCCESS') {
+        return { moved: false, reason: 'ERROR', ...who, detail: result.message };
+      }
     } else if (target.carrierPartnershipId) {
       const carrier = await ctx.db.get(target.carrierPartnershipId);
       if (!carrier || carrier.status !== 'ACTIVE') {
-        return { moved: false, reason: 'TARGET_INACTIVE' };
+        return { moved: false, reason: 'TARGET_INACTIVE', ...who };
       }
       await closeCarrierAward();
       const result = await ctx.runMutation(internal.dispatchLegs.assignCarrierInternal, {
@@ -302,9 +334,11 @@ export const rotateOneLoad = internalMutation({
         ...actor,
         autoAssignedRouteId: rule._id,
       });
-      if (result.status !== 'SUCCESS') return { moved: false, reason: 'ERROR' };
+      if (result.status !== 'SUCCESS') {
+        return { moved: false, reason: 'ERROR', ...who, detail: result.message };
+      }
     } else {
-      return { moved: false, reason: 'TARGET_INACTIVE' };
+      return { moved: false, reason: 'TARGET_INACTIVE', ...who };
     }
 
     await logAudit(ctx, {
@@ -319,9 +353,17 @@ export const rotateOneLoad = internalMutation({
       changedFields: ['primaryDriverId', 'primaryCarrierPartnershipId'],
     });
 
-    return { moved: true };
+    return { moved: true, ...who };
   },
 });
+
+const heldLoadValidator = v.object({
+  orderNumber: v.string(),
+  serviceDate: v.optional(v.string()),
+  reason: v.string(),
+  detail: v.optional(v.string()),
+});
+const MAX_HELD_LISTED = 50;
 
 export const recordRotation = internalMutation({
   args: {
@@ -332,6 +374,7 @@ export const recordRotation = internalMutation({
       moved: v.number(),
       held: v.number(),
       byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+      heldLoads: v.optional(v.array(heldLoadValidator)),
     }),
   },
   returns: v.null(),
@@ -375,11 +418,13 @@ async function rotateRule(
   };
   const [candidates, preHolds] = await Promise.all([
     ctx.runQuery(internal.routeRotation.listCandidates, { routeId: args.routeId, ...previous }),
-    ctx.runQuery(internal.routeRotation.tallyHolds, { routeId: args.routeId, ...previous }),
+    ctx.runQuery(internal.routeRotation.listHolds, { routeId: args.routeId, ...previous }),
   ]);
 
-  const byReason = new Map<string, number>(preHolds.map((h) => [h.reason, h.count]));
+  const heldLoads: HeldLoad[] = [...preHolds];
+  const byReason = new Map<string, number>();
   const tally = (reason: string) => byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
+  for (const h of preHolds) tally(h.reason);
 
   let moved = 0;
   for (const loadId of candidates) {
@@ -391,11 +436,21 @@ async function rotateRule(
         userId: args.userId,
         userName: args.userName,
       });
-      if (r.moved) moved++;
-      else tally(r.reason);
+      if (r.moved) {
+        moved++;
+      } else {
+        tally(r.reason);
+        heldLoads.push({
+          orderNumber: r.orderNumber ?? String(loadId),
+          serviceDate: r.serviceDate,
+          reason: r.reason,
+          detail: r.detail,
+        });
+      }
     } catch (err) {
       console.error(`[rotation] rule ${args.routeId}: load ${loadId} failed:`, err);
       tally('ERROR');
+      heldLoads.push({ orderNumber: String(loadId), reason: 'ERROR', detail: String(err) });
     }
   }
 
@@ -404,16 +459,31 @@ async function rotateRule(
   const byReasonList = [...byReason.entries()]
     .map(([reason, count]) => ({ reason, count }))
     .sort((a, b) => b.count - a.count);
+  heldLoads.sort((a, b) => (a.serviceDate ?? '').localeCompare(b.serviceDate ?? ''));
 
   await ctx.runMutation(internal.routeRotation.recordRotation, {
     routeId: args.routeId,
-    lastRotation: { at: Date.now(), considered, moved, held, byReason: byReasonList },
+    lastRotation: {
+      at: Date.now(),
+      considered,
+      moved,
+      held,
+      byReason: byReasonList,
+      heldLoads: heldLoads.slice(0, MAX_HELD_LISTED),
+    },
   });
 
   console.log(
     `[rotation] rule ${args.routeId}: ${moved} moved, ${held} held` +
       (held > 0 ? ` (${byReasonList.map((r) => `${r.reason} ${r.count}`).join(', ')})` : ''),
   );
+  // One line per held load, so the logs answer "which one, and with what".
+  for (const h of heldLoads) {
+    console.log(
+      `[rotation]   held #${h.orderNumber}${h.serviceDate ? ` on ${h.serviceDate}` : ''}: ${h.reason}` +
+        (h.detail ? ` — ${h.detail}` : ''),
+    );
+  }
 
   return { considered, moved, held, byReason: byReasonList };
 }

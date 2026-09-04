@@ -251,6 +251,10 @@ describe('rotation on rule edit', () => {
     expect((await loadState(t, w.robotFar)).driver).toBe(w.driverB); // moved
     const rule = await t.run((ctx) => ctx.db.get(w.routeId));
     expect(rule?.lastRotation?.byReason).toContainEqual({ reason: 'OVERLAP_CONFLICT', count: 1 });
+    // The hold names the load AND what it collided with.
+    const held = rule?.lastRotation?.heldLoads?.find((h) => h.reason === 'OVERLAP_CONFLICT');
+    expect(held?.orderNumber).toBe('ORD-R1');
+    expect(held?.detail).toMatch(/Sam Rae already has #ORD-CLASH/);
   });
 
   it('re-sync moves whatever the rule owns that is not on its current driver', async () => {

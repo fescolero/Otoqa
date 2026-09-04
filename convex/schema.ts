@@ -1172,6 +1172,21 @@ export default defineSchema({
         moved: v.number(),
         held: v.number(),
         byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+        // The held loads themselves (bounded sample), so "4 held —
+        // overlap" can be answered with WHICH loads and with WHAT. For an
+        // overlap, `detail` names the loads the target driver already has
+        // across that window — the thing a dispatcher needs to decide
+        // whether the double-booking is real.
+        heldLoads: v.optional(
+          v.array(
+            v.object({
+              orderNumber: v.string(),
+              serviceDate: v.optional(v.string()),
+              reason: v.string(),
+              detail: v.optional(v.string()),
+            }),
+          ),
+        ),
       }),
     ),
 

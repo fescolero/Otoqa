@@ -99,6 +99,16 @@ const lastRotationValidator = v.object({
   moved: v.number(),
   held: v.number(),
   byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+  heldLoads: v.optional(
+    v.array(
+      v.object({
+        orderNumber: v.string(),
+        serviceDate: v.optional(v.string()),
+        reason: v.string(),
+        detail: v.optional(v.string()),
+      }),
+    ),
+  ),
 });
 
 /**

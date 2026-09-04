@@ -24,7 +24,7 @@ import { useAuthQuery } from '@/hooks/use-auth-query';
 import { Avatar, WBtn, WIcon, type IconName } from '@/components/web';
 import { DaysControl } from '@/components/web/create-form/controls/days';
 import { ToggleControl } from '@/components/web/create-form/controls/toggle';
-import { describeHolds } from '@/components/route-assignments/rotation-labels';
+import { describeHolds, ROTATION_REASON_LABELS } from '@/components/route-assignments/rotation-labels';
 import { Loader2 } from 'lucide-react';
 
 type AssigneeKind = 'driver' | 'carrier';
@@ -47,6 +47,12 @@ interface RouteAssignmentDoc {
     moved: number;
     held: number;
     byReason: Array<{ reason: string; count: number }>;
+    heldLoads?: Array<{
+      orderNumber: string;
+      serviceDate?: string;
+      reason: string;
+      detail?: string;
+    }>;
   };
 }
 
@@ -782,6 +788,20 @@ export function AutoAssignModal({
                       ? ` (${describeHolds(rule.lastRotation.byReason)})`
                       : ''}
                     .
+                    {/* Which loads, and for an overlap, with what — the
+                        dispatcher's call needs both sides named. */}
+                    {rule.lastRotation.heldLoads && rule.lastRotation.heldLoads.length > 0 && (
+                      <ul className="mt-1.5 space-y-1">
+                        {rule.lastRotation.heldLoads.map((h) => (
+                          <li key={`${h.orderNumber}-${h.reason}`} className="leading-[14px]">
+                            <span className="text-foreground font-medium">#{h.orderNumber}</span>
+                            {h.serviceDate ? ` ${h.serviceDate}` : ''} ·{' '}
+                            {ROTATION_REASON_LABELS[h.reason] ?? h.reason}
+                            {h.detail ? ` — ${h.detail}` : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                 )}
               </div>

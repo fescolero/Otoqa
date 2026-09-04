@@ -237,7 +237,17 @@ function SyncCell({
   return (
     <span
       className="text-[12px] truncate"
-      title={`Last re-sync ${formatAgo(last.at)}: ${last.moved} moved${heldReal > 0 ? `, held: ${describeHolds(holds)}` : ''}`}
+      title={
+        `Last re-sync ${formatAgo(last.at)}: ${last.moved} moved` +
+        (heldReal > 0 ? `, held: ${describeHolds(holds)}` : '') +
+        (last.heldLoads && last.heldLoads.length > 0
+          ? '\n' +
+            last.heldLoads
+              .filter((h) => h.reason !== 'ALREADY_ON_TARGET')
+              .map((h) => `#${h.orderNumber}${h.serviceDate ? ` ${h.serviceDate}` : ''}: ${h.reason}${h.detail ? ` — ${h.detail}` : ''}`)
+              .join('\n')
+          : '')
+      }
     >
       <span style={{ color: heldReal > 0 ? '#A66800' : '#15803D' }}>
         {heldReal > 0 ? '⚠' : '✓'} {last.moved} moved
