@@ -5,7 +5,12 @@ import { countDriverAttention } from './_helpers/documentStatus';
 import { loadEffectiveCatalog } from './lib/documentCatalog';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
-import { assertMirrorsEditable, partnershipMirrorIsDocumentOwned, stampNewDriverSummary } from './entityDocuments';
+import {
+  assertMirrorsEditable,
+  partnershipMirrorIsDocumentOwned,
+  sharedDocsFromOrg,
+  stampNewDriverSummary,
+} from './entityDocuments';
 import {
   scheduleCreateClerkUserForDriver,
   scheduleUpdateClerkUserPhone,
@@ -490,6 +495,8 @@ export const update = mutation({
       
       const allPartnerships = [...partnerships, ...partnershipsByConvexId];
       const seenIds = new Set<string>();
+      // The carrier's shared set once, not once per partnership.
+      const fromOrg = updates.licenseExpiration !== undefined ? await sharedDocsFromOrg(ctx, driverOrg) : [];
       
       for (const partnership of allPartnerships) {
         if (seenIds.has(partnership._id)) continue;
@@ -511,7 +518,7 @@ export const update = mutation({
         // recomputePartnershipDocuments writes it.
         if (
           updates.licenseExpiration !== undefined &&
-          !(await partnershipMirrorIsDocumentOwned(ctx, partnership, 'ownerDriverLicenseExpiration'))
+          !(await partnershipMirrorIsDocumentOwned(ctx, partnership, 'ownerDriverLicenseExpiration', driverOrg, fromOrg))
         ) {
           partnershipUpdates.ownerDriverLicenseExpiration = updates.licenseExpiration;
         }

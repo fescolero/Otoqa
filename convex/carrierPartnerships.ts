@@ -5,6 +5,7 @@ import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from '
 import { logAudit } from './lib/audit';
 import {
   assertMirrorsEditable,
+  driverMirrorIsDocumentOwned,
   partnershipMirrorIsDocumentOwned,
   recomputePartnershipDocuments,
   sharedDocsFromOrg,
@@ -882,17 +883,17 @@ export const update = mutation({
           if (updates.ownerDriverLicenseExpiration !== undefined)
             driverUpdates.licenseExpiration = updates.ownerDriverLicenseExpiration;
 
+          // The driver's CDL mirror is document-owned once a CDL exists —
+          // the carrier's document, which the broker cannot replace, so the
+          // field is dropped rather than failing the whole save.
+          if (
+            driverUpdates.licenseExpiration !== undefined &&
+            (await driverMirrorIsDocumentOwned(ctx, ownerDriver, 'licenseExpiration'))
+          ) {
+            delete driverUpdates.licenseExpiration;
+          }
           // Only patch if there are actual driver field updates
           if (Object.keys(driverUpdates).length > 1) {
-            // The driver's CDL mirror is document-owned once a CDL exists.
-            await assertMirrorsEditable(
-              ctx,
-              'driver',
-              ownerDriver.organizationId,
-              ownerDriver._id,
-              driverUpdates,
-              ownerDriver,
-            );
             await ctx.db.patch(carrierOrg.ownerDriverId, driverUpdates);
           }
 
