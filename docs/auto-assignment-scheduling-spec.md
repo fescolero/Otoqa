@@ -4,8 +4,10 @@ Status: in progress. Covers two independent features that both answer "which
 days does auto-assignment run?" — they mean different things and only one of
 them is safe to ship alone.
 
-**Done:** R11, the matcher extraction, feature A, R9, and R5. Remaining loose
-ends: R3/R4 (settings-form mechanics), R12/R13 (driver availability,
+**Done:** R11, the matcher extraction, feature A, R9, R5, and — after the
+first driver rotation exposed it — feature C (assignment horizon),
+provenance, and rule rotation. Remaining loose ends: R3/R4
+(settings-form mechanics), R12/R13 (driver availability,
 `employmentStatus` union).
 
 Also shipped, not in the original review:
@@ -199,6 +201,97 @@ switch on `NO_MATCH | ALREADY_ASSIGNED` → `skipped`, everything else →
 - `route-assignments-table.tsx`: it already renders `activeDays` for the
   recurring-template rows ([:68](../components/route-assignments/route-assignments-table.tsx));
   make the route-assignment rows use the same column.
+
+---
+
+# C — Assignment horizon, provenance, and rotation
+
+Found in production: "schedule upon import" (`triggerOnCreate`) assigned
+every load the moment FourKites delivered it, a month of schedule at a
+time. Then a driver rotation happened and none of those assignments could
+be unwound cleanly — pausing the rule stops *future* assignments only, and
+the manual fix (unassign, wait for the sweep) sets `autoAssignOptOut`
+(R11), so the sweep would never hand the loads to the new driver either.
+
+Three pieces, each small, together the fix.
+
+## C.1 Assignment horizon — `assignAheadDays`
+
+`autoAssignmentSettings.assignAheadDays` (optional; absent = no limit, every
+pre-existing row). A load whose `firstStopDate` is more than N days out is
+returned as `BEYOND_HORIZON` by both paths — counted as *skipped*, never an
+error — and stays `Open`. Helper: `lib/assignHorizon.ts`.
+
+**This is not B.** B gated on the wall clock and blocked; a blocked load sat
+in `Open` past its pickup and expired (R1). C gates on the load's *service
+date*, the same anchor feature A uses, and defers: every sweep re-evaluates
+the load and takes it the day it crosses the line. It cannot be in `Open`
+past its pickup because of the horizon alone.
+
+Which is why **the horizon requires `scheduledEnabled`**. An org on the
+create trigger alone has no second look (R2); a deferred load would never
+be assigned. `updateSettings` refuses the combination, in both orders
+(setting a horizon with the sweep off, turning the sweep off with a horizon
+set), and the settings form disables the field to match.
+
+The sweep's load query now takes the horizon as an inclusive upper bound
+and ranges `by_org_status_first_stop` instead of collecting every Open load
+(R8, partially paid). Undated loads sort before every string in that index,
+so they stay in the range — matching `isBeyondHorizon`, which never defers a
+load it cannot place on the calendar. Undated loads are the route rules'
+problem (A.6), not the horizon's.
+
+"Today" is the UTC date. `firstStopDate` is facility-local, so the two can
+disagree by a few hours around midnight; for a knob measured in days that
+slack is acceptable and is not corrected with a timezone field (A.3).
+
+## C.2 Provenance — `autoAssignedRouteId` / `autoAssignedAt`
+
+On `loadInformation`. Written by `assignDriverInternal` /
+`assignCarrierInternal` only when the caller passes `autoAssignedRouteId`,
+which only the auto-assignment and rotation paths do. **Every** human path
+clears it: `assignDriver`, `assignCarrier`, `unassignLoadResources`, the
+carrier-assignment cancel, partnership termination, and the leg-1 relay
+handoff. Callers of the internal helpers that omit the arg — direct-assign
+at create, mobile — clear it too, by the same patch.
+
+So "loads with this rule's id" is exactly "loads the robot placed under
+this rule that nobody has touched since." That invariant is what makes C.3
+safe. Index `by_auto_assigned_route_status`.
+
+## C.3 Rotation — `routeRotation.ts`
+
+`routeAssignments.update` takes `reassignFutureLoads`. When it is set *and*
+the driver/carrier actually changed, a scheduled action re-points the rule's
+provenance-matched loads at the new resource. `rotateLoads` is the explicit
+re-sync (same action, no "previous" constraint) — the retry path and the fix
+for a rule whose resource was changed earlier without one.
+
+Per load, in this order, first hit wins and is reported:
+
+| Hold | Meaning |
+|---|---|
+| `IN_MOTION` | a leg is ACTIVE/COMPLETED, or a carrier assignment is IN_PROGRESS |
+| `NO_SERVICE_DATE` / `PAST` | not demonstrably upcoming |
+| `MOVED_BY_HUMAN` | no longer on the resource the rule had (belt and braces — provenance should already be gone) |
+| `ALREADY_ON_TARGET` | nothing to do |
+| `DAY_RESTRICTED` | the edit also changed the calendar and the rule no longer covers this date |
+| `TARGET_INACTIVE` / `OVERLAP_CONFLICT` / `ERROR` | from the assignment itself; overlap uses R9's `blockOnOverlap` — the robot still never double-books |
+
+One load per mutation, so one overlap does not roll back the rest, and each
+transaction carries one pay-recalc cascade rather than forty. Leaving a
+carrier closes its AWARDED `loadCarrierAssignments` row first (neither
+assign helper touches that table, and it is what the carrier's app shows).
+The outcome lands on the rule as `lastRotation`, same shape of reasoning as
+`lastRun`. The edit modal previews the exact set (`previewRotation`,
+evaluated against the *proposed* resource) before anything is saved.
+
+Reassigning A → B leaves the load `Assigned`, so the sweep's
+`ALREADY_ASSIGNED` guard protects the result; `autoAssignOptOut` is never
+involved.
+
+Tests: `lib/assignHorizon.test.ts`, `autoAssignment.horizon.test.ts`,
+`routeRotation.test.ts`.
 
 ---
 
@@ -598,6 +691,12 @@ are expected to surface as `DAY_RESTRICTED` and be dispatched by hand.
    half of `convex/routeMatch.test.ts`.
    *Not done in that step:* deleting the dead `fourKitesSyncHelpers
    .createLoad` (R5) — still a landmine, still has no callers.
+3. ✅ **Feature C** — `assignAheadDays` horizon (both paths + the bounded
+   sweep query), `autoAssignedRouteId` provenance written by the robot and
+   cleared by every human path, and `routeRotation` behind
+   `routeAssignments.update({ reassignFutureLoads })` / `rotateLoads`, with
+   the two assignment mutations folded into one `decideAndAssign` body so
+   the horizon could not be added to one and not the other.
 3. R9 — overlap-declines-on-auto + the reporting channel. Not optional
    alongside A: day restrictions create new silent-skip paths, and R1 means
    a silent skip costs the load. It is also the feature B was reaching for.

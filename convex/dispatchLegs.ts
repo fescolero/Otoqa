@@ -451,12 +451,15 @@ export const assignDriver = mutation({
       });
     }
 
-    // 7. Update load
+    // 7. Update load. A person chose this driver, so the load stops being
+    // the route rule's to rotate — clear the auto-assignment provenance.
     const nextStatus = load.status === 'Open' ? 'Assigned' : load.status;
     await ctx.db.patch(args.loadId, {
       primaryDriverId: args.driverId,
       primaryCarrierPartnershipId: undefined,
       status: nextStatus,
+      autoAssignedRouteId: undefined,
+      autoAssignedAt: undefined,
       updatedAt: now,
     });
 
@@ -544,6 +547,11 @@ export const assignDriverInternal = internalMutation({
     // this load's window. Auto-assignment passes true; every human-initiated
     // caller leaves it off and keeps the warn-and-proceed behavior.
     blockOnOverlap: v.optional(v.boolean()),
+    // Provenance. The route rule that decided this assignment — passed by
+    // auto-assignment and rotation only. Absent means a person chose, and
+    // the load's stored provenance is CLEARED so a later rotation of the
+    // rule leaves the human decision alone.
+    autoAssignedRouteId: v.optional(v.id('routeAssignments')),
   },
   handler: async (
     ctx,
@@ -660,6 +668,8 @@ export const assignDriverInternal = internalMutation({
       primaryDriverId: args.driverId,
       primaryCarrierPartnershipId: undefined,
       status: 'Assigned',
+      autoAssignedRouteId: args.autoAssignedRouteId,
+      autoAssignedAt: args.autoAssignedRouteId ? now : undefined,
       updatedAt: now,
     });
 
@@ -700,6 +710,8 @@ export const assignCarrierInternal = internalMutation({
     carrierRate: v.optional(v.number()),
     assignedBy: v.string(),
     assignedByName: v.optional(v.string()),
+    // Provenance — see assignDriverInternal.
+    autoAssignedRouteId: v.optional(v.id('routeAssignments')),
   },
   handler: async (ctx, args): Promise<{ status: 'SUCCESS' | 'ERROR'; message?: string }> => {
     const carrier = await ctx.db.get(args.carrierPartnershipId);
@@ -773,6 +785,8 @@ export const assignCarrierInternal = internalMutation({
       primaryCarrierPartnershipId: args.carrierPartnershipId,
       primaryDriverId: undefined,
       status: 'Assigned',
+      autoAssignedRouteId: args.autoAssignedRouteId,
+      autoAssignedAt: args.autoAssignedRouteId ? now : undefined,
       updatedAt: now,
     });
 
@@ -914,12 +928,15 @@ export const assignCarrier = mutation({
       });
     }
 
-    // 6. Update load - use partnership ID as carrier reference
+    // 6. Update load - use partnership ID as carrier reference. Human
+    // choice: clear the auto-assignment provenance (see assignDriver).
     const nextStatus = load.status === 'Open' ? 'Assigned' : load.status;
     await ctx.db.patch(args.loadId, {
       primaryCarrierPartnershipId: args.carrierPartnershipId,
       primaryDriverId: undefined,
       status: nextStatus,
+      autoAssignedRouteId: undefined,
+      autoAssignedAt: undefined,
       updatedAt: now,
     });
 
@@ -1035,6 +1052,9 @@ export async function unassignLoadResources(
     primaryCarrierPartnershipId: undefined,
     status: 'Open',
     autoAssignOptOut: optOut ? true : undefined,
+    // Nothing is assigned, so nothing was auto-assigned.
+    autoAssignedRouteId: undefined,
+    autoAssignedAt: undefined,
     updatedAt: now,
   });
 
@@ -1984,9 +2004,12 @@ export const handoffLoad = mutation({
     await transferFrontierToDriver(ctx, trackingState, args.toDriverId, now);
 
     // Maintain the primaryDriverId denorm cache if we just handed off leg 1.
+    // A relay is a human decision; the route rule no longer owns the load.
     if (oldLeg.sequence === 1 && load.primaryDriverId === args.fromDriverId) {
       await ctx.db.patch(args.loadId, {
         primaryDriverId: args.toDriverId,
+        autoAssignedRouteId: undefined,
+        autoAssignedAt: undefined,
         updatedAt: now,
       });
     }

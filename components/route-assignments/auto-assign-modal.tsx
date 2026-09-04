@@ -40,6 +40,33 @@ interface RouteAssignmentDoc {
   excludeFederalHolidays?: boolean;
   driverName?: string;
   carrierName?: string;
+  lastRotation?: {
+    at: number;
+    considered: number;
+    moved: number;
+    held: number;
+    byReason: Array<{ reason: string; count: number }>;
+  };
+}
+
+/** Human labels for routeRotation's hold reasons. Unknown codes fall
+ *  through to the raw string rather than vanishing. */
+const ROTATION_REASON_LABELS: Record<string, string> = {
+  IN_MOTION: 'already in progress',
+  PAST: 'pickup date has passed',
+  NO_SERVICE_DATE: 'no pickup date',
+  MOVED_BY_HUMAN: 'moved by a dispatcher',
+  ALREADY_ON_TARGET: 'already on this assignee',
+  DAY_RESTRICTED: 'rule no longer runs that day',
+  TARGET_INACTIVE: 'assignee inactive',
+  OVERLAP_CONFLICT: 'assignee already booked',
+  ERROR: 'error',
+};
+
+function describeHolds(byReason: Array<{ reason: string; count: number }>): string {
+  return byReason
+    .map((r) => `${r.count} ${ROTATION_REASON_LABELS[r.reason] ?? r.reason}`)
+    .join(', ');
 }
 
 interface AutoAssignModalProps {
@@ -265,10 +292,15 @@ export function AutoAssignModal({
   const [skipHolidays, setSkipHolidays] = React.useState(rule?.excludeFederalHolidays ?? false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  // Driver rotation: when the assignee changes on an existing rule, also
+  // move the upcoming loads the rule already auto-assigned. On by default —
+  // the rotation is almost always why the assignee is being changed.
+  const [moveUpcoming, setMoveUpcoming] = React.useState(true);
 
   // Reset form when modal re-opens.
   React.useEffect(() => {
     if (open) {
+      setMoveUpcoming(true);
       setName(rule?.name ?? '');
       setHcr(rule?.hcr ?? '');
       setTripNumber(rule?.tripNumber ?? '');
@@ -329,6 +361,25 @@ export function AutoAssignModal({
   const createMutation = useMutation(api.routeAssignments.create);
   const updateMutation = useMutation(api.routeAssignments.update);
 
+  // Has the assignee changed from what the rule currently names?
+  const proposedDriverId =
+    assigneeKind === 'driver' && driverId ? (driverId as Id<'drivers'>) : undefined;
+  const proposedCarrierId =
+    assigneeKind === 'carrier' && carrierId ? (carrierId as Id<'carrierPartnerships'>) : undefined;
+  const assigneeChanged =
+    isEdit &&
+    !!rule &&
+    (proposedDriverId !== rule.driverId || proposedCarrierId !== rule.carrierPartnershipId) &&
+    (proposedDriverId !== undefined || proposedCarrierId !== undefined);
+
+  // What a rotation would do, evaluated against the proposed assignee.
+  const rotationPreview = useAuthQuery(
+    api.routeAssignments.previewRotation,
+    assigneeChanged && rule
+      ? { id: rule._id, driverId: proposedDriverId, carrierPartnershipId: proposedCarrierId }
+      : 'skip',
+  );
+
   const selectedDriver = activeDrivers.find((d) => d._id === driverId);
   const selectedCarrier = activeCarriers.find((c) => c._id === carrierId);
   const selectedDriverName = selectedDriver
@@ -361,6 +412,7 @@ export function AutoAssignModal({
           excludeFederalHolidays: skipHolidays,
           name: name || undefined,
           notes: notes || undefined,
+          reassignFutureLoads: assigneeChanged && moveUpcoming,
         });
       } else {
         await createMutation({
@@ -628,6 +680,32 @@ export function AutoAssignModal({
                 )}
               </AASection>
 
+              {/* Driver rotation — only when editing and the assignee changed */}
+              {assigneeChanged && (
+                <AASection
+                  icon="refresh"
+                  title="Upcoming loads"
+                  note="This rule has already assigned loads to the previous assignee. Loads that have started, whose pickup has passed, or that a dispatcher moved by hand are never touched."
+                >
+                  <ToggleControl
+                    id="move-upcoming"
+                    value={moveUpcoming}
+                    onChange={setMoveUpcoming}
+                    toggleLabel={
+                      rotationPreview === undefined
+                        ? 'Move upcoming auto-assigned loads to the new assignee'
+                        : `Move ${rotationPreview.eligible} upcoming auto-assigned load${rotationPreview.eligible === 1 ? '' : 's'} to the new assignee`
+                    }
+                    disabled={isSubmitting}
+                  />
+                  {rotationPreview && rotationPreview.held > 0 && (
+                    <div className="mt-2 text-[11px] text-[var(--text-tertiary)] leading-[15px]">
+                      {rotationPreview.held} will stay put: {describeHolds(rotationPreview.byReason)}.
+                    </div>
+                  )}
+                </AASection>
+              )}
+
               {/* Notes */}
               <AASection icon="chat" title="Notes">
                 <AAField label="Internal notes">
@@ -711,9 +789,20 @@ export function AutoAssignModal({
                 </div>
                 <div className="text-[12px] text-foreground leading-[16px]">
                   {isEdit
-                    ? 'Changes apply to future imports.'
+                    ? assigneeChanged && moveUpcoming
+                      ? 'Applies to future imports and moves upcoming loads.'
+                      : 'Changes apply to future imports.'
                     : 'Rule activates immediately on save.'}
                 </div>
+                {isEdit && rule?.lastRotation && (
+                  <div className="mt-2 text-[11px] text-[var(--text-tertiary)] leading-[15px]">
+                    Last rotation moved {rule.lastRotation.moved} of {rule.lastRotation.considered}
+                    {rule.lastRotation.held > 0
+                      ? ` (${describeHolds(rule.lastRotation.byReason)})`
+                      : ''}
+                    .
+                  </div>
+                )}
               </div>
             </aside>
           </div>

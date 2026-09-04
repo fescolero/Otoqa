@@ -5,6 +5,9 @@ import type { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
 import { matchRouteAssignment, overlappingDays, DAY_NAMES } from './lib/routeMatch';
+import { assertValidAssignAheadDays } from './lib/assignHorizon';
+import { assessRuleLoads, targetOf } from './routeRotation';
+import { internal } from './_generated/api';
 
 /**
  * Route Assignments - Maps recurring routes (HCR+Trip) to drivers/carriers
@@ -89,6 +92,35 @@ function validateExclusions(dates: string[] | undefined): string[] | undefined {
   return [...new Set(dates)].sort();
 }
 
+/** Outcome of the last rotation, as stored on the rule (routeRotation.ts). */
+const lastRotationValidator = v.object({
+  at: v.number(),
+  considered: v.number(),
+  moved: v.number(),
+  held: v.number(),
+  byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+});
+
+/**
+ * Kick off a rotation for a rule. `previous` is the resource the rule
+ * named before this edit; absent means "anything the rule owns that is
+ * not on its current resource" (the explicit re-sync).
+ */
+async function scheduleRotation(
+  ctx: MutationCtx,
+  routeId: Id<'routeAssignments'>,
+  previous: { driverId?: Id<'drivers'>; carrierPartnershipId?: Id<'carrierPartnerships'> } | undefined,
+  actor: { userId: string; userName?: string },
+): Promise<void> {
+  await ctx.scheduler.runAfter(0, internal.routeRotation.runRotation, {
+    routeId,
+    previousDriverId: previous?.driverId,
+    previousCarrierPartnershipId: previous?.carrierPartnershipId,
+    userId: actor.userId,
+    userName: actor.userName,
+  });
+}
+
 // List all route assignments for an organization
 export const list = query({
   args: {
@@ -115,6 +147,7 @@ export const list = query({
       createdBy: v.string(),
       createdAt: v.number(),
       updatedAt: v.number(),
+      lastRotation: v.optional(lastRotationValidator),
       // Enriched data
       driverName: v.optional(v.string()),
       carrierName: v.optional(v.string()),
@@ -201,6 +234,7 @@ export const get = query({
       createdBy: v.string(),
       createdAt: v.number(),
       updatedAt: v.number(),
+      lastRotation: v.optional(lastRotationValidator),
       driverName: v.optional(v.string()),
       carrierName: v.optional(v.string()),
     }),
@@ -263,6 +297,7 @@ export const getByRoute = query({
       customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
+      lastRotation: v.optional(lastRotationValidator),
       createdBy: v.string(),
       createdAt: v.number(),
       updatedAt: v.number(),
@@ -306,6 +341,7 @@ export const getByDriver = query({
       customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
+      lastRotation: v.optional(lastRotationValidator),
       createdBy: v.string(),
       createdAt: v.number(),
       updatedAt: v.number(),
@@ -344,6 +380,7 @@ export const getByCarrier = query({
       customExclusions: v.optional(v.array(v.string())),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
+      lastRotation: v.optional(lastRotationValidator),
       createdBy: v.string(),
       createdAt: v.number(),
       updatedAt: v.number(),
@@ -482,12 +519,17 @@ export const update = mutation({
     name: v.optional(v.string()),
     notes: v.optional(v.string()),
     isActive: v.optional(v.boolean()),
+    // Driver rotation. When the driver/carrier changes, also move the
+    // upcoming loads this rule already auto-assigned onto the new one
+    // (routeRotation.ts). Off by default: editing a rule never silently
+    // re-dispatches anything.
+    reassignFutureLoads: v.optional(v.boolean()),
   },
   returns: v.id('routeAssignments'),
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
-    const { id, ...updates } = args;
+    const { id, reassignFutureLoads, ...updates } = args;
 
     const existing = await ctx.db.get(id);
     if (!existing) {
@@ -587,7 +629,103 @@ export const update = mutation({
       });
     }
 
+    // Rotation: only when the resource actually changed and the caller
+    // asked. The previous resource is captured from the pre-edit row so
+    // loads a person had already moved elsewhere are left alone.
+    const resourceChanged =
+      ('driverId' in updateData && updateData.driverId !== existing.driverId) ||
+      ('carrierPartnershipId' in updateData &&
+        updateData.carrierPartnershipId !== existing.carrierPartnershipId);
+    if (reassignFutureLoads && resourceChanged) {
+      await scheduleRotation(ctx, id, targetOf(existing), { userId, userName });
+    }
+
     return id;
+  },
+});
+
+/**
+ * What a rotation would do right now, for the edit modal's confirmation.
+ * Evaluated against the PROPOSED resource, before the edit is saved.
+ */
+export const previewRotation = query({
+  args: {
+    id: v.id('routeAssignments'),
+    driverId: v.optional(v.id('drivers')),
+    carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
+  },
+  returns: v.object({
+    eligible: v.number(),
+    held: v.number(),
+    byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+  }),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const rule = await ctx.db.get(args.id);
+    if (!rule || rule.workosOrgId !== callerOrgId) {
+      throw new ConvexError('Route assignment not found');
+    }
+
+    const proposed = targetOf({
+      driverId: args.driverId,
+      carrierPartnershipId: args.carrierPartnershipId,
+    });
+    const target = proposed.driverId || proposed.carrierPartnershipId ? proposed : targetOf(rule);
+    // Previewing the current resource is the explicit re-sync case: no
+    // "previous" constraint, just "not already on target".
+    const previous =
+      target.driverId === rule.driverId && target.carrierPartnershipId === rule.carrierPartnershipId
+        ? undefined
+        : targetOf(rule);
+
+    const assessed = await assessRuleLoads(ctx, rule, target, previous);
+    const byReason = new Map<string, number>();
+    let eligible = 0;
+    for (const a of assessed) {
+      if (a.verdict.eligible) eligible++;
+      else byReason.set(a.verdict.reason, (byReason.get(a.verdict.reason) ?? 0) + 1);
+    }
+    return {
+      eligible,
+      held: assessed.length - eligible,
+      byReason: [...byReason.entries()]
+        .map(([reason, count]) => ({ reason, count }))
+        .sort((a, b) => b.count - a.count),
+    };
+  },
+});
+
+/**
+ * Re-sync: move every upcoming load this rule owns onto its current
+ * resource. The retry path when a scheduled rotation was interrupted, and
+ * the fix when the resource was changed earlier without one.
+ */
+export const rotateLoads = mutation({
+  args: { id: v.id('routeAssignments') },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
+    const rule = await ctx.db.get(args.id);
+    if (!rule) throw new ConvexError('Route assignment not found');
+    if (rule.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
+    if (!rule.driverId && !rule.carrierPartnershipId) {
+      throw new ConvexError('Route assignment has no driver or carrier to move loads to');
+    }
+
+    await logAudit(ctx, {
+      organizationId: rule.workosOrgId,
+      entityType: 'routeAssignment',
+      entityId: args.id,
+      entityName: rule.name,
+      action: 'auto_assign_rotated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Requested re-sync of upcoming loads for HCR ${rule.hcr}${rule.tripNumber ? ` / Trip ${rule.tripNumber}` : ''}`,
+    });
+
+    await scheduleRotation(ctx, args.id, undefined, { userId, userName });
+    return null;
   },
 });
 
@@ -682,6 +820,7 @@ export const getSettings = query({
       scheduledEnabled: v.boolean(),
       scheduleIntervalMinutes: v.optional(v.number()),
       lastScheduledRunAt: v.optional(v.number()),
+      assignAheadDays: v.optional(v.number()),
       lastRun: v.optional(
         v.object({
           at: v.number(),
@@ -715,6 +854,9 @@ export const updateSettings = mutation({
     triggerOnCreate: v.optional(v.boolean()),
     scheduledEnabled: v.optional(v.boolean()),
     scheduleIntervalMinutes: v.optional(v.number()),
+    // Assignment horizon in days; null clears it (undefined = leave as is,
+    // like every other field here — see spec R4).
+    assignAheadDays: v.optional(v.union(v.number(), v.null())),
     updatedBy: v.string(),
   },
   returns: v.id('autoAssignmentSettings'),
@@ -727,6 +869,27 @@ export const updateSettings = mutation({
       .first();
 
     const now = Date.now();
+
+    if (typeof args.assignAheadDays === 'number') {
+      try {
+        assertValidAssignAheadDays(args.assignAheadDays);
+      } catch (e) {
+        throw new ConvexError(e instanceof Error ? e.message : String(e));
+      }
+    }
+
+    // A horizon defers loads for the sweep to pick up later. With no
+    // sweep there is no later: a load imported beyond the horizon would
+    // never be assigned and would expire Open (spec R1/R2). Refuse the
+    // combination rather than let it fail silently.
+    const nextScheduled = args.scheduledEnabled ?? existing?.scheduledEnabled ?? false;
+    const nextHorizon =
+      args.assignAheadDays === undefined ? existing?.assignAheadDays : args.assignAheadDays;
+    if (typeof nextHorizon === 'number' && !nextScheduled) {
+      throw new ConvexError(
+        'An assignment horizon needs Scheduled Processing turned on — the scheduled run is what assigns deferred loads once they come due.',
+      );
+    }
 
     let settingsId;
     if (existing) {
@@ -741,6 +904,9 @@ export const updateSettings = mutation({
       if (args.scheduledEnabled !== undefined) updateData.scheduledEnabled = args.scheduledEnabled;
       if (args.scheduleIntervalMinutes !== undefined)
         updateData.scheduleIntervalMinutes = args.scheduleIntervalMinutes;
+      // null → patch to undefined, which removes the field.
+      if (args.assignAheadDays !== undefined)
+        updateData.assignAheadDays = args.assignAheadDays ?? undefined;
 
       await ctx.db.patch(existing._id, updateData);
       settingsId = existing._id;
@@ -752,6 +918,7 @@ export const updateSettings = mutation({
         triggerOnCreate: args.triggerOnCreate ?? false,
         scheduledEnabled: args.scheduledEnabled ?? false,
         scheduleIntervalMinutes: args.scheduleIntervalMinutes,
+        assignAheadDays: args.assignAheadDays ?? undefined,
         updatedBy: userId,
         updatedAt: now,
       });

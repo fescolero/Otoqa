@@ -43,6 +43,7 @@ import {
 } from '@/components/web';
 
 import { AutoAssignModal } from '@/components/route-assignments/auto-assign-modal';
+import { toast } from 'sonner';
 import type { CombinedAssignment } from '@/components/route-assignments/types';
 
 // ─── helpers ────────────────────────────────────────────────────────────
@@ -287,6 +288,7 @@ export default function RouteAssignmentsPage() {
   // Mutations
   const toggleRouteActive = useMutation(api.routeAssignments.toggleActive);
   const deleteRouteAssignment = useMutation(api.routeAssignments.remove);
+  const rotateRouteLoads = useMutation(api.routeAssignments.rotateLoads);
   const toggleTemplateActive = useMutation(api.recurringLoads.toggleActive);
   const deleteTemplate = useMutation(api.recurringLoads.remove);
 
@@ -517,6 +519,13 @@ export default function RouteAssignmentsPage() {
                     id: r.id as Id<'recurringLoadTemplates'>,
                   });
                 }
+              } else if (itemId === 'rotate' && r.type === 'external') {
+                try {
+                  await rotateRouteLoads({ id: r.id as Id<'routeAssignments'> });
+                  toast.success('Re-syncing upcoming loads to the current assignee');
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : 'Failed to start re-sync');
+                }
               } else if (itemId === 'delete') {
                 setDeleting(r);
               }
@@ -530,6 +539,16 @@ export default function RouteAssignmentsPage() {
                           id: 'edit',
                           label: 'Edit',
                           icon: 'edit-pen' as const,
+                        },
+                        {
+                          id: 'rotate',
+                          label: 'Re-sync upcoming loads',
+                          icon: 'refresh' as const,
+                          confirm: 'soft' as const,
+                          confirmTitle: 'Re-sync upcoming loads?',
+                          confirmBody:
+                            'Moves every upcoming load this rule auto-assigned onto its current assignee. Loads in progress, past their pickup, or placed by a dispatcher are left alone.',
+                          confirmCta: 'Re-sync',
                         },
                       ]
                     : []),

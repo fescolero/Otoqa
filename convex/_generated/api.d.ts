@@ -232,6 +232,7 @@ import type * as rateRules from "../rateRules.js";
 import type * as recurringLoads from "../recurringLoads.js";
 import type * as recurringLoadsCron from "../recurringLoadsCron.js";
 import type * as routeAssignments from "../routeAssignments.js";
+import type * as routeRotation from "../routeRotation.js";
 import type * as s3Upload from "../s3Upload.js";
 import type * as samsaraAdmin from "../samsaraAdmin.js";
 import type * as samsaraApiClient from "../samsaraApiClient.js";
@@ -488,6 +489,7 @@ declare const fullApi: ApiFromModules<{
   recurringLoads: typeof recurringLoads;
   recurringLoadsCron: typeof recurringLoadsCron;
   routeAssignments: typeof routeAssignments;
+  routeRotation: typeof routeRotation;
   s3Upload: typeof s3Upload;
   samsaraAdmin: typeof samsaraAdmin;
   samsaraApiClient: typeof samsaraApiClient;
