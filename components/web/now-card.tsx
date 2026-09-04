@@ -87,18 +87,18 @@ function NextLoadRow({ next }: { next: DriverNextLoad }) {
 export function NowDriverInTransit({ load }: { load: DriverActiveLoad }) {
   return (
     <div>
-      <div className="flex items-center gap-2 mb-2.5">
-        <Chip status="active" label="In transit" />
-        <span className="text-[12px] text-[var(--text-secondary)]">
+      <div className="flex items-center justify-between gap-2 mb-2.5">
+        <span className="text-[12.5px] text-[var(--text-secondary)] min-w-0 truncate">
           on{' '}
           <span className="num text-[var(--accent)] font-medium">{load.id}</span>
         </span>
+        <Chip status="active" label="In transit" />
       </div>
       <div className="text-[12.5px] text-foreground leading-[18px] mb-2.5">
         {load.from} <span className="text-[var(--text-tertiary)]">→</span> {load.to}
       </div>
       <div
-        className="grid text-[12] items-baseline"
+        className="grid text-[12.5px] leading-[18px] items-baseline"
         style={{ gridTemplateColumns: 'auto 1fr', rowGap: 6, columnGap: 12 }}
       >
         {load.truck && (
@@ -173,12 +173,12 @@ export function NowDriverAvailable({
 }: NowDriverAvailableProps) {
   return (
     <div>
-      <div className="flex items-center gap-2 mb-2.5">
+      <div className="flex items-center justify-between gap-2 mb-2.5">
+        <span className="text-[12.5px] text-[var(--text-secondary)] min-w-0 truncate">Ready to dispatch</span>
         <Chip status="valid" label="Available" />
-        <span className="text-[12px] text-[var(--text-secondary)]">ready to dispatch</span>
       </div>
       <div
-        className="grid text-[12] items-baseline"
+        className="grid text-[12.5px] leading-[18px] items-baseline"
         style={{ gridTemplateColumns: 'auto 1fr', rowGap: 6, columnGap: 12 }}
       >
         {location && (
