@@ -217,6 +217,24 @@ describe('assertWebUploadKey (ownership before any storage side effect)', () => 
       }),
     ).rejects.toThrow(/Invalid document key/);
 
+    // A row an older driver build recorded with only externalUrl is just as recorded.
+    const legacyKey = `orgs/${ORG}/loads/${loadId}/POD/3-ghi-photo.jpg`;
+    await t.run((ctx) =>
+      ctx.db.insert('loadDocuments', {
+        loadId,
+        workosOrgId: ORG,
+        type: 'POD',
+        fileName: 'photo.jpg',
+        contentType: 'image/jpeg',
+        externalUrl: `https://pub-test.r2.dev/${legacyKey}`,
+        uploadedBy: 'driver',
+        uploadedAt: Date.now(),
+      } as never),
+    );
+    await expect(asEditor.query(internal.loadDocuments.assertWebUploadKey, { key: legacyKey })).rejects.toThrow(
+      /Invalid document key/,
+    );
+
     // A fresh key under the same prefix is still an in-flight upload.
     const fresh = `orgs/${ORG}/loads/${loadId}/POD/2-def-pod.pdf`;
     expect(await asEditor.query(internal.loadDocuments.assertWebUploadKey, { key: fresh })).toEqual({

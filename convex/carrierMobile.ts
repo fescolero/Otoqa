@@ -10,7 +10,7 @@ import {
 } from './clerkSyncScheduler';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 import { logAudit } from './lib/audit';
-import { assertMirrorsEditable, stampNewDriverSummary } from './entityDocuments';
+import { assertMirrorsEditable, stampNewDriverSummary, partnershipMirrorIsDocumentOwned } from './entityDocuments';
 
 /**
  * Carrier Mobile API
@@ -1444,7 +1444,13 @@ export const updateDriver = mutation({
         if (updates.licenseNumber !== undefined) partnershipUpdates.ownerDriverLicenseNumber = updates.licenseNumber;
         if (updates.licenseState !== undefined) partnershipUpdates.ownerDriverLicenseState = updates.licenseState;
         if (updates.licenseClass !== undefined) partnershipUpdates.ownerDriverLicenseClass = updates.licenseClass;
-        if (updates.licenseExpiration !== undefined) partnershipUpdates.ownerDriverLicenseExpiration = updates.licenseExpiration;
+        // Document-owned once any CDL document exists (spec §6.3).
+        if (
+          updates.licenseExpiration !== undefined &&
+          !(await partnershipMirrorIsDocumentOwned(ctx, partnership, 'ownerDriverLicenseExpiration'))
+        ) {
+          partnershipUpdates.ownerDriverLicenseExpiration = updates.licenseExpiration;
+        }
         
         // Only patch if there are actual partnership field updates
         if (Object.keys(partnershipUpdates).length > 1) {

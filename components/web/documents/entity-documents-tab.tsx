@@ -257,7 +257,10 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
             </div>
           ) : r.status === 'missing' && r.lastArchived ? (
             <div className="truncate text-[11px] text-[var(--text-tertiary)]">
-              Last on file {r.lastArchived.expirationDate ? `expired ${formatYmd(r.lastArchived.expirationDate)}` : 'archived'}
+              Last on file{' '}
+              {r.lastArchived.expirationDate
+                ? `${r.lastArchivedStatus === 'expired' ? 'expired' : 'expires'} ${formatYmd(r.lastArchived.expirationDate)}`
+                : 'archived'}
             </div>
           ) : r.status === 'missing' ? (
             <div className="text-[11px] text-[var(--text-tertiary)]">No file on record</div>
@@ -314,7 +317,16 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
     if (r.source === 'shared' && r.ownDoc?.hasFile) {
       actions.push({ label: 'View our copy', icon: 'eye', onClick: () => void openPreview(r.ownDoc, r.type.name) });
     }
-    if (docs.canEdit && docs.linkedCarrierOffboarding && r.source === 'shared' && r.doc && isSharedDocument(r.doc)) {
+    // Not offered when the broker already keeps its own record of a
+    // singleton type — the copy would supersede (archive) that record.
+    if (
+      docs.canEdit &&
+      docs.linkedCarrierOffboarding &&
+      r.source === 'shared' &&
+      r.doc &&
+      isSharedDocument(r.doc) &&
+      !(r.ownDoc && r.type.singleton)
+    ) {
       actions.push({
         label: copying === r.id ? 'Saving…' : 'Save a copy',
         icon: 'copy',

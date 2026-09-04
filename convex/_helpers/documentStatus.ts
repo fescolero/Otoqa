@@ -13,7 +13,7 @@
 
 import { getDateStatus } from './dateUtils';
 import type { DocumentEntity, MirrorField } from '../lib/documentTypeDefaults';
-import { DRIVER_MIRROR_TO_TYPE_KEY, type DriverMirrorField } from '../lib/documentTypeDefaults';
+import { DRIVER_MIRROR_FIELDS, DRIVER_MIRROR_TO_TYPE_KEY } from '../lib/documentTypeDefaults';
 
 
 export type DocumentStatus =
@@ -203,23 +203,20 @@ export function countDriverAttention(
   // drop out here exactly as they do from a stamped summary.
   const missing = new Set(driverMissingKeys(row).filter((k) => !hiddenTypeKeys?.has(k)));
   let count = missing.size;
-  for (const k of row.needsDateTypeKeys ?? []) {
+  const needsDate = new Set(row.needsDateTypeKeys ?? []);
+  for (const k of needsDate) {
     if (!missing.has(k) && !hiddenTypeKeys?.has(k)) count++;
   }
   // One date per type: the mirror fields (legacy rows) overlaid by the
   // per-type summary, which is written from the same documents and also
   // covers the types that have no mirror.
   const dates = new Map<string, string | undefined>();
-  const mirrors: DriverMirrorField[] = [
-    'licenseExpiration',
-    'medicalExpiration',
-    'badgeExpiration',
-    'twicExpiration',
-  ];
-  for (const field of mirrors) dates.set(DRIVER_MIRROR_TO_TYPE_KEY[field], row[field]);
+  for (const field of DRIVER_MIRROR_FIELDS) dates.set(DRIVER_MIRROR_TO_TYPE_KEY[field], row[field]);
   for (const [typeKey, date] of Object.entries(row.docExpirations ?? {})) dates.set(typeKey, date);
   for (const [typeKey, date] of dates) {
-    if (missing.has(typeKey) || hiddenTypeKeys?.has(typeKey)) continue;
+    // A Needs-date type counted above keeps its stale mirror (spec §5.3);
+    // it is one row on the tab, so one unit of attention here.
+    if (missing.has(typeKey) || needsDate.has(typeKey) || hiddenTypeKeys?.has(typeKey)) continue;
     const s = dateExpiryStatus(date, todayStr);
     if (s === 'expired' || s === 'expiring') count++;
   }

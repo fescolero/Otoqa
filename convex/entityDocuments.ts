@@ -21,7 +21,7 @@
  *     the partnership's mirrors and summary account for them (§6).
  */
 
-import { ConvexError, v } from 'convex/values';
+import { ConvexError, v, type Infer } from 'convex/values';
 import { internal } from './_generated/api';
 import type { Doc, Id } from './_generated/dataModel';
 import {
@@ -32,7 +32,13 @@ import {
   type MutationCtx,
   type QueryCtx,
 } from './_generated/server';
-import { assertOrgPermission, assertOrgPermissionOrNotFound, getCallerOrgId, requireCallerIdentity } from './lib/auth';
+import {
+  assertOrgPermission,
+  assertOrgPermissionOrNotFound,
+  getCallerOrgId,
+  isPermissionDenied,
+  requireCallerIdentity,
+} from './lib/auth';
 import { logAudit, type AuditEntityType } from './lib/audit';
 import {
   documentEntityValidator,
@@ -49,7 +55,7 @@ import {
   keyFromExternalUrl,
   sanitizeFilename,
 } from './lib/r2';
-import { parseDateString } from './_helpers/dateUtils';
+import { parseDateString, utcMsToDateString } from './_helpers/dateUtils';
 import {
   computeMissingTypeKeys,
   computeNeedsDateTypeKeys,
@@ -118,29 +124,7 @@ export const sharedDocumentValidator = v.object({
   typeName: v.string(),
 });
 
-type PublicDoc = {
-  _id: Id<'entityDocuments'>;
-  entity: DocumentEntity;
-  entityId: string;
-  typeKey: string;
-  status: 'pending' | 'active' | 'archived';
-  hasFile: boolean;
-  fileName?: string;
-  contentType?: string;
-  sizeBytes?: number;
-  issueDate?: string;
-  expirationDate?: string;
-  note?: string;
-  uploadedBy: string;
-  uploadedByName?: string;
-  uploadedAt: number;
-  activatedAt?: number;
-  archivedAt?: number;
-  archivedBy?: string;
-  archiveNote?: string;
-  supersededById?: Id<'entityDocuments'>;
-  shared?: boolean;
-};
+type PublicDoc = Infer<typeof entityDocumentValidator>;
 
 function toPublic(doc: Doc<'entityDocuments'>, type?: EffectiveDocumentType): PublicDoc {
   return {
@@ -259,8 +243,10 @@ export async function canAccessDocument(
   try {
     await assertEntityAccess(ctx, doc.entity, doc.entityId, intent);
     return true;
-  } catch {
-    /* fall through to the sharing path */
+  } catch (e) {
+    // An owner-org member without the permission hears exactly that, as
+    // listForEntity would say; anyone else falls through to the sharing path.
+    if (isPermissionDenied(e)) throw e;
   }
   if (intent !== 'view' || doc.entity !== 'organization' || doc.status !== 'active') return false;
 
@@ -361,7 +347,7 @@ interface SharedDoc extends PublicDoc {
 /** Everything a carrier org shares, mapped onto the carrier type keys it
  *  satisfies — identical for every partnership of that org, so callers
  *  that fan out over partnerships compute it once. */
-async function sharedDocsFromOrg(ctx: Ctx, org: Doc<'organizations'>): Promise<SharedDoc[]> {
+export async function sharedDocsFromOrg(ctx: Ctx, org: Doc<'organizations'>): Promise<SharedDoc[]> {
   if (!org.workosOrgId || org.isDeleted) return [];
   const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
   const rows = await activeDocsFor(ctx, org.workosOrgId, 'organization', org.workosOrgId);
@@ -416,8 +402,6 @@ async function writeDriverMirror(
     | 'twicExpiration';
   if (driver[field] === expirationDate) return;
   await ctx.db.patch(id, { [field]: expirationDate, updatedAt: Date.now() });
-  if (field === 'licenseExpiration') {
-  }
 }
 
 
@@ -545,6 +529,8 @@ export async function recomputeEntitySummary(
   /** The entity's active documents as they stand NOW, when the caller
    *  already holds them (activate does) — saves the index re-read. */
   activeIn?: Doc<'entityDocuments'>[],
+  /** Per-org cache for loops (the owner-operator check is org-level). */
+  orgs?: Map<string, Doc<'organizations'> | null>,
 ): Promise<void> {
   switch (entity) {
     case 'driver': {
@@ -580,7 +566,11 @@ export async function recomputeEntitySummary(
       // An owner-operator's CDL is a candidate for every linked
       // partnership's ownerDriverLicenseExpiration (latest expiry wins with
       // the broker's own owner_driver_cdl document) — one writer, here.
-      const org = await orgByAnyId(ctx, driver.organizationId);
+      let org = orgs?.get(driver.organizationId);
+      if (org === undefined) {
+        org = await orgByAnyId(ctx, driver.organizationId);
+        orgs?.set(driver.organizationId, org);
+      }
       if (org?.isOwnerOperator && org.ownerDriverId === driver._id) {
         await recomputeLinkedPartnerships(ctx, org._id as string);
       }
@@ -621,26 +611,67 @@ export async function assertMirrorsEditable(
     (f) => edits[f] !== undefined && edits[f] !== (current[f] ?? undefined),
   );
   if (touched.length === 0) return;
-  const catalog = await loadEffectiveCatalog(ctx, orgId, entity);
+  const owned = await documentOwnedMirrorTypes(ctx, entity, orgId, entityId);
+  for (const field of touched) {
+    const typeKey = mirrorToType[field];
+    if (!owned.has(typeKey)) continue;
+    const catalog = await loadEffectiveCatalog(ctx, orgId, entity);
+    const name = catalog.find((t) => t.key === typeKey)?.name ?? typeKey;
+    throw new ConvexError(
+      `${name} expiration comes from the ${name} document — replace the document from the Documents tab to change it`,
+    );
+  }
+}
+
+/** Type keys whose mirror on this entity is document-owned right now:
+ *  an own active document, and for a partnership also a carrier-shared
+ *  one or the linked owner-operator's CDL document. */
+async function documentOwnedMirrorTypes(
+  ctx: Ctx,
+  entity: 'driver' | 'carrier',
+  orgId: string,
+  entityId: string,
+  linkedOrgIn?: Doc<'organizations'> | null,
+  fromOrgIn?: SharedDoc[],
+): Promise<Set<string>> {
   const own = await activeDocsFor(ctx, orgId, entity, entityId);
   const covered = new Set(own.map((d) => d.typeKey));
   if (entity === 'carrier') {
     const pid = ctx.db.normalizeId('carrierPartnerships', entityId);
     const p = pid ? await ctx.db.get(pid) : null;
     if (p) {
-      const org = p.carrierOrgId ? await orgByAnyId(ctx, p.carrierOrgId) : null;
-      for (const sd of await sharedDocsForPartnership(ctx, p, org)) covered.add(sd.partnerTypeKey);
+      const org =
+        linkedOrgIn !== undefined ? linkedOrgIn : p.carrierOrgId ? await orgByAnyId(ctx, p.carrierOrgId) : null;
+      for (const sd of await sharedDocsForPartnership(ctx, p, org, fromOrgIn)) covered.add(sd.partnerTypeKey);
       if (await linkedOwnerCdlExpiry(ctx, p, org)) covered.add(CARRIER_MIRROR_TO_TYPE_KEY.ownerDriverLicenseExpiration);
     }
   }
-  for (const field of touched) {
-    const typeKey = mirrorToType[field];
-    if (!covered.has(typeKey)) continue;
-    const name = catalog.find((t) => t.key === typeKey)?.name ?? typeKey;
-    throw new ConvexError(
-      `${name} expiration comes from the ${name} document — replace the document from the Documents tab to change it`,
-    );
-  }
+  return covered;
+}
+
+/**
+ * For the legacy driver→partnership / org→partnership sync paths: is this
+ * partnership mirror document-owned? A sync must then leave it alone —
+ * recomputePartnershipDocuments is its only writer. Loops over one
+ * carrier's partnerships pass the org and its shared set (sharedDocsFromOrg)
+ * so they are resolved once.
+ */
+export async function partnershipMirrorIsDocumentOwned(
+  ctx: Ctx,
+  partnership: Doc<'carrierPartnerships'>,
+  field: keyof typeof CARRIER_MIRROR_TO_TYPE_KEY,
+  linkedOrg?: Doc<'organizations'> | null,
+  fromOrg?: SharedDoc[],
+): Promise<boolean> {
+  const owned = await documentOwnedMirrorTypes(
+    ctx,
+    'carrier',
+    partnership.brokerOrgId,
+    partnership._id,
+    linkedOrg,
+    fromOrg,
+  );
+  return owned.has(CARRIER_MIRROR_TO_TYPE_KEY[field]);
 }
 
 // ─── Activation (shared by finalize + date-only) ─────────────────────────
@@ -672,7 +703,7 @@ async function activate(
         status: 'archived',
         archivedAt: now,
         archivedBy: who.userId,
-        archiveNote: `Replaced ${formatDate(now)}`,
+        archiveNote: `Replaced ${utcMsToDateString(now)}`,
         supersededById: doc._id,
       });
       replaced = prev;
@@ -719,9 +750,6 @@ async function activate(
   });
 }
 
-function formatDate(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
-}
 
 // ─── Internal: presign / finalize plumbing (called from 'use node') ──────
 
@@ -924,7 +952,7 @@ export const archive = mutation({
       status: 'archived',
       archivedAt: now,
       archivedBy: who.userId,
-      archiveNote: args.note?.trim() || `Archived ${formatDate(now)}`,
+      archiveNote: args.note?.trim() || `Archived ${utcMsToDateString(now)}`,
     });
     const catalog = await loadEffectiveCatalog(ctx, who.orgId, doc.entity);
     const type = catalog.find((t) => t.key === doc.typeKey);
@@ -1450,13 +1478,14 @@ export const recomputeSummariesForOrg = internalMutation({
     switch (args.entity) {
       case 'driver': {
         const catalog = await loadEffectiveCatalog(ctx, args.orgId, 'driver');
+        const orgs = new Map<string, Doc<'organizations'> | null>();
         const page = await ctx.db
           .query('drivers')
           .withIndex('by_organization', (q) => q.eq('organizationId', args.orgId))
           .paginate({ cursor: args.cursor ?? null, numItems: RECOMPUTE_PAGE });
         for (const d of page.page) {
           if (d.isDeleted) continue;
-          await recomputeEntitySummary(ctx, args.orgId, 'driver', d._id, catalog);
+          await recomputeEntitySummary(ctx, args.orgId, 'driver', d._id, catalog, undefined, orgs);
           n++;
         }
         continueCursor = page.isDone ? null : page.continueCursor;
@@ -1511,6 +1540,7 @@ export const backfillDriverSummaries = internalMutation({
       .query('drivers')
       .paginate({ cursor: args.cursor ?? null, numItems: args.batch ?? 100 });
     const catalogs = new Map<string, EffectiveDocumentType[]>();
+    const orgs = new Map<string, Doc<'organizations'> | null>();
     let processed = 0;
     for (const d of page.page) {
       if (d.isDeleted) continue;
@@ -1519,7 +1549,7 @@ export const backfillDriverSummaries = internalMutation({
         catalog = await loadEffectiveCatalog(ctx, d.organizationId, 'driver');
         catalogs.set(d.organizationId, catalog);
       }
-      await recomputeEntitySummary(ctx, d.organizationId, 'driver', d._id, catalog);
+      await recomputeEntitySummary(ctx, d.organizationId, 'driver', d._id, catalog, undefined, orgs);
       processed++;
     }
     const nextCursor = page.isDone ? null : page.continueCursor;

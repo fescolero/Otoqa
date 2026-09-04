@@ -119,7 +119,9 @@ export default function EditDriverPage() {
         // License Information
         licenseNumber: formData.get('licenseNumber') as string,
         licenseState: formData.get('licenseState') as string,
-        licenseExpiration: formData.get('licenseExpiration') as string,
+        // Optional: the CDL document sets this mirror (spec §5.4); an empty
+        // picker must not store ''.
+        licenseExpiration: (formData.get('licenseExpiration') as string) || undefined,
         licenseClass: formData.get('licenseClass') as string,
         // Medical
         medicalExpiration: (formData.get('medicalExpiration') as string) || undefined,
@@ -309,15 +311,15 @@ export default function EditDriverPage() {
                   </Select>
                 </div>
                 <div className="group/field space-y-2">
-                  <Label htmlFor="licenseExpiration" className="text-destructive group-has-[:valid]/field:text-foreground">
-                    License Expiration
-                  </Label>
+                  <Label htmlFor="licenseExpiration">License Expiration</Label>
                   <DatePicker
                     id="licenseExpiration"
                     name="licenseExpiration"
                     defaultValue={driver.licenseExpiration}
-                    required
                   />
+                  <p className="text-[11px] text-muted-foreground">
+                    Set from the CDL document once one is uploaded on the Documents tab.
+                  </p>
                 </div>
                 <div className="group/field space-y-2">
                   <Label htmlFor="licenseClass" className="text-destructive group-has-[:valid]/field:text-foreground">

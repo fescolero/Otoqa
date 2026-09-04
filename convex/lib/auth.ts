@@ -232,9 +232,19 @@ export async function assertOrgPermission(
   const result = await assertCallerOwnsOrg(ctx, claimedOrgId);
   const claims = await getCallerPermissionClaims(ctx);
   if (!isPermitted(claims, slug)) {
-    throw new ConvexError(`Your role doesn't have the ${slug} permission`);
+    throw new ConvexError(permissionDeniedMessage(slug));
   }
   return result;
+}
+
+const PERMISSION_DENIED_PREFIX = "Your role doesn't have the ";
+export function permissionDeniedMessage(slug: string): string {
+  return `${PERMISSION_DENIED_PREFIX}${slug} permission`;
+}
+/** True for the error assertOrgPermission throws when the caller IS an org
+ *  member but lacks the slug — callers that mask "not found" must let it through. */
+export function isPermissionDenied(e: unknown): boolean {
+  return e instanceof ConvexError && typeof e.data === 'string' && e.data.startsWith(PERMISSION_DENIED_PREFIX);
 }
 
 /**

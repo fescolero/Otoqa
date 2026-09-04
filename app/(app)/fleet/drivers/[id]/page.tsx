@@ -61,7 +61,7 @@ import {
   needsAttention as docNeedsAttention,
   type DocumentStatus,
 } from '@/convex/_helpers/documentStatus';
-import type { DriverMirrorField } from '@/convex/lib/documentTypeDefaults';
+import { DRIVER_MIRROR_FIELDS, type DriverMirrorField } from '@/convex/lib/documentTypeDefaults';
 
 import { DeleteConfirmationDialog } from '@/components/drivers/delete-confirmation-dialog';
 import {
@@ -692,12 +692,6 @@ export default function DriverDetailPage() {
   // are written by the document workflow, but day-one drivers imported
   // with dates and no files still carry them. For a Missing row that date
   // is the only context we have, so surface it (spec §5.3).
-  const DRIVER_MIRROR_FIELDS: readonly DriverMirrorField[] = [
-    'licenseExpiration',
-    'medicalExpiration',
-    'badgeExpiration',
-    'twicExpiration',
-  ];
   const mirrorDateFor = (r: DocumentRowModel): string | undefined => {
     const f = r.type.mirrorField;
     if (!f || !(DRIVER_MIRROR_FIELDS as readonly string[]).includes(f)) return undefined;
@@ -793,7 +787,7 @@ export default function DriverDetailPage() {
       default: // missing
         title = `${r.type.name} missing`;
         detail = r.lastArchived?.expirationDate
-          ? `Last on file expired ${expLabel}`
+          ? `Last on file ${r.lastArchivedStatus === 'expired' ? 'expired' : 'expires'} ${expLabel}`
           : expLabel
             ? `${expExpired ? 'Expired' : 'Expires'} ${expLabel} · no file uploaded`
             : 'Upload the document and enter its date';

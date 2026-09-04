@@ -1,3 +1,5 @@
+'use node';
+
 /**
  * Shared bodies for the per-entity 'use node' document actions
  * (driverDocuments / carrierDocuments / organizationDocuments).

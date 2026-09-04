@@ -514,6 +514,16 @@ generated-API type cycle this avoids; new files follow the same pattern.
 
 ## 12. Phases
 
+**After every deploy that introduces or extends a summary field** (this
+branch adds `drivers.docExpirations` and `drivers.needsDateTypeKeys`), stamp
+every row once — until then an unstamped driver counts as "every required
+type missing" on list pages:
+
+    npx convex run migrations/010_backfill_document_summaries:runAll
+
+It schedules both self-chaining backfills; one command finishes the whole
+table and is safe to re-run.
+
 1. **Drivers.** §1 contract, system defaults + overrides table,
    `entityDocuments`, status module and the four-surface rewrite (§3),
    `licenseExpiration` optional and fabricated dates removed (§5.4),

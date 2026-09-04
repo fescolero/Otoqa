@@ -27,6 +27,7 @@ import { toast } from 'sonner';
 import { zipSync, strToU8 } from 'fflate';
 
 import { api } from '@/convex/_generated/api';
+import { sanitizeFilename } from '@/convex/lib/r2';
 import { WBtn } from '@/components/web';
 import { convexErrorMessage } from '@/lib/convex-error';
 
@@ -41,8 +42,9 @@ const PART_LIMIT = 200 * 1024 * 1024;
 
 const MANIFEST_HEADER = ['path', 'kind', 'entity', 'entityName', 'type', 'status', 'issueDate', 'expirationDate', 'uploadedAt'];
 
+/** Same sanitizer the stored keys use, so zip entries match file names. */
 function safe(part: string | undefined, fallback = 'unknown'): string {
-  return (part || fallback).replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80);
+  return sanitizeFilename(part ?? '', fallback);
 }
 
 function csvCell(v: unknown): string {
@@ -138,7 +140,8 @@ export function ExportAllDocumentsButton({ orgLabel }: { orgLabel?: string }) {
         const bytes = new Uint8Array(await res.arrayBuffer());
         if (partBytes > 0 && partBytes + bytes.byteLength > PART_LIMIT) flush();
         let unique = path;
-        for (let i = 2; files[unique]; i++) unique = path.replace(/(\.[^.]*)?$/, `-${i}$1`);
+        // Suffix the file name, never a dotted folder segment ("J.B._Hunt").
+        for (let i = 2; files[unique]; i++) unique = path.replace(/(\.[^./]*)?$/, `-${i}$1`);
         files[unique] = bytes;
         partBytes += bytes.byteLength;
         manifest.push([unique, ...row.slice(1)]);
