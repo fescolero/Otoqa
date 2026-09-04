@@ -530,7 +530,7 @@ async function insertCarrierWorld(ctx: MutationCtx, opts: { linked: boolean }) {
 async function uploadFor(
   t: ReturnType<typeof setup>,
   identity: object,
-  entity: 'carrier' | 'organization',
+  entity: 'driver' | 'carrier' | 'organization',
   entityId: string,
   typeKey: string,
   dates: { expirationDate?: string; issueDate?: string },
@@ -1069,6 +1069,58 @@ describe('second-review follow-ups', () => {
     // The linked broker can read it via sharing, but never export it.
     await expect(t.withIdentity(BROKER_USER as never).query(internal.entityDocuments.getForExport, { docId })).rejects.toThrow(/settings:manage/);
     await expect(t.query(internal.entityDocuments.getForExport, { docId })).rejects.toThrow();
+  });
+
+  it('deleting a custom type drops its key from every summary', async () => {
+    const t = setup();
+    const driverId = await t.run((ctx) => insertDriver(ctx));
+    const as = t.withIdentity(ADMIN as never);
+    await as.mutation(api.documentTypes.createCustomType, {
+      entity: 'driver', key: 'clearinghouse', name: 'Clearinghouse', expires: true, issueDateRequired: false, uploadRequired: true,
+    });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.missingDocTypeKeys).toContain('clearinghouse');
+    await as.mutation(api.documentTypes.deleteCustomType, { key: 'clearinghouse' });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.missingDocTypeKeys).not.toContain('clearinghouse');
+  });
+
+  it('rejects calendar-invalid dates, not just the wrong shape', async () => {
+    const t = setup();
+    const driverId = await t.run((ctx) => insertDriver(ctx));
+    await expect(uploadFor(t, ADMIN, 'driver', driverId, 'medical', { expirationDate: '2026-02-31' })).rejects.toThrow(/not a real calendar date/);
+    await expect(uploadFor(t, ADMIN, 'driver', driverId, 'medical', { expirationDate: '2026-13-01' })).rejects.toThrow(/not a real calendar date/);
+  });
+
+  it("an owner-driver's CDL activation mirrors onto the partnership even when organizationId is the Convex org id", async () => {
+    const t = setup();
+    const { orgId, partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const driverId = await t.run((ctx) => insertDriver(ctx, orgId as string)); // the shape carrierPartnerships writes
+    await t.run((ctx) => ctx.db.patch(orgId, { isOwnerOperator: true, ownerDriverId: driverId }));
+    // The driver's org is addressed by its Convex id, so the caller is too.
+    const asOwnerOrg = { ...CARRIER_ADMIN, org_id: orgId as string, permissions: [...permissionsForLevel('fleet', 'edit')] };
+    await uploadFor(t, asOwnerOrg, 'driver', driverId, 'cdl', { expirationDate: '2031-07-07' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2031-07-07');
+  });
+
+  it('a soft-deleted carrier shares nothing on the read path either', async () => {
+    const t = setup();
+    const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const docId = await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    const asBroker = t.withIdentity(BROKER_USER as never);
+    expect(await asBroker.query(internal.entityDocuments.getForAccess, { docId })).not.toBeNull();
+    await t.run((ctx) => ctx.db.patch(orgId, { isDeleted: true }));
+    expect(await asBroker.query(internal.entityDocuments.getForAccess, { docId })).toBeNull();
+  });
+
+  it('the export listing pages', async () => {
+    const t = setup();
+    await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    const page = await t.withIdentity(CARRIER_ADMIN as never).query(api.entityDocuments.listAllForOrgExport, {});
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0].sizeBytes).toBe(10);
+    expect(page.nextCursor).toBeNull();
   });
 
   it('startOffboarding is idempotent: a repeat call neither re-notifies nor re-audits', async () => {

@@ -140,4 +140,10 @@ describe('driverMissingKeys / countDriverAttention', () => {
   it('an empty summary with no mirrors is zero attention', () => {
     expect(countDriverAttention({ missingDocTypeKeys: [] }, today)).toBe(0);
   });
+
+  it("a hidden type's stale mirror is not attention (the Documents tab shows nothing for it)", () => {
+    const row = { missingDocTypeKeys: [], twicExpiration: '2020-01-01' };
+    expect(countDriverAttention(row, today)).toBe(1);
+    expect(countDriverAttention(row, today, new Set(['twic']))).toBe(0);
+  });
 });

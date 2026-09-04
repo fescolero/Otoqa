@@ -2,6 +2,7 @@ import { ConvexError, v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { countDriverAttention } from './_helpers/documentStatus';
+import { loadEffectiveCatalog } from './lib/documentCatalog';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
 import { stampNewDriverSummary } from './entityDocuments';
@@ -33,6 +34,10 @@ export const countDriversByStatus = query({
       inactive: 0,
       deleted: 0,
     };
+    // Hidden types keep their mirror dates but are not compliance.
+    const hiddenTypeKeys = new Set(
+      (await loadEffectiveCatalog(ctx, args.organizationId, 'driver')).filter((t) => t.hidden).map((t) => t.key),
+    );
 
     allDrivers.forEach((driver) => {
       // Count deleted
@@ -55,7 +60,7 @@ export const countDriversByStatus = query({
 
       // Needs attention = missing documents + expired/expiring mirrors.
       // Same rule as the web list and the driver page (documentStatus.ts).
-      if (countDriverAttention(driver, args.todayDateStr) > 0) {
+      if (countDriverAttention(driver, args.todayDateStr, hiddenTypeKeys) > 0) {
         counts.needsAttention++;
       }
     });

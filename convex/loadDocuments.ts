@@ -363,29 +363,34 @@ export const listForLoad = query({
  * settings:manage. Files are fetched via s3Upload.getDocumentDownloadUrl.
  */
 export const listAllForOrgExport = query({
-  args: {},
-  returns: v.array(
-    v.object({
-      documentId: v.id('loadDocuments'),
-      loadId: v.id('loadInformation'),
-      orderNumber: v.optional(v.string()),
-      type: docType,
-      fileName: v.optional(v.string()),
-      contentType: v.optional(v.string()),
-      uploadedAt: v.float64(),
-      hasFile: v.boolean(),
-    }),
-  ),
-  handler: async (ctx) => {
+  args: { cursor: v.optional(v.string()) },
+  returns: v.object({
+    rows: v.array(
+      v.object({
+        documentId: v.id('loadDocuments'),
+        loadId: v.id('loadInformation'),
+        orderNumber: v.optional(v.string()),
+        type: docType,
+        fileName: v.optional(v.string()),
+        contentType: v.optional(v.string()),
+        uploadedAt: v.float64(),
+        hasFile: v.boolean(),
+      }),
+    ),
+    nextCursor: v.union(v.string(), v.null()),
+  }),
+  handler: async (ctx, args) => {
     const orgId = await requireCallerOrgId(ctx);
     await assertOrgPermission(ctx, orgId, 'settings:manage');
-    const rows = await ctx.db
+    // Paged: years of driver captures are one row each, far past what a
+    // single query may read. The client walks the cursor.
+    const page = await ctx.db
       .query('loadDocuments')
       .withIndex('by_org', (q) => q.eq('workosOrgId', orgId))
-      .collect();
+      .paginate({ cursor: args.cursor ?? null, numItems: 500 });
     const orders = new Map<string, string | undefined>();
     const out = [];
-    for (const d of rows) {
+    for (const d of page.page) {
       let orderNumber = orders.get(d.loadId);
       if (orderNumber === undefined && !orders.has(d.loadId)) {
         orderNumber = (await ctx.db.get(d.loadId))?.orderNumber;
@@ -402,6 +407,6 @@ export const listAllForOrgExport = query({
         hasFile: !!(d.storageId || d.externalKey || d.externalUrl),
       });
     }
-    return out;
+    return { rows: out, nextCursor: page.isDone ? null : page.continueCursor };
   },
 });

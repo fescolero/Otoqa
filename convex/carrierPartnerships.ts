@@ -1030,13 +1030,12 @@ export const updateStatus = mutation({
           });
         }
 
-        // Update partnership with the carrierOrgId
+        // Update partnership with the carrierOrgId (the resummarize after
+        // the final status patch below covers the newly linked state).
         await ctx.db.patch(args.partnershipId, {
           carrierOrgId: newCarrierOrgId,
           linkedAt: now,
         });
-        // Linked → the carrier's shared documents now count here (spec §6).
-        await recomputePartnershipDocuments(ctx, args.partnershipId);
 
         // Schedule Clerk user creation for mobile app access
         const firstName =
@@ -1952,13 +1951,12 @@ export const bulkReactivate = mutation({
             });
           }
 
-          // Update partnership with the carrierOrgId
+          // Update partnership with the carrierOrgId (resummarized once,
+          // after the reactivation patch below).
           await ctx.db.patch(partnershipId, {
             carrierOrgId: newCarrierOrgId,
             linkedAt: now,
           });
-          // Linked → the carrier's shared documents now count here (spec §6).
-          await recomputePartnershipDocuments(ctx, partnershipId);
 
           // Schedule Clerk user creation
           const firstName =

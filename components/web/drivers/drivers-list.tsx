@@ -39,6 +39,7 @@ import {
   Avatar,
 } from '@/components/web';
 import { api } from '@/convex/_generated/api';
+import { useHiddenDriverTypeKeys } from '@/components/web/documents/use-entity-documents';
 import { useUserPreferences } from '@/components/web/shell/use-user-preferences';
 import { DraftListPill } from '@/components/web/create-form';
 import {
@@ -60,16 +61,19 @@ interface SystemView {
 const isActive   = (d: DriverRow) => !d.isDeleted && d.employmentStatus === 'Active';
 const isOnLeave  = (d: DriverRow) => !d.isDeleted && d.employmentStatus === 'On Leave';
 const isInactive = (d: DriverRow) => !d.isDeleted && d.employmentStatus === 'Inactive';
-const needsAttention = (d: DriverRow) => !d.isDeleted && countAttention(d) > 0;
-
-const SYSTEM_VIEWS: SystemView[] = [
-  { id: 'all',       label: 'All Drivers',     predicate: (d) => !d.isDeleted },
-  { id: 'active',    label: 'Active',          predicate: isActive },
-  { id: 'attention', label: 'Needs Attention', predicate: needsAttention, tone: 'warn' },
-  { id: 'on-leave',  label: 'On Leave',        predicate: isOnLeave },
-  { id: 'inactive',  label: 'Inactive',        predicate: isInactive },
-  { id: 'deleted',   label: 'Deleted',         predicate: (d) => !!d.isDeleted },
-];
+/** System views; "Needs Attention" depends on which driver types the org
+ *  has hidden, so the list is built per catalog. */
+function systemViews(hiddenTypeKeys: ReadonlySet<string>): SystemView[] {
+  const needsAttention = (d: DriverRow) => !d.isDeleted && countAttention(d, undefined, hiddenTypeKeys) > 0;
+  return [
+    { id: 'all',       label: 'All Drivers',     predicate: (d) => !d.isDeleted },
+    { id: 'active',    label: 'Active',          predicate: isActive },
+    { id: 'attention', label: 'Needs Attention', predicate: needsAttention, tone: 'warn' },
+    { id: 'on-leave',  label: 'On Leave',        predicate: isOnLeave },
+    { id: 'inactive',  label: 'Inactive',        predicate: isInactive },
+    { id: 'deleted',   label: 'Deleted',         predicate: (d) => !!d.isDeleted },
+  ];
+}
 
 const COLUMNS: TableColumn<DriverRow>[] = [
   {
@@ -196,12 +200,15 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
     return [...persisted.user, ...persisted.org];
   }, [persisted]);
 
+  const hiddenTypeKeys = useHiddenDriverTypeKeys();
+  const SYSTEM_VIEWS = React.useMemo(() => systemViews(hiddenTypeKeys), [hiddenTypeKeys]);
+
   // Counts per view for the saved-views badges.
   const counts = React.useMemo(() => {
     const out: Record<string, number> = {};
     for (const v of SYSTEM_VIEWS) out[v.id] = drivers.filter(v.predicate).length;
     return out;
-  }, [drivers]);
+  }, [drivers, SYSTEM_VIEWS]);
 
   // Apply view + filters + search. System views filter by predicate;
   // persisted views replay their stored filters (and don't constrain rows
@@ -294,7 +301,7 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
 
   const visibleColumns = COLUMNS.filter((c) => visibleCols.has(c.key));
   const detailProps = activeRecord
-    ? buildDriverDetails(activeRecord, { withComments: true, compact: true })
+    ? buildDriverDetails(activeRecord, { withComments: true, compact: true, hiddenTypeKeys })
     : null;
 
   const onToggleSelect = (id: string) => {

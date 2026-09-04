@@ -278,7 +278,7 @@ export async function canAccessDocument(
     return false;
   }
   const carrierOrg = await orgByAnyId(ctx, doc.workosOrgId);
-  if (!carrierOrg) return false;
+  if (!carrierOrg || carrierOrg.isDeleted) return false; // same guard as the listing
   const linked = (await partnershipsLinkedToOrg(ctx, carrierOrg)).some(
     (p) => p.brokerOrgId === callerOrgId && partnershipSharesDocuments(p),
   );
@@ -291,8 +291,14 @@ export async function canAccessDocument(
 
 function assertDate(value: string | undefined, label: string): string | undefined {
   if (value === undefined || value === '') return undefined;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !parseDateString(value)) {
-    throw new ConvexError(`${label} must be a YYYY-MM-DD date`);
+  // Shape AND calendar validity: Date.UTC rolls 2026-02-31 over to March,
+  // so a round-trip that changes the day is an invalid date.
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m || !parseDateString(value)) throw new ConvexError(`${label} must be a YYYY-MM-DD date`);
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const utc = new Date(Date.UTC(y, mo - 1, d));
+  if (utc.getUTCFullYear() !== y || utc.getUTCMonth() !== mo - 1 || utc.getUTCDate() !== d) {
+    throw new ConvexError(`${label} is not a real calendar date`);
   }
   return value;
 }
@@ -421,15 +427,12 @@ async function syncOwnerDriverLicense(
   driver: Doc<'drivers'>,
   licenseExpiration: string | undefined,
 ): Promise<void> {
-  const orgs = await ctx.db
-    .query('organizations')
-    .withIndex('by_organization', (q) => q.eq('workosOrgId', driver.organizationId))
-    .collect();
-  for (const org of orgs) {
-    if (!org.isOwnerOperator || org.ownerDriverId !== driver._id) continue;
-    for (const p of await partnershipsLinkedToOrg(ctx, org)) {
-      await ctx.db.patch(p._id, { ownerDriverLicenseExpiration: licenseExpiration, updatedAt: Date.now() });
-    }
+  // Owner-operator drivers store the organizations _id (not the WorkOS
+  // id) in organizationId — resolve across every shape, as drivers.update does.
+  const org = await orgByAnyId(ctx, driver.organizationId);
+  if (!org || !org.isOwnerOperator || org.ownerDriverId !== driver._id) return;
+  for (const p of await partnershipsLinkedToOrg(ctx, org)) {
+    await ctx.db.patch(p._id, { ownerDriverLicenseExpiration: licenseExpiration, updatedAt: Date.now() });
   }
 }
 
@@ -1220,9 +1223,10 @@ export const markPurged = internalMutation({
  * settings:manage.
  */
 export const listAllForOrgExport = query({
-  args: {},
-  returns: v.array(
-    v.object({
+  args: { cursor: v.optional(v.string()) },
+  returns: v.object({
+    rows: v.array(
+      v.object({
       docId: v.id('entityDocuments'),
       entity: documentEntityValidator,
       entityId: v.string(),
@@ -1235,18 +1239,22 @@ export const listAllForOrgExport = query({
       expirationDate: v.optional(v.string()),
       uploadedAt: v.number(),
       sizeBytes: v.optional(v.number()),
-    }),
-  ),
-  handler: async (ctx) => {
+      }),
+    ),
+    nextCursor: v.union(v.string(), v.null()),
+  }),
+  handler: async (ctx, args) => {
     const { orgId } = await requireCallerIdentity(ctx);
     await assertOrgPermission(ctx, orgId, 'settings:manage');
-    const rows = await ctx.db
+    // Paged: archived rows are never deleted, so an old fleet's file is
+    // far past one query's read limit. The client walks the cursor.
+    const page = await ctx.db
       .query('entityDocuments')
       .withIndex('by_entity', (q) => q.eq('workosOrgId', orgId))
-      .collect();
+      .paginate({ cursor: args.cursor ?? null, numItems: 500 });
     const names = new Map<string, string>();
     const out = [];
-    for (const d of rows) {
+    for (const d of page.page) {
       if (d.status === 'pending' || !d.externalKey) continue;
       const nameKey = `${d.entity}:${d.entityId}`;
       let entityName = names.get(nameKey);
@@ -1269,7 +1277,7 @@ export const listAllForOrgExport = query({
         sizeBytes: d.sizeBytes,
       });
     }
-    return out;
+    return { rows: out, nextCursor: page.isDone ? null : page.continueCursor };
   },
 });
 

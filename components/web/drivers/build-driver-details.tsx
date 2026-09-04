@@ -92,8 +92,12 @@ function fmtPhone(p?: string): string {
 /** List-row attention: missing document types + expired/expiring
  *  mirrored dates, without reading documents (spec §2 "Denormalized
  *  summary"). */
-export function countAttention(driver: DriverRow, today: string = localTodayDateStr()): number {
-  return countDriverAttention(driver, today);
+export function countAttention(
+  driver: DriverRow,
+  today: string = localTodayDateStr(),
+  hiddenTypeKeys?: ReadonlySet<string>,
+): number {
+  return countDriverAttention(driver, today, hiddenTypeKeys);
 }
 
 // ─── Section renderers ──────────────────────────────────────────────────
@@ -186,8 +190,8 @@ function ActivitySection({ driver }: { driver: DriverRow }) {
   return <DSActivity items={items} emptyText="No activity yet." />;
 }
 
-function StatsBlock({ driver }: { driver: DriverRow }) {
-  const docsAttention = countAttention(driver);
+function StatsBlock({ driver, hiddenTypeKeys }: { driver: DriverRow; hiddenTypeKeys?: ReadonlySet<string> }) {
+  const docsAttention = countAttention(driver, undefined, hiddenTypeKeys);
   return (
     <div className="grid grid-cols-3 gap-0 rounded-xl border border-[var(--border-hairline)] bg-card overflow-hidden">
       <div className="p-3"><DSStat label="Docs to action" value={docsAttention} /></div>
@@ -207,11 +211,13 @@ interface BuildOptions {
    *  Stacks Overview cards vertically so labels and values get the full
    *  panel width. Default false (full-page 2-col grid). */
   compact?: boolean;
+  /** Driver type keys hidden in Settings › Documents (useHiddenDriverTypeKeys). */
+  hiddenTypeKeys?: ReadonlySet<string>;
 }
 
 export function buildDriverDetails(driver: DriverRow, opts: BuildOptions = {}) {
   const fullName = [driver.firstName, driver.middleName, driver.lastName].filter(Boolean).join(' ');
-  const attention = countAttention(driver);
+  const attention = countAttention(driver, undefined, opts.hiddenTypeKeys);
   const status = (driver.employmentStatus ?? 'Inactive').toLowerCase();
   const statusChip: ChipStatus =
     status === 'active' ? 'active'
@@ -239,7 +245,7 @@ export function buildDriverDetails(driver: DriverRow, opts: BuildOptions = {}) {
       icon: 'id-card',
       content: (
         <div className="flex flex-col gap-3">
-          <StatsBlock driver={driver} />
+          <StatsBlock driver={driver} hiddenTypeKeys={opts.hiddenTypeKeys} />
           <OverviewSection driver={driver} compact={opts.compact} />
         </div>
       ),

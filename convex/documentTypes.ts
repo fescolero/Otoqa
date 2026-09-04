@@ -301,6 +301,9 @@ export const deleteCustomType = mutation({
       performedByEmail: who.userEmail,
       description: `Deleted document type "${row.name ?? row.key}"`,
     });
+    // The key may sit in every entity's missingDocTypeKeys (added when the
+    // type was created) — drop it everywhere, as setHidden does.
+    await scheduleSummaryRecompute(ctx, orgId, row.entity);
     return null;
   },
 });
