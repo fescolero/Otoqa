@@ -46,11 +46,13 @@ const docType = v.union(
  */
 async function keyAlreadyRecorded(ctx: QueryCtx, loadId: Id<'loadInformation'>, key: string): Promise<boolean> {
   // Fast path: every current writer stores the key in externalKey.
+  // Any row on any load — an object behind a recorded document is never an
+  // in-flight upload, whatever load the key's path names.
   const byKey = await ctx.db
     .query('loadDocuments')
     .withIndex('by_externalKey', (q) => q.eq('externalKey', key))
     .first();
-  if (byKey) return byKey.loadId === loadId;
+  if (byKey) return true;
   // Older driver-app builds recorded rows under this same prefix with only
   // externalUrl set — those bytes are just as recorded. Load-scoped scan,
   // only reached when the index misses.

@@ -17,12 +17,7 @@ import type { ActionCtx } from '../_generated/server';
 import { internal } from '../_generated/api';
 import type { Id } from '../_generated/dataModel';
 import type { DocumentEntity } from './documentTypeDefaults';
-import {
-  MAX_DOCUMENT_BYTES,
-  buildEntityDocumentMetadata,
-  isStoredContentType,
-  metadataToHeaders,
-} from './r2';
+import { buildEntityDocumentMetadata, fileSizeProblem, isStoredContentType, metadataToHeaders } from './r2';
 import { deleteObjectByKey, headObject, presignGet, presignPutWithMetadata } from '../s3Upload';
 
 export interface PresignArgs {
@@ -94,14 +89,15 @@ export async function verifyStoredObject(key: string, declaredContentType?: stri
   const head = await headObject(key);
   if (!head) return { ok: false, reason: 'missing', message: 'Upload not found in storage. Please try again.' };
   const contentType = (head.contentType ?? declaredContentType ?? '').toLowerCase();
-  const tooBig = head.contentLength > MAX_DOCUMENT_BYTES;
+  // Same rules as presign: stored type, non-empty, within the cap.
+  const sizeProblem = fileSizeProblem(head.contentLength);
   const badType = !isStoredContentType(contentType);
-  if (tooBig || badType) {
+  if (sizeProblem || badType) {
     await deleteObjectByKey(key);
     return {
       ok: false,
       reason: 'rejected',
-      message: tooBig ? 'File is too large (25 MB max).' : 'Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.',
+      message: badType ? 'Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.' : sizeProblem!,
     };
   }
   return { ok: true, contentType, sizeBytes: head.contentLength };

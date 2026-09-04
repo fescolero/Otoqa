@@ -385,10 +385,15 @@ The Documents tab badge and the attention item counts become live.
   are stamped with the summary so list-row attention covers expiring types
   that have no mirror field (hazmat, custom types) and "Needs date" rows;
   `countDriverAttention` reads them over the mirrors.
-- `carrierPartnerships.ownerDriverLicenseExpiration` has one writer:
-  `recomputePartnershipDocuments`, which picks the latest expiry among the
-  broker's own `owner_driver_cdl` document, a carrier-shared one, and the
-  linked owner-operator's own CDL document (`drivers.docExpirations.cdl`).
+- An owner-operator's own CDL document is shared to linked brokers like a
+  company document, under the partnership's `owner_driver_cdl` type
+  (`sharedDocsFromOrg`): it satisfies Missing, competes for the
+  `ownerDriverLicenseExpiration` mirror (latest expiry wins with the
+  broker's own record), is listed with source Carrier, can be read through
+  the sharing access path, and can be saved as a copy at offboarding.
+  `recomputePartnershipDocuments` is the mirror's only writer.
+- Purge and the legacy-key sweep cover every id shape an org's rows may be
+  filed under (WorkOS, Clerk, Convex id — `orgIdShapes`).
 
 - For a type present from both sources, the effective status uses the
   **latest expiry** across the broker's active row and the carrier's shared

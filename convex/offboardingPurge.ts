@@ -5,7 +5,8 @@
  *
  * Runs daily (crons.ts). For every organization whose `purgeAt` has
  * passed and that is not yet `purgedAt`:
- *   1. delete every object under `orgs/{workosOrgId}/` (paged, bulk),
+ *   1. delete every object under `orgs/{id}/` for each id shape the org
+ *      is known by (WorkOS, Clerk, Convex) — paged, bulk,
  *   2. delete legacy-prefix R2 objects its load-document rows reference
  *      (`pod-photos/`, `load-documents/`) — bytes before rows,
  *   3. delete its entityDocuments / documentTypes / loadDocuments rows in
@@ -31,7 +32,7 @@ export const purgeDueOrganizations = internalAction({
   args: {},
   returns: v.object({ purged: v.number(), failed: v.number(), objectsDeleted: v.number(), rowsDeleted: v.number() }),
   handler: async (ctx): Promise<{ purged: number; failed: number; objectsDeleted: number; rowsDeleted: number }> => {
-    const due: Array<{ organizationId: Id<'organizations'>; workosOrgId?: string; name: string }> = await ctx.runQuery(
+    const due: Array<{ organizationId: Id<'organizations'>; workosOrgId?: string; name: string; orgIds: string[] }> = await ctx.runQuery(
       internal.entityDocuments.dueForPurge,
       { now: Date.now() },
     );
@@ -61,7 +62,7 @@ export const purgeDueOrganizations = internalAction({
 
 async function purgeOne(
   ctx: ActionCtx,
-  org: { organizationId: Id<'organizations'>; workosOrgId?: string; name: string },
+  org: { organizationId: Id<'organizations'>; workosOrgId?: string; name: string; orgIds: string[] },
 ): Promise<{ stamped: boolean; objectsDeleted: number; rowsDeleted: number }> {
   let objectsDeleted = 0;
   let rowsDeleted = 0;
@@ -74,9 +75,9 @@ async function purgeOne(
     });
     if (!stillDue) return { stamped: false, objectsDeleted, rowsDeleted };
 
-    // 1. Bucket prefix.
-    if (org.workosOrgId) {
-      const prefix = `orgs/${org.workosOrgId}/`;
+    // 1. Bucket prefixes — one per id shape the org's keys were built under.
+    for (const id of org.orgIds) {
+      const prefix = `orgs/${id}/`;
       let token: string | undefined;
       do {
         const page = await listObjectKeys(prefix, token);
