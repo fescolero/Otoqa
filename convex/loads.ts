@@ -2699,6 +2699,9 @@ export const getRecentByDriver = query({
   args: {
     driverId: v.id('drivers'),
     limit: v.optional(v.number()),
+    /** Restrict to one load status (e.g. 'Completed' for a "recent trips"
+     *  card — an Assigned load isn't a trip yet). Omit for any status. */
+    status: v.optional(assignedLoadStatusValidator),
   },
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
@@ -2746,7 +2749,9 @@ export const getRecentByDriver = query({
       });
     }
 
-    const loadStatuses = ['Open', 'Assigned', 'Completed', 'Canceled', 'Expired'] as const;
+    const loadStatuses = args.status
+      ? ([args.status] as const)
+      : (['Open', 'Assigned', 'Completed', 'Canceled', 'Expired'] as const);
     for (const status of loadStatuses) {
       const fallbackLoads = await ctx.db
         .query('loadInformation')
@@ -2778,9 +2783,12 @@ export const getRecentByDriver = query({
 
     // Sort the merged candidate pool first, then enrich only the final
     // page — facet-tag reads stay proportional to `limit`, not history size.
-    candidates.sort((a, b) => b.load._creationTime - a.load._creationTime);
+    // Leg- and assignment-sourced candidates carry any load status; apply
+    // the filter here so every source obeys it.
+    const filtered = args.status ? candidates.filter((c) => c.load.status === args.status) : candidates;
+    filtered.sort((a, b) => b.load._creationTime - a.load._creationTime);
     const enrichedLoads: Array<Record<string, any>> = [];
-    for (const { load, leg } of candidates.slice(0, limit)) {
+    for (const { load, leg } of filtered.slice(0, limit)) {
       const enriched = await enrichLoadDirectly(ctx, load);
       if (!enriched) continue;
       if (leg) {
