@@ -19,6 +19,8 @@ import { Id } from '@/convex/_generated/dataModel';
 import Link from 'next/link';
 import { LoadPayPlanCard } from '@/components/web/pay-plan/load-pay-plan-card';
 import { LiveTrackingModal, type TimelineEvent } from '@/components/loads/live-tracking-modal';
+import { evaluateDeliveryOnTime, formatLateDuration, summarizeLegOnTime } from '@/convex/_helpers/onTime';
+import { onTimeChipProps } from '@/components/web/on-time-chip';
 import { DocPreviewModal, type DocRecord } from '@/components/loads/doc-preview-modal';
 import { LoadDocumentUploadDialog } from '@/components/loads/load-document-upload-dialog';
 import { convexErrorMessage } from '@/lib/convex-error';
@@ -76,10 +78,14 @@ interface StopWithEvidence {
   address?: string;
   windowBeginDate?: string;
   windowBeginTime?: string;
+  windowEndDate?: string;
   windowEndTime?: string;
   pieces?: number;
   checkedInAt?: string;
   checkedOutAt?: string;
+  /** Geofence fallback arrival (ms) — stamped only when the driver never
+   *  tapped in time; see convex/_helpers/onTime.ts. */
+  autoArrivedAt?: number;
   deliveryPhotos?: string[];
   signatureImage?: string;
   driverNotes?: string;
@@ -520,6 +526,21 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   const transitProgressPct =
     loadData.stops.length > 0 ? Math.round((stopsCheckedIn / loadData.stops.length) * 100) : 0;
 
+  // Delivery on-time roll-up — the SAME rule the leg stamp and the driver
+  // KPI use (convex/_helpers/onTime.ts), computed live from this load's
+  // stops: delivery stops only, window end + 15 min grace, earliest of
+  // tap and geofence arrival. Every sequence is in range here.
+  const onTimeSummary = summarizeLegOnTime(
+    loadData.stops as StopWithEvidence[],
+    Number.NEGATIVE_INFINITY,
+    Number.POSITIVE_INFINITY,
+  );
+  const onTimeChip = onTimeChipProps({
+    evaluated: onTimeSummary.deliveriesEvaluated,
+    onTime: onTimeSummary.deliveriesOnTime,
+    maxLateMs: onTimeSummary.deliveriesMaxLateMs,
+  });
+
   // ── QuickStats (per-status 5-cell strip the v2 Overview owns) ─────────
   // Replaces the hero's cold 4-up KPI grid. The first four cells are stable
   // across statuses; the fifth swaps to the most relevant signal for the
@@ -545,7 +566,17 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       return [...baseQuickStats, { label: 'Pickup', value: 'pre-trip', delta: 'awaiting', deltaTone: 'neutral' }];
     }
     if (loadData.status === 'Completed') {
-      return [...baseQuickStats, { label: 'Status', value: 'Delivered', deltaTone: 'up' }];
+      return [
+        ...baseQuickStats,
+        onTimeChip.status === 'na'
+          ? { label: 'On-time', value: '—', delta: 'not evaluable', deltaTone: 'neutral' }
+          : {
+              label: 'On-time',
+              value: onTimeChip.status === 'valid' ? 'On time' : onTimeChip.label.replace(/^Late /, ''),
+              delta: onTimeChip.status === 'valid' ? 'delivered' : 'late',
+              deltaTone: onTimeChip.status === 'valid' ? 'up' : 'down',
+            },
+      ];
     }
     return [
       ...baseQuickStats,
@@ -711,6 +742,19 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     }
   } else if (isCompleted) {
     attentionHeadline = <>Load {orderToken} delivered. Ready to invoice.</>;
+    if (onTimeChip.status !== 'na') {
+      const late = onTimeSummary.deliveriesEvaluated - onTimeSummary.deliveriesOnTime;
+      attentionItems.push({
+        tone: onTimeChip.status === 'valid' ? 'ok' : 'warn',
+        icon: onTimeChip.status === 'valid' ? 'check' : 'alert',
+        tab: 'stops',
+        title: onTimeChip.status === 'valid' ? 'Delivered on time' : `Delivered ${formatLateDuration(onTimeSummary.deliveriesMaxLateMs)} late`,
+        detail:
+          onTimeSummary.deliveriesEvaluated > 1
+            ? `${onTimeSummary.deliveriesOnTime} of ${onTimeSummary.deliveriesEvaluated} deliveries within window${late ? ` · worst ${formatLateDuration(onTimeSummary.deliveriesMaxLateMs)}` : ''}`
+            : 'Window end + 15 min grace',
+      });
+    }
     attentionItems.push({
       tone: 'ok',
       icon: 'check',
@@ -1040,10 +1084,30 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     },
     {
       key: 'perf',
-      label: 'Perf',
-      width: '90px',
+      label: 'On-time',
+      width: '110px',
       align: 'right',
       render: (r) => {
+        // Deliveries: the official rule (window end + 15 min grace, earliest
+        // of tap / geofence) — the same badge the driver page shows.
+        if (r.stopType === 'DELIVERY') {
+          const v = evaluateDeliveryOnTime(r);
+          if (!v) return <span className="text-[var(--text-tertiary)]">—</span>;
+          return (
+            <span
+              className="num text-[10.5px] font-bold px-1.5 py-0.5 rounded"
+              title="Delivery on-time: arrival vs appointment window end + 15 min grace"
+              style={{
+                background: v.onTime ? 'rgba(16,185,129,0.10)' : 'rgba(239,68,68,0.10)',
+                color: v.onTime ? '#0F8C5F' : '#B43030',
+              }}
+            >
+              {v.onTime ? 'On time' : `Late ${formatLateDuration(v.lateMs)}`}
+            </span>
+          );
+        }
+        // Pickups / detours: timing vs window start is informational only —
+        // muted, uncolored, and not part of the on-time %.
         let scheduled = r.windowBeginTime;
         if (scheduled && !scheduled.includes('T') && r.windowBeginDate) {
           scheduled = `${r.windowBeginDate}T${scheduled}:00`;
@@ -1052,11 +1116,8 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
         if (!v) return <span className="text-[var(--text-tertiary)]">—</span>;
         return (
           <span
-            className="num text-[10.5px] font-bold px-1.5 py-0.5 rounded"
-            style={{
-              background: v.isLate ? 'rgba(239,68,68,0.10)' : 'rgba(16,185,129,0.10)',
-              color: v.isLate ? '#B43030' : '#0F8C5F',
-            }}
+            className="num text-[10.5px] text-[var(--text-tertiary)] cursor-help"
+            title="Pickup timing vs plan start — informational; on-time % is judged on deliveries"
           >
             {v.label}
           </span>
