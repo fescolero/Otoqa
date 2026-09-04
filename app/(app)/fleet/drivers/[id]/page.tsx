@@ -640,10 +640,12 @@ export default function DriverDetailPage() {
   // wiring. We treat any 'In Transit' / 'Picked Up' / 'En Route' tracking
   // status as "active"; otherwise fall back to Available.
   const assignedLoads = (assignedLoadsData ?? []) as AssignedLoad[];
-  const inTransitLoad = assignedLoads.find((l) => {
+  const isInProgress = (l: AssignedLoad): boolean => {
     const t = (l.trackingStatus || '').toLowerCase();
     return t === 'in transit' || t === 'picked up' || t === 'en route';
-  });
+  };
+  const inProgressLoads = assignedLoads.filter(isInProgress);
+  const inTransitLoad = inProgressLoads[0];
   const onLoad = Boolean(inTransitLoad);
   const firstName = driver.firstName || fullName.split(' ')[0];
 
@@ -692,10 +694,21 @@ export default function DriverDetailPage() {
   // are written by the document workflow, but day-one drivers imported
   // with dates and no files still carry them. For a Missing row that date
   // is the only context we have, so surface it (spec §5.3).
-  const mirrorDateFor = (r: DocumentRowModel): string | undefined => {
+  const mirrorRawFor = (r: DocumentRowModel): string | undefined => {
     const f = r.type.mirrorField;
     if (!f || !(DRIVER_MIRROR_FIELDS as readonly string[]).includes(f)) return undefined;
     return driver[f as DriverMirrorField] || undefined;
+  };
+  // Imported records can carry junk like "202710-01-01". Only a strict
+  // YYYY-MM-DD counts as a date; anything else is flagged, not displayed.
+  const isYmd = (v: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const mirrorDateFor = (r: DocumentRowModel): string | undefined => {
+    const raw = mirrorRawFor(r);
+    return raw && isYmd(raw) ? raw : undefined;
+  };
+  const mirrorDateInvalid = (r: DocumentRowModel): boolean => {
+    const raw = mirrorRawFor(r);
+    return Boolean(raw) && !isYmd(raw!);
   };
   /** Effective expiry for a row: the document's own date, else the
    *  archived predecessor's, else the driver-record mirror. */
@@ -790,7 +803,9 @@ export default function DriverDetailPage() {
           ? `Last on file ${r.lastArchivedStatus === 'expired' ? 'expired' : 'expires'} ${expLabel}`
           : expLabel
             ? `${expExpired ? 'Expired' : 'Expires'} ${expLabel} · no file uploaded`
-            : 'Upload the document and enter its date';
+            : mirrorDateInvalid(r)
+              ? 'Date on record is invalid · upload the document'
+              : 'Upload the document and enter its date';
     }
     attentionItems.push({
       tone: r.status === 'expired' || r.status === 'missing' ? 'crit' : 'warn',
@@ -905,7 +920,7 @@ export default function DriverDetailPage() {
 
       <QuickStats
         stats={[
-          { label: 'Active loads', value: assignedLoadsData ? String(assignedLoads.length) : '—' },
+          { label: 'Active loads', value: assignedLoadsData ? String(inProgressLoads.length) : '—' },
           { label: 'Loads YTD',    value: '—' },
           { label: 'Miles YTD',    value: '—' },
           { label: 'Score',        value: '—' },
