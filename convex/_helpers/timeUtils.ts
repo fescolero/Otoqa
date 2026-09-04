@@ -171,21 +171,16 @@ export async function detectDriverOverlaps(
   ctx: QueryCtx | MutationCtx,
   driverId: string,
   newLegRanges: ({ start: number; end: number } | null)[],
-  // The load being placed, plus any loads the caller vouches are leaving
-  // this driver in the same transaction (a swap) — see routeRotation.
-  excludeLoadId?: string | string[]
+  excludeLoadId?: string
 ): Promise<OverlapInfo[]> {
   const existingDriverLegs = await ctx.db
     .query('dispatchLegs')
     .withIndex('by_driver', (q) => q.eq('driverId', driverId as any))
     .collect();
 
-  const excluded = new Set(
-    excludeLoadId === undefined ? [] : Array.isArray(excludeLoadId) ? excludeLoadId : [excludeLoadId],
-  );
   const activeDriverLegs = existingDriverLegs.filter(
     (leg) =>
-      !excluded.has(leg.loadId as string) &&
+      leg.loadId !== excludeLoadId &&
       (leg.status === 'PENDING' || leg.status === 'ACTIVE')
   );
 

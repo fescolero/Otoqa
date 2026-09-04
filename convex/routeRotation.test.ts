@@ -6,15 +6,17 @@ import { api, internal } from './_generated/api';
 import { serviceDateOf } from './lib/assignHorizon';
 
 /**
- * Driver rotation: editing a rule's driver moves the upcoming loads the
- * rule auto-assigned onto the new driver — and nothing else.
+ * Re-sync: editing a rule releases the upcoming loads it auto-assigned
+ * that no longer match it, and auto-assignment places them again — and
+ * nothing else.
  *
  * The contract, load by load:
- *   - auto-assigned, upcoming, not started → moved
+ *   - auto-assigned, upcoming, not started, no longer matching → released, re-placed
  *   - hand-assigned by a dispatcher (no provenance) → untouched
  *   - a leg already ACTIVE → held, IN_MOTION
  *   - pickup date in the past → held, PAST
  *   - unassigned by a dispatcher → provenance cleared, so not even a candidate
+ *   - released but refused by the assignment decision (overlap, no rule) → left Open, reported
  */
 
 const ORG = 'org_rotation';
@@ -241,7 +243,7 @@ describe('rotation on rule edit', () => {
     expect(rule?.lastRotation).toBeUndefined();
   });
 
-  it('holds a load the new driver is already booked across, and reports it', async () => {
+  it('a load the new driver is already booked across is released and left Open, with why', async () => {
     const t = setup();
     const w = await buildWorld(t);
 
@@ -253,14 +255,28 @@ describe('rotation on rule edit', () => {
 
     await rotateTo(t, w, w.driverB);
 
-    expect((await loadState(t, w.robotNear)).driver).toBe(w.driverA); // held
-    expect((await loadState(t, w.robotFar)).driver).toBe(w.driverB); // moved
+    // Released off Dana, refused for Sam: Open, in front of a dispatcher,
+    // and NOT opted out — the sweep keeps trying.
+    const near = await loadState(t, w.robotNear);
+    expect(near.status).toBe('Open');
+    expect(near.driver).toBeUndefined();
+    expect((await t.run((ctx) => ctx.db.get(w.robotNear)))?.autoAssignOptOut).toBeUndefined();
+    expect((await loadState(t, w.robotFar)).driver).toBe(w.driverB); // re-placed
+    expect((await loadState(t, clash)).driver).toBe(w.driverB); // untouched
+
     const rule = await t.run((ctx) => ctx.db.get(w.routeId));
     expect(rule?.lastRotation?.byReason).toContainEqual({ reason: 'OVERLAP_CONFLICT', count: 1 });
-    // The hold names the load AND what it collided with.
     const held = rule?.lastRotation?.heldLoads?.find((h) => h.reason === 'OVERLAP_CONFLICT');
     expect(held?.orderNumber).toBe('ORD-R1');
-    expect(held?.detail).toMatch(/Sam Rae already has #ORD-CLASH/);
+    expect(held?.detail).toMatch(/Sam Rae is already booked/);
+
+    // Once the blocker is gone, the ordinary sweep places it.
+    await w.asUser.mutation(api.dispatchLegs.unassignResource, {
+      loadId: clash, userId: USER, workosOrgId: ORG,
+    });
+    const r = await t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: w.robotNear, userId: 'system' });
+    expect(r.action).toBe('ASSIGNED_DRIVER');
+    expect((await loadState(t, w.robotNear)).driver).toBe(w.driverB);
   });
 
   it('re-sync moves whatever the rule owns that is not on its current driver', async () => {
@@ -284,7 +300,7 @@ describe('rotation on rule edit', () => {
     await drain(t);
     const rule = await t.run((ctx) => ctx.db.get(w.routeId));
     expect(rule?.lastRotation?.moved).toBe(0);
-    expect(rule?.lastRotation?.byReason).toContainEqual({ reason: 'ALREADY_ON_TARGET', count: 2 });
+    expect(rule?.lastRotation?.byReason).toContainEqual({ reason: 'IN_SYNC', count: 2 });
   });
 
   it('a rotated load is not the sweep\'s to undo', async () => {
@@ -354,13 +370,14 @@ describe('rotation on rule edit', () => {
     expect(rule?.lastRotation?.moved).toBe(2);
   });
 
-  it('re-sync all exchanges two loads that block each other', async () => {
+  it('re-sync all resolves two rules trading drivers, without swapping anything', async () => {
     const t = setup();
     const w = await buildWorld(t);
 
     // A second rule on another HCR, on Sam, with a load on the SAME day
     // and window as robotNear (which is on Dana). Then the rules trade
-    // drivers: Dana's rule → Sam, Sam's rule → Dana.
+    // drivers. Moved one at a time each load would be blocked by the
+    // other; released first, then re-placed, neither is.
     const { rule2, load2 } = await t.run(async (ctx) => {
       const now = Date.now();
       const rule2: Id<'routeAssignments'> = await ctx.db.insert('routeAssignments', {
@@ -372,56 +389,65 @@ describe('rotation on rule edit', () => {
     });
     expect((await t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: load2, userId: 'system' })).action)
       .toBe('ASSIGNED_DRIVER');
-    expect((await loadState(t, load2)).driver).toBe(w.driverB);
 
     await w.asUser.mutation(api.routeAssignments.update, { id: w.routeId, driverId: w.driverB });
     await w.asUser.mutation(api.routeAssignments.update, { id: rule2, driverId: w.driverA });
     await drain(t);
 
-    // One rule alone cannot do it: each load is blocked by the other.
-    await w.asUser.mutation(api.routeAssignments.rotateLoads, { id: w.routeId });
-    await drain(t);
-    expect((await loadState(t, w.robotNear)).driver).toBe(w.driverA);
-    const alone = await t.run((ctx) => ctx.db.get(w.routeId));
-    expect(alone?.lastRotation?.heldLoads?.some((h) => h.reason === 'OVERLAP_CONFLICT')).toBe(true);
-
-    // The org-wide run exchanges them.
     await w.asUser.mutation(api.routeAssignments.rotateAllLoads, { workosOrgId: ORG });
     await drain(t);
 
     expect((await loadState(t, w.robotNear)).driver).toBe(w.driverB);
     expect((await loadState(t, load2)).driver).toBe(w.driverA);
-    // robotFar (a different day) was moved by the single-rule run above.
     expect((await loadState(t, w.robotFar)).driver).toBe(w.driverB);
 
-    // Each rule's record credits its half of the exchange, and the
-    // overlap is gone from the breakdown.
-    const rule = await t.run((ctx) => ctx.db.get(w.routeId));
-    expect(rule?.lastRotation?.moved).toBe(1);
-    expect(rule?.lastRotation?.byReason.find((r) => r.reason === 'OVERLAP_CONFLICT')).toBeUndefined();
-    const other = await t.run((ctx) => ctx.db.get(rule2));
-    expect(other?.lastRotation?.moved).toBe(1);
-
     const settings = await w.asUser.query(api.routeAssignments.getSettings, { workosOrgId: ORG });
-    expect(settings?.lastBulkRotation?.moved).toBe(2);
+    expect(settings?.lastBulkRotation?.moved).toBe(3);
     expect(settings?.lastBulkRotation?.byReason.find((r) => r.reason === 'OVERLAP_CONFLICT')).toBeUndefined();
   });
 
-  it('does not swap with a load that is not itself moving', async () => {
+  it('a day change hands the load to whichever rule now covers that day', async () => {
     const t = setup();
     const w = await buildWorld(t);
-    // Sam has a hand-placed load across robotNear's window; Dana's rule → Sam.
-    const clash = await t.run((ctx) => seedLoad(ctx, w.customerId, 'CLASH', daysFromNow(2)));
-    await w.asUser.mutation(api.dispatchLegs.assignDriver, {
-      loadId: clash, driverId: w.driverB, userId: USER, workosOrgId: ORG,
+    const nearDow = new Date(`${daysFromNow(2)}T00:00:00.000Z`).getUTCDay();
+    const otherDays = [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== nearDow);
+
+    // Dana's rule stops covering robotNear's weekday; Sam's new rule
+    // covers exactly that weekday on the same HCR.
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.insert('routeAssignments', {
+        workosOrgId: ORG, hcr: HCR, driverId: w.driverB, priority: 1, isActive: true,
+        activeDays: [nearDow], name: 'Sam covers that day', createdBy: USER, createdAt: now, updatedAt: now,
+      });
     });
-    await w.asUser.mutation(api.routeAssignments.update, { id: w.routeId, driverId: w.driverB });
+    await w.asUser.mutation(api.routeAssignments.update, {
+      id: w.routeId, activeDays: otherDays, reassignFutureLoads: true,
+    });
     await drain(t);
 
-    await w.asUser.mutation(api.routeAssignments.rotateAllLoads, { workosOrgId: ORG });
+    expect((await loadState(t, w.robotNear)).driver).toBe(w.driverB);
+    // robotFar's weekday may or may not be in otherDays; either way it is
+    // on a driver whose rule covers it.
+    const far = await t.run((ctx) => ctx.db.get(w.robotFar));
+    expect(far?.status).toBe('Assigned');
+  });
+
+  it('a load no rule claims after the change is released and left Open, not opted out', async () => {
+    const t = setup();
+    const w = await buildWorld(t);
+    // Pause the only rule and re-sync: its loads are released; nothing
+    // takes them; they wait Open for a dispatcher or a new rule.
+    await w.asUser.mutation(api.routeAssignments.update, { id: w.routeId, isActive: false, reassignFutureLoads: true });
     await drain(t);
 
-    expect((await loadState(t, w.robotNear)).driver).toBe(w.driverA); // still held
-    expect((await loadState(t, clash)).driver).toBe(w.driverB); // untouched
+    for (const id of [w.robotNear, w.robotFar]) {
+      const load = await t.run((ctx) => ctx.db.get(id));
+      expect(load?.status).toBe('Open');
+      expect(load?.autoAssignOptOut).toBeUndefined();
+    }
+    expect((await loadState(t, w.human)).driver).toBe(w.driverA);
+    const rule = await t.run((ctx) => ctx.db.get(w.routeId));
+    expect(rule?.lastRotation?.byReason).toContainEqual({ reason: 'NO_MATCH', count: 2 });
   });
 });

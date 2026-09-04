@@ -29,9 +29,12 @@ export interface RouteAssignment {
   activeDays?: number[];
   excludeFederalHolidays?: boolean;
   customExclusions?: string[];
+  // Effective range on the service-date axis; absent = open-ended.
+  effectiveFrom?: string;
+  effectiveUntil?: string;
   name?: string;
   notes?: string;
-  // Outcome of the last driver rotation (convex/routeRotation.ts).
+  // Outcome of the last re-sync (convex/routeRotation.ts).
   lastRotation?: {
     at: number;
     considered: number;

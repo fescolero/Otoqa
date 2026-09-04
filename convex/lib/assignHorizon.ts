@@ -35,6 +35,11 @@ export function serviceDateOf(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
+/** A service date moved by whole days ('2026-09-14', -1 → '2026-09-13'). */
+export function shiftServiceDate(ymd: string, days: number): string {
+  return serviceDateOf(Date.parse(`${ymd}T00:00:00.000Z`) + days * DAY_MS);
+}
+
 /** Last service date inside the horizon, inclusive. */
 export function horizonEndDate(assignAheadDays: number, nowMs = Date.now()): string {
   return serviceDateOf(nowMs + assignAheadDays * DAY_MS);

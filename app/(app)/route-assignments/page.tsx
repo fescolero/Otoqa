@@ -82,13 +82,16 @@ function daysUntil(endDate?: string): number | null {
 type DerivedStatus = 'active' | 'inactive' | 'expiring' | 'expired';
 
 function deriveStatus(item: CombinedAssignment): DerivedStatus {
-  if (item.type === 'internal') {
-    const endIso = item.recurringTemplateData?.endDate;
-    const dl = daysUntil(endIso);
-    if (dl != null) {
-      if (dl < 0) return 'expired';
-      if (dl <= 7 && item.isActive) return 'expiring';
-    }
+  // A template ends on its endDate; a rule on its effectiveUntil (the
+  // outgoing half of a planned rotation). Same axis, same chips.
+  const endIso =
+    item.type === 'internal'
+      ? item.recurringTemplateData?.endDate
+      : item.routeAssignmentData?.effectiveUntil;
+  const dl = daysUntil(endIso);
+  if (dl != null) {
+    if (dl < 0) return 'expired';
+    if (dl <= 7 && item.isActive) return 'expiring';
   }
   return item.isActive ? 'active' : 'inactive';
 }
@@ -177,17 +180,24 @@ function AssigneeCell({
 
 function ScheduleCell({ row }: { row: Row }) {
   if (row.type === 'external') {
-    // A route assignment reacts to imported loads, so its "schedule" is the
-    // set of service days it will accept — matched against the load's pickup
-    // date. No days configured means it takes any day.
-    if (!row.schedule || row.schedule.length === 0) {
-      return <span className="text-[12px] text-[var(--text-tertiary)] truncate">On import</span>;
-    }
+    // A rule's "schedule" is the set of service days it accepts, matched
+    // against the load's pickup date, within its effective range. The
+    // range is what a planned rotation looks like in the list: the
+    // outgoing rule "until Sun", the incoming one "from Mon".
+    const from = row.routeAssignmentData?.effectiveFrom;
+    const until = row.routeAssignmentData?.effectiveUntil;
+    const range =
+      from && until ? `${from} → ${until}` : from ? `From ${from}` : until ? `Until ${until}` : null;
+    const days =
+      !row.schedule || row.schedule.length === 0 ? 'Any day' : formatSchedule(row.schedule);
     return (
       <div className="min-w-0 overflow-hidden">
-        <div className="text-[12px] text-foreground truncate">{formatSchedule(row.schedule)}</div>
-        <div className="text-[11px] text-[var(--text-tertiary)] mt-px truncate">
-          On import
+        <div className="text-[12px] text-foreground truncate">{days}</div>
+        <div
+          className="text-[11px] mt-px truncate"
+          style={{ color: range ? 'var(--accent)' : 'var(--text-tertiary)' }}
+        >
+          {range ?? 'Assigned when due'}
         </div>
       </div>
     );
@@ -232,7 +242,7 @@ function SyncCell({
   if (!last) {
     return <span className="text-[12px] text-[var(--text-tertiary)]">In sync</span>;
   }
-  const holds = last.byReason.filter((r) => r.reason !== 'ALREADY_ON_TARGET');
+  const holds = last.byReason.filter((r) => r.reason !== 'IN_SYNC');
   const heldReal = holds.reduce((n, r) => n + r.count, 0);
   return (
     <span
@@ -243,7 +253,7 @@ function SyncCell({
         (last.heldLoads && last.heldLoads.length > 0
           ? '\n' +
             last.heldLoads
-              .filter((h) => h.reason !== 'ALREADY_ON_TARGET')
+              .filter((h) => h.reason !== 'IN_SYNC')
               .map((h) => `#${h.orderNumber}${h.serviceDate ? ` ${h.serviceDate}` : ''}: ${h.reason}${h.detail ? ` — ${h.detail}` : ''}`)
               .join('\n')
           : '')
@@ -631,7 +641,7 @@ export default function RouteAssignmentsPage() {
                           confirm: 'soft' as const,
                           confirmTitle: 'Re-sync upcoming loads?',
                           confirmBody:
-                            'Moves every upcoming load this rule auto-assigned onto its current assignee. Loads in progress, past their pickup, or placed by a dispatcher are left alone.',
+                            'Releases the upcoming loads this rule auto-assigned that no longer match it, and auto-assigns them again. Loads in progress, past their pickup, or placed by a dispatcher are left alone.',
                           confirmCta: 'Re-sync',
                         },
                       ]
@@ -753,12 +763,12 @@ export default function RouteAssignmentsPage() {
             <div className="text-[12.5px] text-foreground">
               <strong className="font-semibold">
                 {orgRotation.outOfSync} upcoming load{orgRotation.outOfSync === 1 ? '' : 's'} on{' '}
-                {orgRotation.rules} rule{orgRotation.rules === 1 ? '' : 's'}{' '}
-                {orgRotation.rules === 1 ? 'is' : 'are'} still on a previous assignee.
+                {orgRotation.rules} rule{orgRotation.rules === 1 ? '' : 's'} no longer match{' '}
+                {orgRotation.rules === 1 ? 'its' : 'their'} rule.
               </strong>{' '}
               <span className="text-[var(--text-secondary)]">
-                Re-sync moves them to each rule&apos;s current assignee. Loads in progress, past
-                pickup, or placed by a dispatcher are left alone.
+                Re-sync releases them and auto-assigns them again under the rules as they are
+                now. Loads in progress, past pickup, or placed by a dispatcher are left alone.
               </span>
             </div>
             <div className="flex-1" />
@@ -811,14 +821,14 @@ export default function RouteAssignmentsPage() {
                     {autoAssignSettings.lastBulkRotation.held} stayed put:{' '}
                     {describeHolds(
                       autoAssignSettings.lastBulkRotation.byReason.filter(
-                        (r) => r.reason !== 'ALREADY_ON_TARGET',
+                        (r) => r.reason !== 'IN_SYNC',
                       ),
                     ) || 'already on the current assignee'}
                     . Open a rule for its own breakdown.
                   </span>
                 ) : (
                   <span className="text-[var(--text-secondary)]">
-                    Every upcoming auto-assigned load is on its rule&apos;s current assignee.
+                    Every upcoming auto-assigned load matches its rule.
                   </span>
                 )}
               </div>
@@ -1030,11 +1040,11 @@ export default function RouteAssignmentsPage() {
             <AlertDialogTitle>Re-sync upcoming loads for every rule?</AlertDialogTitle>
             <AlertDialogDescription>
               {orgRotation
-                ? `Moves ${orgRotation.outOfSync} upcoming load${orgRotation.outOfSync === 1 ? '' : 's'} across ${orgRotation.rules} rule${orgRotation.rules === 1 ? '' : 's'} onto each rule's current assignee. `
+                ? `Releases ${orgRotation.outOfSync} upcoming load${orgRotation.outOfSync === 1 ? '' : 's'} across ${orgRotation.rules} rule${orgRotation.rules === 1 ? '' : 's'} and auto-assigns them again under the rules as they are now. `
                 : ''}
               Loads that have started, are past pickup, or were placed by a dispatcher are never
-              touched. A load the new assignee is already booked across stays where it is and is
-              reported here when the run finishes.
+              touched. A load no rule claims, or whose assignee is already booked, stays Open for
+              dispatch and is reported here when the run finishes.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

@@ -547,11 +547,6 @@ export const assignDriverInternal = internalMutation({
     // this load's window. Auto-assignment passes true; every human-initiated
     // caller leaves it off and keeps the warn-and-proceed behavior.
     blockOnOverlap: v.optional(v.boolean()),
-    // With blockOnOverlap: loads whose legs on this driver do NOT count as
-    // conflicts because the caller is moving them off him in the SAME
-    // transaction (routeRotation.swapLoads). The caller is responsible for
-    // throwing — and so rolling back — if any of those moves fails.
-    overlapIgnoreLoadIds: v.optional(v.array(v.id('loadInformation'))),
     // Provenance. The route rule that decided this assignment — passed by
     // auto-assignment and rotation only. Absent means a person chose, and
     // the load's stored provenance is CLEARED so a later rotation of the
@@ -592,7 +587,7 @@ export const assignDriverInternal = internalMutation({
         ctx,
         args.driverId,
         await prospectiveLegRanges(ctx, args.loadId),
-        [args.loadId, ...(args.overlapIgnoreLoadIds ?? [])],
+        args.loadId,
       );
       if (conflicts.length > 0) {
         return { status: 'OVERLAP', overlaps: conflicts };

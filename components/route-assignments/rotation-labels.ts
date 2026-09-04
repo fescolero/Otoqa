@@ -5,14 +5,22 @@
  * out of the breakdown.
  */
 export const ROTATION_REASON_LABELS: Record<string, string> = {
+  // Not released — left where it is.
   IN_MOTION: 'already in progress',
   PAST: 'pickup date has passed',
   NO_SERVICE_DATE: 'no pickup date',
   MOVED_BY_HUMAN: 'moved by a dispatcher',
-  ALREADY_ON_TARGET: 'already on this assignee',
-  DAY_RESTRICTED: 'rule no longer runs that day',
-  TARGET_INACTIVE: 'assignee inactive',
-  OVERLAP_CONFLICT: 'assignee already booked',
+  IN_SYNC: 'already in sync',
+  // Released, then not re-placed — left Open for dispatch, with the
+  // assignment decision's own reason.
+  BEYOND_HORIZON: 'released — will be assigned when due',
+  NO_MATCH: 'released — no rule claims it now',
+  DAY_RESTRICTED: 'released — no rule runs that day',
+  OVERLAP_CONFLICT: 'released — assignee already booked, left open',
+  DRIVER_INACTIVE: 'released — driver inactive, left open',
+  CARRIER_INACTIVE: 'released — carrier inactive, left open',
+  OPTED_OUT: 'excluded from auto-assignment',
+  ALREADY_ASSIGNED: 'already assigned',
   ERROR: 'error',
 };
 

@@ -1,46 +1,43 @@
-import { ConvexError, v } from 'convex/values';
+import { v } from 'convex/values';
 import { internalAction, internalMutation, internalQuery } from './_generated/server';
 import type { ActionCtx, MutationCtx, QueryCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Doc, Id } from './_generated/dataModel';
 import { routeServesDate } from './lib/routeMatch';
 import { serviceDateOf } from './lib/assignHorizon';
-import { logAudit } from './lib/audit';
+import { unassignLoadResources } from './dispatchLegs';
 
 /**
- * Route rotation — re-point the upcoming loads a route rule auto-assigned
- * at the rule's (new) driver or carrier.
+ * Route re-sync — when a rule changes, the loads it placed are released
+ * and auto-assignment places them again under whatever rule applies now.
  *
- * The problem this solves: a rule put next week's loads on Dana, then the
- * rotation changed and the rule now names Sam. Editing the rule only
- * affects loads that have not been assigned yet. The ones already on Dana
- * stay there, and the manual fix (unassign, then wait for the sweep) does
- * not work either — unassigning sets autoAssignOptOut (R11), so the sweep
- * will never hand them to Sam.
+ * The model: with the assignment horizon set to one day (see
+ * lib/assignHorizon.ts), each rule holds at most a day's worth of loads,
+ * so a rule change is small. The load the rule placed is simply returned
+ * to Open — the same cascade a dispatcher's unassign runs, minus the
+ * opt-out flag — and the ordinary assignment decision runs on it again:
+ * new driver, new days, a different rule entirely, or nobody (it stays
+ * Open, in front of a dispatcher, and the run says why).
+ *
+ * Release FIRST, across every load involved, and only then re-place. That
+ * ordering is the whole design: when two rules trade drivers, each load
+ * would otherwise be blocked by the other still sitting on its target.
+ * Once both are Open there is nothing to collide with except genuine
+ * bookings, which the robot still refuses to double-book.
  *
  * What makes this safe to automate is provenance: loadInformation
- * .autoAssignedRouteId is written only by the auto-assignment paths and
- * cleared by every human assign / reassign / unassign. So "loads with this
- * rule's id" is exactly "loads the robot placed under this rule that
- * nobody has touched since". A dispatcher's hand-placed load is never in
- * the set, whatever driver it is on.
- *
- * Holds are per-load and reported, never silent — same posture as the
- * sweep's lastRun breakdown. A load that is in motion, in the past, or
- * would double-book the new driver stays where it is and shows up in the
- * count with its reason.
+ * .autoAssignedRouteId is written only by auto-assignment and cleared by
+ * every human assign / reassign / unassign. So "loads with this rule's
+ * id" is exactly "loads the robot placed under this rule that nobody has
+ * touched since". A dispatcher's hand-placed load is never in the set.
  */
 
 export type RotationHoldReason =
   | 'IN_MOTION' // a leg has started or finished, or the carrier is en route
   | 'PAST' // service date is before today — too late to re-plan
   | 'NO_SERVICE_DATE' // cannot tell whether it is upcoming
-  | 'MOVED_BY_HUMAN' // no longer on the resource the rule had (belt and braces — provenance should already be cleared)
-  | 'ALREADY_ON_TARGET'
-  | 'DAY_RESTRICTED' // the rule's calendar no longer covers this load's date
-  | 'TARGET_INACTIVE'
-  | 'OVERLAP_CONFLICT'
-  | 'ERROR';
+  | 'MOVED_BY_HUMAN' // provenance says the rule's, but state disagrees (belt and braces)
+  | 'IN_SYNC'; // on the rule's resource, on a day the rule covers — nothing to do
 
 export type RotationTarget = {
   driverId?: Id<'drivers'>;
@@ -52,23 +49,20 @@ export type RotationVerdict =
   | { eligible: false; reason: RotationHoldReason };
 
 /**
- * Pure: may this load be moved?
+ * Pure: should this load be released?
  *
- * `previous` is the resource the rule named before the edit. When given, a
- * load must still be on it — otherwise someone moved the load by hand and
- * it is theirs. When absent (the explicit "re-sync" action) any load the
- * rule owns that is not already on the target qualifies.
+ * Yes when the rule that placed it would not place it there today: it
+ * sits on a different resource than the rule names, or on a date the
+ * rule's calendar (or effective range) no longer covers.
  */
 export function classifyForRotation(input: {
   load: Doc<'loadInformation'>;
   legs: Doc<'dispatchLegs'>[];
   carrierAssignments: Doc<'loadCarrierAssignments'>[];
   rule: Doc<'routeAssignments'>;
-  target: RotationTarget;
-  previous?: RotationTarget;
   today: string;
 }): RotationVerdict {
-  const { load, legs, carrierAssignments, rule, target, previous, today } = input;
+  const { load, legs, carrierAssignments, rule, today } = input;
 
   if (load.status !== 'Assigned') return { eligible: false, reason: 'MOVED_BY_HUMAN' };
 
@@ -80,28 +74,13 @@ export function classifyForRotation(input: {
   if (!load.firstStopDate) return { eligible: false, reason: 'NO_SERVICE_DATE' };
   if (load.firstStopDate < today) return { eligible: false, reason: 'PAST' };
 
-  const onDriver = load.primaryDriverId;
-  const onCarrier = load.primaryCarrierPartnershipId;
-
-  if (previous) {
-    const stillOnPrevious =
-      (previous.driverId !== undefined && onDriver === previous.driverId) ||
-      (previous.carrierPartnershipId !== undefined &&
-        onCarrier === previous.carrierPartnershipId);
-    if (!stillOnPrevious) return { eligible: false, reason: 'MOVED_BY_HUMAN' };
-  }
-
-  const alreadyOnTarget =
-    (target.driverId !== undefined && onDriver === target.driverId) ||
-    (target.carrierPartnershipId !== undefined && onCarrier === target.carrierPartnershipId);
-  if (alreadyOnTarget) return { eligible: false, reason: 'ALREADY_ON_TARGET' };
-
-  // The edit may have changed the calendar too. A load the rule would no
-  // longer take is left where it is and reported, not moved onto a driver
-  // who does not run that day.
-  if (!routeServesDate(rule, load.firstStopDate).serves) {
-    return { eligible: false, reason: 'DAY_RESTRICTED' };
-  }
+  const target = targetOf(rule);
+  const onTarget =
+    (target.driverId !== undefined && load.primaryDriverId === target.driverId) ||
+    (target.carrierPartnershipId !== undefined &&
+      load.primaryCarrierPartnershipId === target.carrierPartnershipId);
+  const stillCovered = rule.isActive && routeServesDate(rule, load.firstStopDate).serves;
+  if (onTarget && stillCovered) return { eligible: false, reason: 'IN_SYNC' };
 
   return { eligible: true };
 }
@@ -110,8 +89,6 @@ export function classifyForRotation(input: {
 export async function assessRuleLoads(
   ctx: QueryCtx | MutationCtx,
   rule: Doc<'routeAssignments'>,
-  target: RotationTarget,
-  previous: RotationTarget | undefined,
   nowMs = Date.now(),
 ): Promise<Array<{ load: Doc<'loadInformation'>; verdict: RotationVerdict }>> {
   const today = serviceDateOf(nowMs);
@@ -134,18 +111,7 @@ export async function assessRuleLoads(
           .withIndex('by_load', (q) => q.eq('loadId', load._id))
           .collect(),
       ]);
-      return {
-        load,
-        verdict: classifyForRotation({
-          load,
-          legs,
-          carrierAssignments,
-          rule,
-          target,
-          previous,
-          today,
-        }),
-      };
+      return { load, verdict: classifyForRotation({ load, legs, carrierAssignments, rule, today }) };
     }),
   );
 }
@@ -161,36 +127,6 @@ export function targetOf(rule: {
       : {};
 }
 
-const previousValidator = {
-  previousDriverId: v.optional(v.id('drivers')),
-  previousCarrierPartnershipId: v.optional(v.id('carrierPartnerships')),
-};
-
-function previousFrom(args: {
-  previousDriverId?: Id<'drivers'>;
-  previousCarrierPartnershipId?: Id<'carrierPartnerships'>;
-}): RotationTarget | undefined {
-  if (args.previousDriverId) return { driverId: args.previousDriverId };
-  if (args.previousCarrierPartnershipId) {
-    return { carrierPartnershipId: args.previousCarrierPartnershipId };
-  }
-  return undefined;
-}
-
-/** Candidate load ids for the action to work through one by one. */
-export const listCandidates = internalQuery({
-  args: { routeId: v.id('routeAssignments'), ...previousValidator },
-  handler: async (ctx, args): Promise<Id<'loadInformation'>[]> => {
-    const rule = await ctx.db.get(args.routeId);
-    if (!rule) return [];
-    const assessed = await assessRuleLoads(ctx, rule, targetOf(rule), previousFrom(args));
-    // Only the ones worth a mutation. Holds are re-derived (and counted)
-    // by the action from a second assessment so the tally reflects the
-    // whole set, not just what was attempted.
-    return assessed.filter((a) => a.verdict.eligible).map((a) => a.load._id);
-  },
-});
-
 export type HeldLoad = {
   orderNumber: string;
   serviceDate?: string;
@@ -198,90 +134,78 @@ export type HeldLoad = {
   detail?: string;
 };
 
-/** Loads the assessment holds before anything is attempted, with why. */
-export const listHolds = internalQuery({
-  args: { routeId: v.id('routeAssignments'), ...previousValidator },
-  handler: async (ctx, args): Promise<HeldLoad[]> => {
+type Released = { loadId: Id<'loadInformation'>; orderNumber: string; serviceDate?: string };
+
+/** The rule's loads, split into "release these" and "leave these, because". */
+export const assess = internalQuery({
+  args: { routeId: v.id('routeAssignments') },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ release: Id<'loadInformation'>[]; holds: HeldLoad[] }> => {
     const rule = await ctx.db.get(args.routeId);
-    if (!rule) return [];
-    const assessed = await assessRuleLoads(ctx, rule, targetOf(rule), previousFrom(args));
-    return assessed
-      .filter((a) => !a.verdict.eligible)
-      .map((a) => ({
-        orderNumber: a.load.orderNumber,
-        serviceDate: a.load.firstStopDate,
-        reason: a.verdict.eligible ? '' : a.verdict.reason,
-      }));
+    if (!rule) return { release: [], holds: [] };
+    const assessed = await assessRuleLoads(ctx, rule);
+    return {
+      release: assessed.filter((a) => a.verdict.eligible).map((a) => a.load._id),
+      holds: assessed
+        .filter((a) => !a.verdict.eligible)
+        .map((a) => ({
+          orderNumber: a.load.orderNumber,
+          serviceDate: a.load.firstStopDate,
+          reason: a.verdict.eligible ? '' : a.verdict.reason,
+        })),
+    };
   },
 });
 
-type MoveResult =
-  | { moved: true; orderNumber: string; serviceDate?: string }
-  | {
-      moved: false;
-      reason: RotationHoldReason;
-      orderNumber?: string;
-      serviceDate?: string;
-      detail?: string;
-      /** For OVERLAP_CONFLICT: the loads on the target that collide. */
-      conflictLoadIds?: Id<'loadInformation'>[];
-    };
-
 /**
- * Move one load onto its rule's current resource. Re-classifies inside
- * the transaction so a load that started moving between the listing and
- * now is left alone.
- *
- * `overlapIgnoreLoadIds` is for swaps: loads the caller is moving off the
- * target in the same transaction, so they must not count as conflicts.
+ * Release one load: back to Open, provenance and legs cleared, no opt-out
+ * flag. Re-classified inside the transaction so a load that started
+ * moving since the assessment is left alone.
  */
-async function moveOne(
-  ctx: MutationCtx,
+export const releaseOne = internalMutation({
   args: {
-    loadId: Id<'loadInformation'>;
-    routeId: Id<'routeAssignments'>;
-    previous?: RotationTarget;
-    userId: string;
-    userName?: string;
-    overlapIgnoreLoadIds?: Id<'loadInformation'>[];
+    loadId: v.id('loadInformation'),
+    routeId: v.id('routeAssignments'),
+    userId: v.string(),
+    userName: v.optional(v.string()),
   },
-): Promise<MoveResult> {
-  const rule = await ctx.db.get(args.routeId);
-  const load = await ctx.db.get(args.loadId);
-  if (!rule || !load || load.autoAssignedRouteId !== rule._id) {
-    return { moved: false, reason: 'MOVED_BY_HUMAN', orderNumber: load?.orderNumber };
-  }
-  const who = { orderNumber: load.orderNumber, serviceDate: load.firstStopDate };
+  handler: async (
+    ctx,
+    args,
+  ): Promise<
+    | { released: true; orderNumber: string; serviceDate?: string }
+    | { released: false; reason: RotationHoldReason; orderNumber?: string; serviceDate?: string }
+  > => {
+    const rule = await ctx.db.get(args.routeId);
+    const load = await ctx.db.get(args.loadId);
+    if (!rule || !load || load.autoAssignedRouteId !== rule._id) {
+      return { released: false, reason: 'MOVED_BY_HUMAN', orderNumber: load?.orderNumber };
+    }
+    const who = { orderNumber: load.orderNumber, serviceDate: load.firstStopDate };
+    const [legs, carrierAssignments] = await Promise.all([
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_load', (q) => q.eq('loadId', load._id))
+        .collect(),
+      ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', load._id))
+        .collect(),
+    ]);
+    const verdict = classifyForRotation({
+      load,
+      legs,
+      carrierAssignments,
+      rule,
+      today: serviceDateOf(Date.now()),
+    });
+    if (!verdict.eligible) return { released: false, reason: verdict.reason, ...who };
 
-  const [legs, carrierAssignments] = await Promise.all([
-    ctx.db
-      .query('dispatchLegs')
-      .withIndex('by_load', (q) => q.eq('loadId', load._id))
-      .collect(),
-    ctx.db
-      .query('loadCarrierAssignments')
-      .withIndex('by_load', (q) => q.eq('loadId', load._id))
-      .collect(),
-  ]);
-  const target = targetOf(rule);
-  const verdict = classifyForRotation({
-    load,
-    legs,
-    carrierAssignments,
-    rule,
-    target,
-    previous: args.previous,
-    today: serviceDateOf(Date.now()),
-  });
-  if (!verdict.eligible) return { moved: false, reason: verdict.reason, ...who };
-
-  const now = Date.now();
-  const actor = { assignedBy: args.userId, assignedByName: args.userName ?? 'Route rotation' };
-
-  // Leaving a carrier: the AWARDED row is what the carrier's mobile app
-  // shows, and neither assign helper touches it. Close it out first so
-  // the old carrier stops seeing a load that is no longer theirs.
-  const closeCarrierAward = async () => {
+    // Leaving a carrier: the AWARDED row is what the carrier's app shows,
+    // and unassignLoadResources does not touch it. Close it out.
+    const now = Date.now();
     for (const a of carrierAssignments) {
       if (a.status === 'AWARDED') {
         await ctx.db.patch(a._id, {
@@ -290,140 +214,124 @@ async function moveOne(
           canceledBy: args.userId,
           canceledByParty: 'BROKER',
           cancellationReason: 'OTHER',
-          cancellationNotes: `Route rule "${rule.name ?? rule.hcr}" rotated to a different resource`,
+          cancellationNotes: `Route rule "${rule.name ?? rule.hcr}" changed; load released for re-assignment`,
         });
       }
     }
-  };
 
-  if (target.driverId) {
-    const driver = await ctx.db.get(target.driverId);
-    if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
-      return { moved: false, reason: 'TARGET_INACTIVE', ...who };
-    }
-    await closeCarrierAward();
-    const result = await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
-      loadId: load._id,
-      driverId: target.driverId,
-      truckId: driver.currentTruckId,
-      ...actor,
-      // Same rule as auto-assignment: the robot never double-books.
-      blockOnOverlap: true,
-      overlapIgnoreLoadIds: args.overlapIgnoreLoadIds,
-      autoAssignedRouteId: rule._id,
-    });
-    if (result.status === 'OVERLAP') {
-      // Name the loads the driver already has across this window. This
-      // is what decides whether the conflict is real: a dispatcher can
-      // look at both and, if the windows are soft, place it by hand.
-      const overlaps = result.overlaps ?? [];
-      const conflicts = overlaps
-        .map((o) => `#${o.orderNumber ?? o.loadId} (${Math.round(o.overlapMinutes)} min)`)
-        .join(', ');
-      return {
-        moved: false,
-        reason: 'OVERLAP_CONFLICT',
-        ...who,
-        detail: `${driver.firstName} ${driver.lastName} already has ${conflicts}`,
-        conflictLoadIds: overlaps.map((o) => o.loadId as Id<'loadInformation'>),
-      };
-    }
+    const result = await unassignLoadResources(
+      ctx,
+      load._id,
+      { userId: args.userId, userName: args.userName ?? 'Route re-sync' },
+      `route rule "${rule.name ?? rule.hcr}" changed; released for re-assignment`,
+      // No opt-out: the whole point is that auto-assignment takes it again.
+      false,
+    );
     if (result.status !== 'SUCCESS') {
-      return { moved: false, reason: 'ERROR', ...who, detail: result.message };
+      return { released: false, reason: 'MOVED_BY_HUMAN', ...who };
     }
-  } else if (target.carrierPartnershipId) {
-    const carrier = await ctx.db.get(target.carrierPartnershipId);
-    if (!carrier || carrier.status !== 'ACTIVE') {
-      return { moved: false, reason: 'TARGET_INACTIVE', ...who };
-    }
-    await closeCarrierAward();
-    const result = await ctx.runMutation(internal.dispatchLegs.assignCarrierInternal, {
-      loadId: load._id,
-      carrierPartnershipId: target.carrierPartnershipId,
-      ...actor,
-      autoAssignedRouteId: rule._id,
-    });
-    if (result.status !== 'SUCCESS') {
-      return { moved: false, reason: 'ERROR', ...who, detail: result.message };
-    }
-  } else {
-    return { moved: false, reason: 'TARGET_INACTIVE', ...who };
-  }
-
-  await logAudit(ctx, {
-    organizationId: load.workosOrgId,
-    entityType: 'load',
-    entityId: load._id,
-    entityName: load.internalId,
-    action: 'auto_assign_rotated',
-    performedBy: args.userId,
-    performedByName: args.userName ?? 'Route rotation',
-    description: `Moved load ${load.orderNumber} to the current resource on route rule "${rule.name ?? rule.hcr}"`,
-    changedFields: ['primaryDriverId', 'primaryCarrierPartnershipId'],
-  });
-
-  return { moved: true, ...who };
-}
-
-/** Move one load, one transaction. */
-export const rotateOneLoad = internalMutation({
-  args: {
-    loadId: v.id('loadInformation'),
-    routeId: v.id('routeAssignments'),
-    ...previousValidator,
-    userId: v.string(),
-    userName: v.optional(v.string()),
+    return { released: true, ...who };
   },
-  handler: async (ctx, args): Promise<MoveResult> =>
-    moveOne(ctx, {
-      loadId: args.loadId,
-      routeId: args.routeId,
-      previous: previousFrom(args),
-      userId: args.userId,
-      userName: args.userName,
-    }),
 });
+
+export type RotationOutcome = {
+  considered: number;
+  moved: number;
+  held: number;
+  byReason: Array<{ reason: string; count: number }>;
+};
 
 /**
- * Exchange a set of loads in ONE transaction.
- *
- * The case: rule A now names the driver rule B used to, and vice versa,
- * and the two loads run at overlapping times on the same day. Moved one
- * at a time, each is blocked by the other still sitting on its target.
- * Here every move's overlap check ignores the other members of the group
- * — they are leaving in this same transaction — and if any move fails the
- * whole thing throws and rolls back, so a half-done swap can never leave
- * a real double-booking behind.
+ * Phase 1 for one rule: release what it placed that no longer fits.
  */
-export const swapLoads = internalMutation({
-  args: {
-    moves: v.array(v.object({ loadId: v.id('loadInformation'), routeId: v.id('routeAssignments') })),
-    userId: v.string(),
-    userName: v.optional(v.string()),
-  },
-  handler: async (
-    ctx,
-    args,
-  ): Promise<Array<{ routeId: Id<'routeAssignments'>; orderNumber: string; serviceDate?: string }>> => {
-    const group = args.moves.map((m) => m.loadId);
-    const done: Array<{ routeId: Id<'routeAssignments'>; orderNumber: string; serviceDate?: string }> = [];
-    for (const m of args.moves) {
-      const r = await moveOne(ctx, {
-        loadId: m.loadId,
-        routeId: m.routeId,
-        userId: args.userId,
-        userName: args.userName,
-        overlapIgnoreLoadIds: group.filter((id) => id !== m.loadId),
-      });
-      if (!r.moved) {
-        // Throwing rolls back every move made so far in this transaction.
-        throw new ConvexError(`swap aborted at ${r.orderNumber ?? m.loadId}: ${r.reason}${r.detail ? ` — ${r.detail}` : ''}`);
-      }
-      done.push({ routeId: m.routeId, orderNumber: r.orderNumber, serviceDate: r.serviceDate });
+async function releasePhase(
+  ctx: ActionCtx,
+  routeId: Id<'routeAssignments'>,
+  actor: { userId: string; userName?: string },
+): Promise<{ released: Released[]; holds: HeldLoad[] }> {
+  const { release, holds } = await ctx.runQuery(internal.routeRotation.assess, { routeId });
+  const released: Released[] = [];
+  const allHolds = [...holds];
+  for (const loadId of release) {
+    try {
+      const r = await ctx.runMutation(internal.routeRotation.releaseOne, { loadId, routeId, ...actor });
+      if (r.released) released.push({ loadId, orderNumber: r.orderNumber, serviceDate: r.serviceDate });
+      else allHolds.push({ orderNumber: r.orderNumber ?? String(loadId), serviceDate: r.serviceDate, reason: r.reason });
+    } catch (err) {
+      console.error(`[rotation] rule ${routeId}: release of ${loadId} failed:`, err);
+      allHolds.push({ orderNumber: String(loadId), reason: 'ERROR', detail: String(err) });
     }
-    return done;
-  },
-});
+  }
+  return { released, holds: allHolds };
+}
+
+/**
+ * Phase 2: the ordinary assignment decision, on each released load. A
+ * load that is not re-placed stays Open — visible to dispatch — and the
+ * decision's own reason is recorded (OVERLAP_CONFLICT, NO_MATCH,
+ * DAY_RESTRICTED, BEYOND_HORIZON when it is simply not due yet, …).
+ */
+async function replacePhase(
+  ctx: ActionCtx,
+  released: Released[],
+  actor: { userId: string; userName?: string },
+): Promise<{ moved: number; open: HeldLoad[] }> {
+  let moved = 0;
+  const open: HeldLoad[] = [];
+  for (const l of released) {
+    try {
+      const r = await ctx.runMutation(internal.autoAssignment.autoAssignLoad, {
+        loadId: l.loadId,
+        userId: actor.userId,
+        userName: actor.userName ?? 'Route re-sync',
+      });
+      if (r.success) moved++;
+      else open.push({ orderNumber: l.orderNumber, serviceDate: l.serviceDate, reason: r.action, detail: r.message });
+    } catch (err) {
+      console.error(`[rotation] re-place of ${l.loadId} failed:`, err);
+      open.push({ orderNumber: l.orderNumber, serviceDate: l.serviceDate, reason: 'ERROR', detail: String(err) });
+    }
+  }
+  return { moved, open };
+}
+
+const MAX_HELD_LISTED = 50;
+
+function summarize(moved: number, holds: HeldLoad[]): RotationOutcome & { heldLoads: HeldLoad[] } {
+  const byReason = new Map<string, number>();
+  for (const h of holds) byReason.set(h.reason, (byReason.get(h.reason) ?? 0) + 1);
+  const heldLoads = [...holds].sort((a, b) => (a.serviceDate ?? '').localeCompare(b.serviceDate ?? ''));
+  return {
+    considered: moved + holds.length,
+    moved,
+    held: holds.length,
+    byReason: [...byReason.entries()]
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count),
+    heldLoads: heldLoads.slice(0, MAX_HELD_LISTED),
+  };
+}
+
+async function record(
+  ctx: ActionCtx,
+  routeId: Id<'routeAssignments'>,
+  outcome: RotationOutcome & { heldLoads: HeldLoad[] },
+): Promise<void> {
+  await ctx.runMutation(internal.routeRotation.recordRotation, {
+    routeId,
+    lastRotation: { at: Date.now(), ...outcome },
+  });
+  console.log(
+    `[rotation] rule ${routeId}: ${outcome.moved} re-placed, ${outcome.held} not` +
+      (outcome.held > 0 ? ` (${outcome.byReason.map((r) => `${r.reason} ${r.count}`).join(', ')})` : ''),
+  );
+  for (const h of outcome.heldLoads) {
+    console.log(
+      `[rotation]   #${h.orderNumber}${h.serviceDate ? ` on ${h.serviceDate}` : ''}: ${h.reason}` +
+        (h.detail ? ` — ${h.detail}` : ''),
+    );
+  }
+}
 
 const heldLoadValidator = v.object({
   orderNumber: v.string(),
@@ -431,7 +339,6 @@ const heldLoadValidator = v.object({
   reason: v.string(),
   detail: v.optional(v.string()),
 });
-const MAX_HELD_LISTED = 50;
 
 export const recordRotation = internalMutation({
   args: {
@@ -454,158 +361,36 @@ export const recordRotation = internalMutation({
   },
 });
 
-export type RotationOutcome = {
-  considered: number;
-  moved: number;
-  held: number;
-  byReason: Array<{ reason: string; count: number }>;
-  /** Loads moved this run (including ones credited via `alreadyMoved`),
-   *  so a later pass can carry them forward instead of re-counting them
-   *  as ALREADY_ON_TARGET holds. */
-  movedLoads: Array<{ orderNumber: string; serviceDate?: string }>;
-  /** Loads this rule wanted to move but could not because of an overlap,
-   *  with what they collided with — the input to swap detection. */
-  overlapHolds: Array<{
-    loadId: Id<'loadInformation'>;
-    orderNumber: string;
-    conflictLoadIds: Id<'loadInformation'>[];
-  }>;
-};
-
 /**
- * Rotate one rule: list its candidates, move them one mutation at a time,
- * record the outcome on the rule. Shared by the single-rule action and the
- * org-wide re-sync.
- *
- * Also logs one line per rule so the outcome is visible in the Convex
- * logs without opening the app — holds are otherwise only stored, never
- * thrown, since a held load is a reported decision rather than a failure.
- */
-async function rotateRule(
-  ctx: ActionCtx,
-  args: {
-    routeId: Id<'routeAssignments'>;
-    previousDriverId?: Id<'drivers'>;
-    previousCarrierPartnershipId?: Id<'carrierPartnerships'>;
-    userId: string;
-    userName?: string;
-    /** Loads a swap already moved for this rule (org re-sync). They now
-     *  classify as ALREADY_ON_TARGET; count them as moved instead. */
-    alreadyMoved?: Array<{ orderNumber: string; serviceDate?: string }>;
-  },
-): Promise<RotationOutcome> {
-  const previous = {
-    previousDriverId: args.previousDriverId,
-    previousCarrierPartnershipId: args.previousCarrierPartnershipId,
-  };
-  const [candidates, rawHolds] = await Promise.all([
-    ctx.runQuery(internal.routeRotation.listCandidates, { routeId: args.routeId, ...previous }),
-    ctx.runQuery(internal.routeRotation.listHolds, { routeId: args.routeId, ...previous }),
-  ]);
-  const swapped = new Set((args.alreadyMoved ?? []).map((m) => m.orderNumber));
-  const preHolds = rawHolds.filter((h) => !(swapped.has(h.orderNumber) && h.reason === 'ALREADY_ON_TARGET'));
-
-  const heldLoads: HeldLoad[] = [...preHolds];
-  const overlapHolds: RotationOutcome['overlapHolds'] = [];
-  const byReason = new Map<string, number>();
-  const tally = (reason: string) => byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
-  for (const h of preHolds) tally(h.reason);
-
-  const movedLoads: RotationOutcome['movedLoads'] = [...(args.alreadyMoved ?? [])];
-  let moved = swapped.size;
-  for (const loadId of candidates) {
-    try {
-      const r = await ctx.runMutation(internal.routeRotation.rotateOneLoad, {
-        loadId,
-        routeId: args.routeId,
-        ...previous,
-        userId: args.userId,
-        userName: args.userName,
-      });
-      if (r.moved) {
-        moved++;
-        movedLoads.push({ orderNumber: r.orderNumber, serviceDate: r.serviceDate });
-      } else {
-        tally(r.reason);
-        heldLoads.push({
-          orderNumber: r.orderNumber ?? String(loadId),
-          serviceDate: r.serviceDate,
-          reason: r.reason,
-          detail: r.detail,
-        });
-        if (r.reason === 'OVERLAP_CONFLICT' && r.conflictLoadIds) {
-          overlapHolds.push({
-            loadId,
-            orderNumber: r.orderNumber ?? String(loadId),
-            conflictLoadIds: r.conflictLoadIds,
-          });
-        }
-      }
-    } catch (err) {
-      console.error(`[rotation] rule ${args.routeId}: load ${loadId} failed:`, err);
-      tally('ERROR');
-      heldLoads.push({ orderNumber: String(loadId), reason: 'ERROR', detail: String(err) });
-    }
-  }
-
-  const held = [...byReason.values()].reduce((a, b) => a + b, 0);
-  const considered = moved + held;
-  const byReasonList = [...byReason.entries()]
-    .map(([reason, count]) => ({ reason, count }))
-    .sort((a, b) => b.count - a.count);
-  heldLoads.sort((a, b) => (a.serviceDate ?? '').localeCompare(b.serviceDate ?? ''));
-
-  await ctx.runMutation(internal.routeRotation.recordRotation, {
-    routeId: args.routeId,
-    lastRotation: {
-      at: Date.now(),
-      considered,
-      moved,
-      held,
-      byReason: byReasonList,
-      heldLoads: heldLoads.slice(0, MAX_HELD_LISTED),
-    },
-  });
-
-  console.log(
-    `[rotation] rule ${args.routeId}: ${moved} moved, ${held} held` +
-      (held > 0 ? ` (${byReasonList.map((r) => `${r.reason} ${r.count}`).join(', ')})` : ''),
-  );
-  // One line per held load, so the logs answer "which one, and with what".
-  for (const h of heldLoads) {
-    console.log(
-      `[rotation]   held #${h.orderNumber}${h.serviceDate ? ` on ${h.serviceDate}` : ''}: ${h.reason}` +
-        (h.detail ? ` — ${h.detail}` : ''),
-    );
-  }
-
-  return { considered, moved, held, byReason: byReasonList, movedLoads, overlapHolds };
-}
-
-/**
- * The rotation itself. Scheduled (not inline in the rule edit) because
- * each move runs the full assignment cascade, pay recalculation included,
- * and a rule can own dozens of upcoming loads. One load per mutation keeps
- * each transaction small and means one overlap does not roll back the
- * rest. The outcome lands on the rule row for the UI.
+ * Re-sync one rule. Scheduled (not inline in the rule edit) because each
+ * re-placement runs the full assignment cascade, pay recalculation
+ * included. One load per mutation keeps each transaction small and means
+ * one refusal does not roll back the rest. The outcome lands on the rule.
  */
 export const runRotation = internalAction({
   args: {
     routeId: v.id('routeAssignments'),
-    ...previousValidator,
     userId: v.string(),
     userName: v.optional(v.string()),
   },
-  handler: async (ctx, args): Promise<RotationOutcome> => rotateRule(ctx, args),
+  handler: async (ctx, args): Promise<RotationOutcome> => {
+    const actor = { userId: args.userId, userName: args.userName };
+    const { released, holds } = await releasePhase(ctx, args.routeId, actor);
+    const { moved, open } = await replacePhase(ctx, released, actor);
+    const outcome = summarize(moved, [...holds, ...open]);
+    await record(ctx, args.routeId, outcome);
+    return outcome;
+  },
 });
 
-/** Active rules with a resource — the set an org-wide re-sync walks. */
+/** Every rule with a resource — the set an org-wide re-sync walks. A
+ *  paused rule is included: its loads should be released too. */
 export const listOrgRuleIds = internalQuery({
   args: { workosOrgId: v.string() },
   handler: async (ctx, args): Promise<Id<'routeAssignments'>[]> => {
     const rules = await ctx.db
       .query('routeAssignments')
-      .withIndex('by_org_active', (q) => q.eq('workosOrgId', args.workosOrgId).eq('isActive', true))
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
       .collect();
     return rules.filter((r) => r.driverId || r.carrierPartnershipId).map((r) => r._id);
   },
@@ -635,28 +420,13 @@ export const recordBulkRotation = internalMutation({
   },
 });
 
-/** Largest exchange group the swap phase will attempt. */
-const MAX_SWAP_GROUP = 8;
-
 /**
- * Org-wide re-sync: every active rule, one after another, each moving the
- * upcoming loads it owns onto its current resource. Sequential on purpose
- * — two rules that now name the same driver must see each other's moves
- * when the overlap pre-flight runs, or both could book him for the same
- * window. One summary lands on autoAssignmentSettings for the page banner;
- * each rule still gets its own lastRotation.
- *
- * Then the swap phase. A rotation is very often an exchange — rule A now
- * names the driver rule B had and vice versa — and when the two loads
- * overlap in time, neither can move first: each is blocked by the other
- * still sitting on its target. Pass 1 leaves both held on OVERLAP with
- * the other named as the conflict. Any held load whose conflicts are ALL
- * themselves loads waiting to move (closure over the conflict graph) is
- * exchanged with them in one transaction (swapLoads). A conflict with a
- * load that is NOT moving — a hand-placed one, say — keeps the group
- * held; that is a real double-booking for a dispatcher to judge.
- * Affected rules are then re-run so their records and any loads freed by
- * the swap catch up.
+ * Org-wide re-sync. Phase 1 releases every out-of-sync load under every
+ * rule; phase 2 re-places them. Splitting the phases across rules is what
+ * makes a driver exchange between two rules work: by the time anything is
+ * re-placed, both drivers are free of the loads that are leaving them.
+ * One summary lands on autoAssignmentSettings for the page banner; each
+ * rule still gets its own record.
  */
 export const runOrgRotation = internalAction({
   args: {
@@ -667,110 +437,41 @@ export const runOrgRotation = internalAction({
   handler: async (
     ctx,
     args,
-  ): Promise<{ rules: number; considered: number; moved: number; held: number; swapped: number }> => {
+  ): Promise<{ rules: number; considered: number; moved: number; held: number }> => {
     const ruleIds = await ctx.runQuery(internal.routeRotation.listOrgRuleIds, {
       workosOrgId: args.workosOrgId,
     });
     const actor = { userId: args.userId, userName: args.userName };
 
-    // Pass 1 — every rule on its own.
-    const outcomes = new Map<Id<'routeAssignments'>, RotationOutcome>();
-    const failed = new Set<Id<'routeAssignments'>>();
+    // Phase 1 — release, every rule.
+    const perRule = new Map<Id<'routeAssignments'>, { released: Released[]; holds: HeldLoad[] }>();
     for (const routeId of ruleIds) {
       try {
-        outcomes.set(routeId, await rotateRule(ctx, { routeId, ...actor }));
+        perRule.set(routeId, await releasePhase(ctx, routeId, actor));
       } catch (err) {
-        console.error(`[rotation] org ${args.workosOrgId}: rule ${routeId} failed:`, err);
-        failed.add(routeId);
+        console.error(`[rotation] org ${args.workosOrgId}: rule ${routeId} release failed:`, err);
+        perRule.set(routeId, { released: [], holds: [{ orderNumber: '—', reason: 'ERROR', detail: String(err) }] });
       }
     }
 
-    // Swap phase — exchange groups of mutually-blocked loads.
-    const waiting = new Map<
-      Id<'loadInformation'>,
-      { routeId: Id<'routeAssignments'>; conflicts: Id<'loadInformation'>[] }
-    >();
-    for (const [routeId, o] of outcomes) {
-      for (const h of o.overlapHolds) waiting.set(h.loadId, { routeId, conflicts: h.conflictLoadIds });
-    }
-
-    const swappedByRule = new Map<Id<'routeAssignments'>, Array<{ orderNumber: string; serviceDate?: string }>>();
-    const resolved = new Set<Id<'loadInformation'>>();
-    let swapped = 0;
-    for (const [seed] of waiting) {
-      if (resolved.has(seed)) continue;
-      // Closure: every conflict must itself be waiting to move.
-      const group: Id<'loadInformation'>[] = [];
-      const queue = [seed];
-      let valid = true;
-      while (queue.length > 0 && valid) {
-        const id = queue.shift()!;
-        if (group.includes(id)) continue;
-        const w = waiting.get(id);
-        if (!w || resolved.has(id)) { valid = false; break; }
-        group.push(id);
-        if (group.length > MAX_SWAP_GROUP) { valid = false; break; }
-        queue.push(...w.conflicts);
-      }
-      if (!valid || group.length < 2) continue;
-
-      try {
-        const done = await ctx.runMutation(internal.routeRotation.swapLoads, {
-          moves: group.map((loadId) => ({ loadId, routeId: waiting.get(loadId)!.routeId })),
-          ...actor,
-        });
-        for (const d of done) {
-          const list = swappedByRule.get(d.routeId) ?? [];
-          list.push({ orderNumber: d.orderNumber, serviceDate: d.serviceDate });
-          swappedByRule.set(d.routeId, list);
-        }
-        for (const id of group) resolved.add(id);
-        swapped += done.length;
-        console.log(
-          `[rotation] swapped ${done.length} loads: ${done.map((d) => `#${d.orderNumber}`).join(' ⇄ ')}`,
-        );
-      } catch (err) {
-        // Rolled back; every member stays held with its pass-1 reason.
-        console.warn(`[rotation] swap of ${group.length} loads not possible:`, String(err));
-      }
-    }
-
-    // Pass 2 — rules the swap touched, or that still hold overlaps (a swap
-    // may have freed their target): refresh their records.
-    if (swapped > 0) {
-      for (const [routeId, o] of outcomes) {
-        if (!swappedByRule.has(routeId) && o.overlapHolds.length === 0) continue;
-        try {
-          outcomes.set(
-            routeId,
-            await rotateRule(ctx, {
-              routeId,
-              ...actor,
-              alreadyMoved: [...o.movedLoads, ...(swappedByRule.get(routeId) ?? [])],
-            }),
-          );
-        } catch (err) {
-          console.error(`[rotation] org ${args.workosOrgId}: rule ${routeId} pass 2 failed:`, err);
-        }
-      }
-    }
-
+    // Phase 2 — re-place, then record per rule. A load may land under a
+    // DIFFERENT rule now (a day change hands it to whichever rule covers
+    // that day); it is still counted for the rule that released it, since
+    // that is the change the user made.
     const byReason = new Map<string, number>();
     let considered = 0;
     let moved = 0;
     let held = 0;
-    for (const o of outcomes.values()) {
-      considered += o.considered;
-      moved += o.moved;
-      held += o.held;
-      for (const { reason, count } of o.byReason) {
+    for (const [routeId, phase] of perRule) {
+      const { moved: m, open } = await replacePhase(ctx, phase.released, actor);
+      const outcome = summarize(m, [...phase.holds, ...open]);
+      await record(ctx, routeId, outcome);
+      considered += outcome.considered;
+      moved += outcome.moved;
+      held += outcome.held;
+      for (const { reason, count } of outcome.byReason) {
         byReason.set(reason, (byReason.get(reason) ?? 0) + count);
       }
-    }
-    if (failed.size > 0) {
-      byReason.set('ERROR', (byReason.get('ERROR') ?? 0) + failed.size);
-      held += failed.size;
-      considered += failed.size;
     }
 
     await ctx.runMutation(internal.routeRotation.recordBulkRotation, {
@@ -788,9 +489,8 @@ export const runOrgRotation = internalAction({
     });
 
     console.log(
-      `[rotation] org ${args.workosOrgId}: ${ruleIds.length} rules, ${moved} moved (${swapped} by swap), ${held} held`,
+      `[rotation] org ${args.workosOrgId}: ${ruleIds.length} rules, ${moved} re-placed, ${held} not`,
     );
-
-    return { rules: ruleIds.length, considered, moved, held, swapped };
+    return { rules: ruleIds.length, considered, moved, held };
   },
 });

@@ -39,6 +39,8 @@ interface RouteAssignmentDoc {
   notes?: string;
   activeDays?: number[];
   excludeFederalHolidays?: boolean;
+  effectiveFrom?: string;
+  effectiveUntil?: string;
   driverName?: string;
   carrierName?: string;
   lastRotation?: {
@@ -150,6 +152,28 @@ function AAInput({
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         className="flex-1 border-0 outline-0 bg-transparent text-[12.5px] text-foreground w-full font-sans"
+      />
+    </div>
+  );
+}
+
+function AADate({
+  value,
+  onChange,
+  min,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  min?: string;
+}) {
+  return (
+    <div className="inline-flex items-center h-8 px-2.5 rounded-lg bg-[var(--bg-surface-2)] border border-[var(--border-hairline-strong)] focus-within:border-[var(--accent)] transition-colors">
+      <input
+        type="date"
+        value={value}
+        min={min}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full bg-transparent border-0 outline-none text-[12.5px] text-foreground"
       />
     </div>
   );
@@ -277,6 +301,13 @@ export function AutoAssignModal({
   // switch and the two states can't disagree.
   const [activeDays, setActiveDays] = React.useState<number[]>(rule?.activeDays ?? ALL_DAYS);
   const [skipHolidays, setSkipHolidays] = React.useState(rule?.excludeFederalHolidays ?? false);
+  // Effective range (service dates). Empty = open-ended.
+  const [effectiveFrom, setEffectiveFrom] = React.useState(rule?.effectiveFrom ?? '');
+  const [effectiveUntil, setEffectiveUntil] = React.useState(rule?.effectiveUntil ?? '');
+  // Planned change: end this rule the day before and start a replacement
+  // carrying the edit on that date.
+  const [applyLater, setApplyLater] = React.useState(false);
+  const [applyFrom, setApplyFrom] = React.useState('');
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   // Driver rotation: when the assignee changes on an existing rule, also
@@ -297,6 +328,10 @@ export function AutoAssignModal({
       setNotes(rule?.notes ?? '');
       setActiveDays(rule?.activeDays ?? ALL_DAYS);
       setSkipHolidays(rule?.excludeFederalHolidays ?? false);
+      setEffectiveFrom(rule?.effectiveFrom ?? '');
+      setEffectiveUntil(rule?.effectiveUntil ?? '');
+      setApplyLater(false);
+      setApplyFrom('');
       setError(null);
     }
   }, [open, rule]);
@@ -348,24 +383,50 @@ export function AutoAssignModal({
   const createMutation = useMutation(api.routeAssignments.create);
   const updateMutation = useMutation(api.routeAssignments.update);
 
-  // Has the assignee changed from what the rule currently names?
+  // Has anything that decides placement changed from the stored rule?
   const proposedDriverId =
     assigneeKind === 'driver' && driverId ? (driverId as Id<'drivers'>) : undefined;
   const proposedCarrierId =
     assigneeKind === 'carrier' && carrierId ? (carrierId as Id<'carrierPartnerships'>) : undefined;
+  const sameDays = (a: number[] | undefined, b: number[]) =>
+    [...(a ?? ALL_DAYS)].sort().join() === [...b].sort().join();
   const assigneeChanged =
     isEdit &&
     !!rule &&
     (proposedDriverId !== rule.driverId || proposedCarrierId !== rule.carrierPartnershipId) &&
     (proposedDriverId !== undefined || proposedCarrierId !== undefined);
+  const placementChanged =
+    isEdit &&
+    !!rule &&
+    (assigneeChanged ||
+      !sameDays(rule.activeDays, activeDays) ||
+      skipHolidays !== (rule.excludeFederalHolidays ?? false) ||
+      effectiveFrom !== (rule.effectiveFrom ?? '') ||
+      effectiveUntil !== (rule.effectiveUntil ?? ''));
 
-  // What a rotation would do, evaluated against the proposed assignee.
+  // What a re-sync would do, evaluated against the proposed edit.
   const rotationPreview = useAuthQuery(
     api.routeAssignments.previewRotation,
-    assigneeChanged && rule
-      ? { id: rule._id, driverId: proposedDriverId, carrierPartnershipId: proposedCarrierId }
+    placementChanged && rule && !applyLater
+      ? {
+          id: rule._id,
+          driverId: proposedDriverId,
+          carrierPartnershipId: proposedCarrierId,
+          activeDays,
+          excludeFederalHolidays: skipHolidays,
+          effectiveFrom: effectiveFrom || undefined,
+          effectiveUntil: effectiveUntil || undefined,
+        }
       : 'skip',
   );
+
+  // Who changed what, when — from the audit trail.
+  const history = useAuthQuery(
+    api.routeAssignments.history,
+    isEdit && rule ? { id: rule._id, limit: 8 } : 'skip',
+  );
+
+  const todayYmd = new Date().toISOString().slice(0, 10);
 
   const selectedDriver = activeDrivers.find((d) => d._id === driverId);
   const selectedCarrier = activeCarriers.find((c) => c._id === carrierId);
@@ -388,6 +449,7 @@ export function AutoAssignModal({
     setIsSubmitting(true);
     try {
       if (isEdit && rule) {
+        if (applyLater && !applyFrom) return setError('Pick the date the change applies from.');
         await updateMutation({
           id: rule._id,
           hcr,
@@ -397,9 +459,14 @@ export function AutoAssignModal({
             assigneeKind === 'carrier' ? (carrierId as Id<'carrierPartnerships'>) : undefined,
           activeDays,
           excludeFederalHolidays: skipHolidays,
+          // A scheduled change sets the replacement's start itself.
+          ...(applyLater
+            ? { applyFrom }
+            : { effectiveFrom: effectiveFrom || null }),
+          effectiveUntil: effectiveUntil || null,
           name: name || undefined,
           notes: notes || undefined,
-          reassignFutureLoads: assigneeChanged && moveUpcoming,
+          reassignFutureLoads: placementChanged && moveUpcoming,
         });
       } else {
         await createMutation({
@@ -411,6 +478,8 @@ export function AutoAssignModal({
             assigneeKind === 'carrier' ? (carrierId as Id<'carrierPartnerships'>) : undefined,
           activeDays,
           excludeFederalHolidays: skipHolidays,
+          effectiveFrom: effectiveFrom || undefined,
+          effectiveUntil: effectiveUntil || undefined,
           name: name || undefined,
           notes: notes || undefined,
           createdBy: userId,
@@ -665,14 +734,46 @@ export function AutoAssignModal({
                     />
                   </div>
                 )}
+                <div className="grid grid-cols-2 gap-3 mt-3">
+                  <AAField label="Active from" hint="Leave blank to start now.">
+                    <AADate value={effectiveFrom} onChange={setEffectiveFrom} />
+                  </AAField>
+                  <AAField label="Active until" hint="Leave blank for open-ended.">
+                    <AADate value={effectiveUntil} onChange={setEffectiveUntil} min={effectiveFrom || undefined} />
+                  </AAField>
+                </div>
               </AASection>
 
-              {/* Driver rotation — only when editing and the assignee changed */}
-              {assigneeChanged && (
+              {/* Planned change — edit mode only */}
+              {isEdit && (
+                <AASection
+                  icon="calendar"
+                  title="When does this change apply?"
+                  note="Apply now edits this rule in place. Scheduling keeps this rule as it is until the day before, and creates its replacement with these changes from that date — both stay visible in the list and both are recorded."
+                >
+                  <ToggleControl
+                    id="apply-later"
+                    value={applyLater}
+                    onChange={setApplyLater}
+                    toggleLabel="Schedule this change for a later date"
+                    disabled={isSubmitting}
+                  />
+                  {applyLater && (
+                    <div className="mt-2.5 max-w-[220px]">
+                      <AAField label="Applies from" required>
+                        <AADate value={applyFrom} onChange={setApplyFrom} min={todayYmd} />
+                      </AAField>
+                    </div>
+                  )}
+                </AASection>
+              )}
+
+              {/* Re-sync — only when editing and something placement-related changed */}
+              {placementChanged && !applyLater && (
                 <AASection
                   icon="refresh"
-                  title="Upcoming loads"
-                  note="This rule has already assigned loads to the previous assignee. Loads that have started, whose pickup has passed, or that a dispatcher moved by hand are never touched."
+                  title="Loads this rule already assigned"
+                  note="Loads the rule placed that no longer match it are released and auto-assigned again under the rules as they are now. Loads that have started, whose pickup has passed, or that a dispatcher placed by hand are never touched."
                 >
                   <ToggleControl
                     id="move-upcoming"
@@ -680,8 +781,8 @@ export function AutoAssignModal({
                     onChange={setMoveUpcoming}
                     toggleLabel={
                       rotationPreview === undefined
-                        ? 'Move upcoming auto-assigned loads to the new assignee'
-                        : `Move ${rotationPreview.eligible} upcoming auto-assigned load${rotationPreview.eligible === 1 ? '' : 's'} to the new assignee`
+                        ? 'Release and re-assign the loads that no longer match'
+                        : `Release and re-assign ${rotationPreview.eligible} load${rotationPreview.eligible === 1 ? '' : 's'} that no longer match`
                     }
                     disabled={isSubmitting}
                   />
@@ -776,14 +877,18 @@ export function AutoAssignModal({
                 </div>
                 <div className="text-[12px] text-foreground leading-[16px]">
                   {isEdit
-                    ? assigneeChanged && moveUpcoming
-                      ? 'Applies to future imports and moves upcoming loads.'
-                      : 'Changes apply to future imports.'
-                    : 'Rule activates immediately on save.'}
+                    ? applyLater
+                      ? `Current rule ends the day before ${applyFrom || '…'}; a replacement with these changes starts then.`
+                      : placementChanged && moveUpcoming
+                        ? 'Applies now, and loads that no longer match are re-assigned.'
+                        : 'Applies to loads assigned from now on.'
+                    : effectiveFrom
+                      ? `Rule starts claiming loads on ${effectiveFrom}.`
+                      : 'Rule activates immediately on save.'}
                 </div>
                 {isEdit && rule?.lastRotation && (
                   <div className="mt-2 text-[11px] text-[var(--text-tertiary)] leading-[15px]">
-                    Last rotation moved {rule.lastRotation.moved} of {rule.lastRotation.considered}
+                    Last re-sync re-assigned {rule.lastRotation.moved} of {rule.lastRotation.considered}
                     {rule.lastRotation.held > 0
                       ? ` (${describeHolds(rule.lastRotation.byReason)})`
                       : ''}
@@ -805,13 +910,41 @@ export function AutoAssignModal({
                   </div>
                 )}
               </div>
+
+              {isEdit && history && history.length > 0 && (
+                <div>
+                  <div className="text-[10.5px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide mb-1.5">
+                    History
+                  </div>
+                  <ul className="space-y-2">
+                    {history.map((h) => (
+                      <li key={`${h.at}-${h.action}`} className="text-[11px] leading-[14px]">
+                        <div className="text-[var(--text-tertiary)]">
+                          {new Date(h.at).toLocaleString(undefined, {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: 'numeric',
+                            minute: '2-digit',
+                          })}{' '}
+                          · {h.by}
+                        </div>
+                        <div className="text-foreground">{h.description}</div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </aside>
           </div>
 
           {/* Footer */}
           <div className="shrink-0 flex justify-between items-center gap-3 px-5 py-3 border-t border-[var(--border-hairline)]">
             <div className="text-[11.5px] text-[var(--text-tertiary)]">
-              {isEdit ? 'Changes apply to incoming imports.' : 'Rule activates immediately on save.'}
+              {isEdit
+                ? applyLater
+                  ? 'Scheduled: nothing changes until that date.'
+                  : 'Changes apply to loads assigned from now on.'
+                : 'Rule activates immediately on save.'}
             </div>
             <div className="flex gap-2">
               <WBtn size="sm" onClick={onClose}>
@@ -825,7 +958,7 @@ export function AutoAssignModal({
                 disabled={isSubmitting}
               >
                 {isSubmitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                {isEdit ? 'Save changes' : 'Create rule'}
+                {isEdit ? (applyLater ? 'Schedule change' : 'Save changes') : 'Create rule'}
               </WBtn>
             </div>
           </div>

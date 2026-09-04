@@ -232,6 +232,36 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
               />
             </div>
 
+            {/* Recommended shape: no assignment on import, the scheduled
+                run assigns each load the day before it runs. Each rule then
+                holds at most a day's worth of loads, so a rotation is a
+                one-load change instead of a month to unwind. */}
+            <div
+              className="flex items-center justify-between gap-6 rounded-lg px-3 py-2.5"
+              style={{ background: 'var(--bg-sidebar-active)' }}
+            >
+              <div className="space-y-0.5">
+                <div className="text-sm font-medium">Recommended: assign the day before pickup</div>
+                <p className="text-sm text-muted-foreground">
+                  Off on import, scheduled run on, horizon of 1 day. Rule changes then affect at
+                  most one load per rule.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!enabled}
+                onClick={() => {
+                  setTriggerOnCreate(false);
+                  setScheduledEnabled(true);
+                  setAssignAhead('1');
+                }}
+              >
+                Use this
+              </Button>
+            </div>
+
             {/* Assignment horizon. Without one, an import carrying next
                 month's schedule commits drivers to all of it on the spot,
                 and a driver rotation then has to unwind every load. */}

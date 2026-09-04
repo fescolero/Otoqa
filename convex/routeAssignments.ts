@@ -4,9 +4,10 @@ import type { MutationCtx } from './_generated/server';
 import type { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
-import { matchRouteAssignment, overlappingDays, DAY_NAMES } from './lib/routeMatch';
-import { assertValidAssignAheadDays } from './lib/assignHorizon';
-import { assessRuleLoads, targetOf } from './routeRotation';
+import { matchRouteAssignment, overlappingDays, effectiveRangesOverlap, DAY_NAMES } from './lib/routeMatch';
+import { assertValidAssignAheadDays, shiftServiceDate } from './lib/assignHorizon';
+import type { Doc } from './_generated/dataModel';
+import { assessRuleLoads } from './routeRotation';
 import { internal } from './_generated/api';
 
 /**
@@ -41,6 +42,8 @@ async function assertNoDayCollision(
     hcr: string;
     tripNumber?: string;
     activeDays?: number[];
+    effectiveFrom?: string;
+    effectiveUntil?: string;
     excludeId?: Id<'routeAssignments'>;
   },
 ): Promise<void> {
@@ -57,6 +60,9 @@ async function assertNoDayCollision(
   for (const sibling of siblings) {
     if (candidate.excludeId && sibling._id === candidate.excludeId) continue;
     if (!sibling.isActive) continue;
+    // A planned rotation: the outgoing rule ends the day before the
+    // incoming one starts. Same days, never the same date — no clash.
+    if (!effectiveRangesOverlap(candidate, sibling)) continue;
 
     const clash = overlappingDays(candidate, sibling);
     if (clash.length === 0) continue;
@@ -80,6 +86,85 @@ function normalizeActiveDays(activeDays: number[] | undefined): number[] | undef
     throw new ConvexError('Days must be integers 0 (Sunday) through 6 (Saturday)');
   }
   return unique.length === 7 ? undefined : unique;
+}
+
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+
+function validateDate(label: string, d: string | null | undefined): string | undefined {
+  if (d === undefined || d === null || d === '') return undefined;
+  if (!YMD.test(d)) throw new ConvexError(`${label} must be YYYY-MM-DD (got "${d}")`);
+  return d;
+}
+
+function assertEffectiveRange(from: string | undefined, until: string | undefined): void {
+  if (from !== undefined && until !== undefined && from > until) {
+    throw new ConvexError('"Active from" must be on or before "Active until"');
+  }
+}
+
+function formatDays(days: number[] | undefined): string {
+  if (!days || days.length === 0 || days.length === 7) return 'every day';
+  return days.map((d) => DAY_NAMES[d]).join('/');
+}
+
+/**
+ * Describe an edit in the words a dispatcher would use, for the audit
+ * trail: "Driver: Dana Rae → Sam Rae · Days: Mon/Wed/Fri → every day".
+ * The rule's history is read back from these descriptions, so they carry
+ * the before AND after of every field that changed.
+ */
+async function describeChanges(
+  ctx: MutationCtx,
+  before: Doc<'routeAssignments'>,
+  after: Record<string, unknown>,
+): Promise<string> {
+  const parts: string[] = [];
+  const driverName = async (id: Id<'drivers'> | undefined) => {
+    if (!id) return 'none';
+    const d = await ctx.db.get(id);
+    return d ? `${d.firstName} ${d.lastName}` : 'unknown driver';
+  };
+  const carrierName = async (id: Id<'carrierPartnerships'> | undefined) => {
+    if (!id) return 'none';
+    const c = await ctx.db.get(id);
+    return c ? c.carrierName : 'unknown carrier';
+  };
+  const dateOr = (d: unknown, open: string) => (typeof d === 'string' ? d : open);
+
+  if ('driverId' in after && after.driverId !== before.driverId) {
+    parts.push(`Driver: ${await driverName(before.driverId)} → ${await driverName(after.driverId as Id<'drivers'> | undefined)}`);
+  }
+  if ('carrierPartnershipId' in after && after.carrierPartnershipId !== before.carrierPartnershipId) {
+    parts.push(
+      `Carrier: ${await carrierName(before.carrierPartnershipId)} → ${await carrierName(after.carrierPartnershipId as Id<'carrierPartnerships'> | undefined)}`,
+    );
+  }
+  if ('activeDays' in after && formatDays(after.activeDays as number[] | undefined) !== formatDays(before.activeDays)) {
+    parts.push(`Days: ${formatDays(before.activeDays)} → ${formatDays(after.activeDays as number[] | undefined)}`);
+  }
+  if ('excludeFederalHolidays' in after && !!after.excludeFederalHolidays !== !!before.excludeFederalHolidays) {
+    parts.push(`Skip federal holidays: ${before.excludeFederalHolidays ? 'on' : 'off'} → ${after.excludeFederalHolidays ? 'on' : 'off'}`);
+  }
+  if ('customExclusions' in after) {
+    const b = before.customExclusions ?? [];
+    const a = (after.customExclusions as string[] | undefined) ?? [];
+    if (b.join(',') !== a.join(',')) parts.push(`Excluded dates: ${b.length} → ${a.length}`);
+  }
+  if ('effectiveFrom' in after && after.effectiveFrom !== before.effectiveFrom) {
+    parts.push(`Active from: ${dateOr(before.effectiveFrom, 'start')} → ${dateOr(after.effectiveFrom, 'start')}`);
+  }
+  if ('effectiveUntil' in after && after.effectiveUntil !== before.effectiveUntil) {
+    parts.push(`Active until: ${dateOr(before.effectiveUntil, 'open-ended')} → ${dateOr(after.effectiveUntil, 'open-ended')}`);
+  }
+  if ('hcr' in after && after.hcr !== before.hcr) parts.push(`HCR: ${before.hcr} → ${after.hcr}`);
+  if ('tripNumber' in after && after.tripNumber !== before.tripNumber) {
+    parts.push(`Trip: ${before.tripNumber ?? 'any'} → ${(after.tripNumber as string | undefined) ?? 'any'}`);
+  }
+  if ('priority' in after && after.priority !== before.priority) parts.push(`Priority: ${before.priority} → ${after.priority}`);
+  if ('isActive' in after && after.isActive !== before.isActive) parts.push(after.isActive ? 'Activated' : 'Paused');
+  if ('name' in after && after.name !== before.name) parts.push(`Name: "${before.name ?? ''}" → "${after.name ?? ''}"`);
+  if ('notes' in after && after.notes !== before.notes) parts.push('Notes updated');
+  return parts.join(' · ');
 }
 
 function validateExclusions(dates: string[] | undefined): string[] | undefined {
@@ -112,20 +197,16 @@ const lastRotationValidator = v.object({
 });
 
 /**
- * Kick off a rotation for a rule. `previous` is the resource the rule
- * named before this edit; absent means "anything the rule owns that is
- * not on its current resource" (the explicit re-sync).
+ * Kick off a re-sync for a rule: release the loads it placed that no
+ * longer fit it, and let auto-assignment place them again (routeRotation.ts).
  */
 async function scheduleRotation(
   ctx: MutationCtx,
   routeId: Id<'routeAssignments'>,
-  previous: { driverId?: Id<'drivers'>; carrierPartnershipId?: Id<'carrierPartnerships'> } | undefined,
   actor: { userId: string; userName?: string },
 ): Promise<void> {
   await ctx.scheduler.runAfter(0, internal.routeRotation.runRotation, {
     routeId,
-    previousDriverId: previous?.driverId,
-    previousCarrierPartnershipId: previous?.carrierPartnershipId,
     userId: actor.userId,
     userName: actor.userName,
   });
@@ -152,6 +233,8 @@ export const list = query({
       activeDays: v.optional(v.array(v.number())),
       excludeFederalHolidays: v.optional(v.boolean()),
       customExclusions: v.optional(v.array(v.string())),
+      effectiveFrom: v.optional(v.string()),
+      effectiveUntil: v.optional(v.string()),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -239,6 +322,8 @@ export const get = query({
       activeDays: v.optional(v.array(v.number())),
       excludeFederalHolidays: v.optional(v.boolean()),
       customExclusions: v.optional(v.array(v.string())),
+      effectiveFrom: v.optional(v.string()),
+      effectiveUntil: v.optional(v.string()),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       createdBy: v.string(),
@@ -305,6 +390,8 @@ export const getByRoute = query({
       activeDays: v.optional(v.array(v.number())),
       excludeFederalHolidays: v.optional(v.boolean()),
       customExclusions: v.optional(v.array(v.string())),
+      effectiveFrom: v.optional(v.string()),
+      effectiveUntil: v.optional(v.string()),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       lastRotation: v.optional(lastRotationValidator),
@@ -349,6 +436,8 @@ export const getByDriver = query({
       activeDays: v.optional(v.array(v.number())),
       excludeFederalHolidays: v.optional(v.boolean()),
       customExclusions: v.optional(v.array(v.string())),
+      effectiveFrom: v.optional(v.string()),
+      effectiveUntil: v.optional(v.string()),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       lastRotation: v.optional(lastRotationValidator),
@@ -388,6 +477,8 @@ export const getByCarrier = query({
       activeDays: v.optional(v.array(v.number())),
       excludeFederalHolidays: v.optional(v.boolean()),
       customExclusions: v.optional(v.array(v.string())),
+      effectiveFrom: v.optional(v.string()),
+      effectiveUntil: v.optional(v.string()),
       name: v.optional(v.string()),
       notes: v.optional(v.string()),
       lastRotation: v.optional(lastRotationValidator),
@@ -421,6 +512,9 @@ export const create = mutation({
     activeDays: v.optional(v.array(v.number())),
     excludeFederalHolidays: v.optional(v.boolean()),
     customExclusions: v.optional(v.array(v.string())),
+    // Effective range (service dates, inclusive). Omit for open-ended.
+    effectiveFrom: v.optional(v.string()),
+    effectiveUntil: v.optional(v.string()),
     name: v.optional(v.string()),
     notes: v.optional(v.string()),
     createdBy: v.string(),
@@ -428,6 +522,9 @@ export const create = mutation({
   returns: v.id('routeAssignments'),
   handler: async (ctx, args) => {
     const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const effectiveFrom = validateDate('Active from', args.effectiveFrom);
+    const effectiveUntil = validateDate('Active until', args.effectiveUntil);
+    assertEffectiveRange(effectiveFrom, effectiveUntil);
 
     // Validate that either driver or carrier is set (not both, not neither)
     if (!args.driverId && !args.carrierPartnershipId) {
@@ -472,6 +569,8 @@ export const create = mutation({
       hcr: args.hcr,
       tripNumber: args.tripNumber,
       activeDays: normalizeActiveDays(args.activeDays),
+      effectiveFrom,
+      effectiveUntil,
     });
 
     const now = Date.now();
@@ -489,6 +588,8 @@ export const create = mutation({
       customExclusions: validateExclusions(args.customExclusions)?.length
         ? validateExclusions(args.customExclusions)
         : undefined,
+      effectiveFrom,
+      effectiveUntil,
       name: args.name,
       notes: args.notes,
       createdBy: userId,
@@ -505,7 +606,10 @@ export const create = mutation({
       performedBy: userId,
       performedByName: userName,
       performedByEmail: userEmail,
-      description: `Created route assignment for HCR ${args.hcr}${args.tripNumber ? ` / Trip ${args.tripNumber}` : ''}`,
+      description:
+        `Created route assignment for HCR ${args.hcr}${args.tripNumber ? ` / Trip ${args.tripNumber}` : ''}` +
+        (effectiveFrom ? `, active from ${effectiveFrom}` : '') +
+        (effectiveUntil ? `, until ${effectiveUntil}` : ''),
     });
 
     return assignmentId;
@@ -529,8 +633,17 @@ export const update = mutation({
     name: v.optional(v.string()),
     notes: v.optional(v.string()),
     isActive: v.optional(v.boolean()),
-    // Driver rotation. When the driver/carrier changes, also move the
-    // upcoming loads this rule already auto-assigned onto the new one
+    // Effective range. null clears a bound; undefined leaves it alone.
+    effectiveFrom: v.optional(v.union(v.string(), v.null())),
+    effectiveUntil: v.optional(v.union(v.string(), v.null())),
+    // A planned change: instead of editing this rule in place, end it the
+    // day before `applyFrom` and create its replacement — this rule's
+    // fields plus the edit — starting on that date. Both stay visible,
+    // both are audited, and nothing the current rule placed is touched
+    // until the sweep reaches the new date.
+    applyFrom: v.optional(v.string()),
+    // Re-sync afterwards: release the loads this rule placed that no
+    // longer fit it and let auto-assignment place them again
     // (routeRotation.ts). Off by default: editing a rule never silently
     // re-dispatches anything.
     reassignFutureLoads: v.optional(v.boolean()),
@@ -539,7 +652,8 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
-    const { id, reassignFutureLoads, ...updates } = args;
+    const { id, reassignFutureLoads, applyFrom: applyFromRaw, ...updates } = args;
+    const applyFrom = validateDate('Apply from', applyFromRaw);
 
     const existing = await ctx.db.get(id);
     if (!existing) {
@@ -601,6 +715,26 @@ export const update = mutation({
       const cleaned = validateExclusions(updates.customExclusions);
       updateData.customExclusions = cleaned && cleaned.length > 0 ? cleaned : undefined;
     }
+    if (updates.effectiveFrom !== undefined) {
+      updateData.effectiveFrom = validateDate('Active from', updates.effectiveFrom);
+    }
+    if (updates.effectiveUntil !== undefined) {
+      updateData.effectiveUntil = validateDate('Active until', updates.effectiveUntil);
+    }
+    assertEffectiveRange(
+      ('effectiveFrom' in updateData ? updateData.effectiveFrom : existing.effectiveFrom) as string | undefined,
+      ('effectiveUntil' in updateData ? updateData.effectiveUntil : existing.effectiveUntil) as string | undefined,
+    );
+
+    // A planned change splits the rule instead of editing it.
+    if (applyFrom !== undefined && (existing.effectiveFrom === undefined || existing.effectiveFrom < applyFrom)) {
+      return await scheduleChange(ctx, existing, updateData, applyFrom, {
+        userId,
+        userName,
+        userEmail,
+        reassign: reassignFutureLoads === true,
+      });
+    }
 
     // `update` never had the duplicate check `create` did, so a collision
     // could always be produced by editing rather than creating. Now that
@@ -617,6 +751,12 @@ export const update = mutation({
         'activeDays' in updateData
           ? (updateData.activeDays as number[] | undefined)
           : existing.activeDays,
+      effectiveFrom: ('effectiveFrom' in updateData ? updateData.effectiveFrom : existing.effectiveFrom) as
+        | string
+        | undefined,
+      effectiveUntil: ('effectiveUntil' in updateData ? updateData.effectiveUntil : existing.effectiveUntil) as
+        | string
+        | undefined,
       excludeId: id,
     });
 
@@ -624,6 +764,9 @@ export const update = mutation({
 
     const changedFields = Object.keys(updateData).filter((key) => key !== 'updatedAt');
     if (changedFields.length > 0) {
+      const summary = await describeChanges(ctx, existing, updateData);
+      const before: Record<string, unknown> = {};
+      for (const key of changedFields) before[key] = (existing as Record<string, unknown>)[key];
       await logAudit(ctx, {
         organizationId: existing.workosOrgId,
         entityType: 'routeAssignment',
@@ -633,21 +776,20 @@ export const update = mutation({
         performedBy: userId,
         performedByName: userName,
         performedByEmail: userEmail,
-        description: `Updated route assignment for HCR ${existing.hcr}${existing.tripNumber ? ` / Trip ${existing.tripNumber}` : ''}`,
+        description:
+          `Updated rule for HCR ${existing.hcr}${existing.tripNumber ? ` / Trip ${existing.tripNumber}` : ''}` +
+          (summary ? ` — ${summary}` : ''),
         changedFields,
+        changesBefore: JSON.stringify(before),
         changesAfter: JSON.stringify(updateData),
       });
     }
 
-    // Rotation: only when the resource actually changed and the caller
-    // asked. The previous resource is captured from the pre-edit row so
-    // loads a person had already moved elsewhere are left alone.
-    const resourceChanged =
-      ('driverId' in updateData && updateData.driverId !== existing.driverId) ||
-      ('carrierPartnershipId' in updateData &&
-        updateData.carrierPartnershipId !== existing.carrierPartnershipId);
-    if (reassignFutureLoads && resourceChanged) {
-      await scheduleRotation(ctx, id, targetOf(existing), { userId, userName });
+    // Re-sync: when the caller asked. The assessment decides what is
+    // actually out of sync (resource, days, effective range), so a save
+    // that changed nothing placement-related is a no-op run.
+    if (reassignFutureLoads) {
+      await scheduleRotation(ctx, id, { userId, userName });
     }
 
     return id;
@@ -655,14 +797,20 @@ export const update = mutation({
 });
 
 /**
- * What a rotation would do right now, for the edit modal's confirmation.
- * Evaluated against the PROPOSED resource, before the edit is saved.
+ * What a re-sync would do right now, for the edit modal's confirmation.
+ * Evaluated against the PROPOSED edit, before it is saved: any placement
+ * field passed here overrides the stored one.
  */
 export const previewRotation = query({
   args: {
     id: v.id('routeAssignments'),
     driverId: v.optional(v.id('drivers')),
     carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
+    activeDays: v.optional(v.array(v.number())),
+    excludeFederalHolidays: v.optional(v.boolean()),
+    effectiveFrom: v.optional(v.string()),
+    effectiveUntil: v.optional(v.string()),
+    isActive: v.optional(v.boolean()),
   },
   returns: v.object({
     eligible: v.number(),
@@ -676,28 +824,33 @@ export const previewRotation = query({
       throw new ConvexError('Route assignment not found');
     }
 
-    const proposed = targetOf({
-      driverId: args.driverId,
-      carrierPartnershipId: args.carrierPartnershipId,
-    });
-    const target = proposed.driverId || proposed.carrierPartnershipId ? proposed : targetOf(rule);
-    // Previewing the current resource is the explicit re-sync case: no
-    // "previous" constraint, just "not already on target".
-    const previous =
-      target.driverId === rule.driverId && target.carrierPartnershipId === rule.carrierPartnershipId
-        ? undefined
-        : targetOf(rule);
+    const proposedTarget =
+      args.driverId || args.carrierPartnershipId
+        ? { driverId: args.driverId, carrierPartnershipId: args.carrierPartnershipId }
+        : { driverId: rule.driverId, carrierPartnershipId: rule.carrierPartnershipId };
+    const proposed = {
+      ...rule,
+      ...proposedTarget,
+      activeDays: args.activeDays !== undefined ? normalizeActiveDays(args.activeDays) : rule.activeDays,
+      excludeFederalHolidays: args.excludeFederalHolidays ?? rule.excludeFederalHolidays,
+      effectiveFrom: args.effectiveFrom ?? rule.effectiveFrom,
+      effectiveUntil: args.effectiveUntil ?? rule.effectiveUntil,
+      isActive: args.isActive ?? rule.isActive,
+    };
 
-    const assessed = await assessRuleLoads(ctx, rule, target, previous);
+    const assessed = await assessRuleLoads(ctx, proposed);
     const byReason = new Map<string, number>();
     let eligible = 0;
     for (const a of assessed) {
       if (a.verdict.eligible) eligible++;
-      else byReason.set(a.verdict.reason, (byReason.get(a.verdict.reason) ?? 0) + 1);
+      else if (a.verdict.reason !== 'IN_SYNC') {
+        byReason.set(a.verdict.reason, (byReason.get(a.verdict.reason) ?? 0) + 1);
+      }
     }
+    const held = [...byReason.values()].reduce((n, c) => n + c, 0);
     return {
       eligible,
-      held: assessed.length - eligible,
+      held,
       byReason: [...byReason.entries()]
         .map(([reason, count]) => ({ reason, count }))
         .sort((a, b) => b.count - a.count),
@@ -706,9 +859,10 @@ export const previewRotation = query({
 });
 
 /**
- * Re-sync: move every upcoming load this rule owns onto its current
- * resource. The retry path when a scheduled rotation was interrupted, and
- * the fix when the resource was changed earlier without one.
+ * Re-sync one rule: release the loads it placed that no longer fit it and
+ * let auto-assignment place them again. The retry path when a scheduled
+ * re-sync was interrupted, and the fix for a rule changed earlier without
+ * one.
  */
 export const rotateLoads = mutation({
   args: { id: v.id('routeAssignments') },
@@ -734,7 +888,7 @@ export const rotateLoads = mutation({
       description: `Requested re-sync of upcoming loads for HCR ${rule.hcr}${rule.tripNumber ? ` / Trip ${rule.tripNumber}` : ''}`,
     });
 
-    await scheduleRotation(ctx, args.id, undefined, { userId, userName });
+    await scheduleRotation(ctx, args.id, { userId, userName });
     return null;
   },
 });
@@ -744,9 +898,9 @@ export const rotateLoads = mutation({
  * banner: it appears when some rule owns upcoming loads that sit on a
  * previous resource, and disappears once a re-sync has moved them.
  *
- * `outOfSync` is what a re-sync would move. `blocked` is what it could not
- * (in motion, past, day-restricted) — ALREADY_ON_TARGET is not a block,
- * it is the normal state, so it is left out of the count.
+ * `outOfSync` is what a re-sync would release and re-place. `blocked` is
+ * what it will not touch (in motion, past) — IN_SYNC is not a block, it is
+ * the normal state, so it is left out of the count.
  */
 export const previewOrgRotation = query({
   args: { workosOrgId: v.string() },
@@ -770,7 +924,7 @@ export const previewOrgRotation = query({
     const rules = (
       await ctx.db
         .query('routeAssignments')
-        .withIndex('by_org_active', (q) => q.eq('workosOrgId', args.workosOrgId).eq('isActive', true))
+        .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
         .collect()
     ).filter((r) => r.driverId || r.carrierPartnershipId);
 
@@ -782,12 +936,12 @@ export const previewOrgRotation = query({
       blocked: number;
     }> = [];
     for (const rule of rules) {
-      const assessed = await assessRuleLoads(ctx, rule, targetOf(rule), undefined);
+      const assessed = await assessRuleLoads(ctx, rule);
       let outOfSync = 0;
       let blocked = 0;
       for (const a of assessed) {
         if (a.verdict.eligible) outOfSync++;
-        else if (a.verdict.reason !== 'ALREADY_ON_TARGET') blocked++;
+        else if (a.verdict.reason !== 'IN_SYNC') blocked++;
       }
       if (outOfSync > 0 || blocked > 0) {
         byRule.push({ routeId: rule._id, name: rule.name, hcr: rule.hcr, outOfSync, blocked });
@@ -830,6 +984,137 @@ export const rotateAllLoads = mutation({
       userName,
     });
     return null;
+  },
+});
+
+/**
+ * The planned-change split. The current rule keeps everything it has and
+ * gains an end date; a new rule — the current one plus the edit — starts
+ * the next day. Returns the new rule's id.
+ */
+async function scheduleChange(
+  ctx: MutationCtx,
+  existing: Doc<'routeAssignments'>,
+  updateData: Record<string, unknown>,
+  applyFrom: string,
+  actor: { userId: string; userName?: string; userEmail?: string; reassign: boolean },
+): Promise<Id<'routeAssignments'>> {
+  const now = Date.now();
+  const dayBefore = shiftServiceDate(applyFrom, -1);
+  if (existing.effectiveUntil !== undefined && existing.effectiveUntil < applyFrom) {
+    throw new ConvexError(`This rule already ends on ${existing.effectiveUntil}, before ${applyFrom}`);
+  }
+
+  // The replacement: current fields, then the edit, then the range.
+  const {
+    _id: _oldId,
+    _creationTime: _ct,
+    lastRotation: _lr,
+    createdBy: _cb,
+    createdAt: _ca,
+    updatedAt: _ua,
+    ...base
+  } = existing;
+  void _oldId; void _ct; void _lr; void _cb; void _ca; void _ua;
+  const { updatedAt: _u, ...edit } = updateData;
+  void _u;
+  const replacement = {
+    ...base,
+    ...edit,
+    effectiveFrom: applyFrom,
+    // The edit may set its own end; otherwise inherit the current rule's.
+    effectiveUntil:
+      'effectiveUntil' in edit
+        ? (edit.effectiveUntil as string | undefined)
+        : existing.effectiveUntil,
+    createdBy: actor.userId,
+    createdAt: now,
+    updatedAt: now,
+  } as Omit<Doc<'routeAssignments'>, '_id' | '_creationTime'>;
+  assertEffectiveRange(replacement.effectiveFrom, replacement.effectiveUntil);
+
+  // End the current rule first so the collision check sees the two as
+  // disjoint on the date axis.
+  await ctx.db.patch(existing._id, { effectiveUntil: dayBefore, updatedAt: now });
+  await assertNoDayCollision(ctx, {
+    workosOrgId: replacement.workosOrgId,
+    hcr: replacement.hcr,
+    tripNumber: replacement.tripNumber,
+    activeDays: replacement.activeDays,
+    effectiveFrom: replacement.effectiveFrom,
+    effectiveUntil: replacement.effectiveUntil,
+  });
+  const newId = await ctx.db.insert('routeAssignments', replacement);
+
+  const summary = await describeChanges(ctx, existing, edit);
+  const route = `HCR ${existing.hcr}${existing.tripNumber ? ` / Trip ${existing.tripNumber}` : ''}`;
+  await logAudit(ctx, {
+    organizationId: existing.workosOrgId,
+    entityType: 'routeAssignment',
+    entityId: existing._id,
+    entityName: existing.name,
+    action: 'updated',
+    performedBy: actor.userId,
+    performedByName: actor.userName,
+    performedByEmail: actor.userEmail,
+    description: `Scheduled change for ${route}: this rule now ends ${dayBefore}; from ${applyFrom} replaced by a new rule${summary ? ` — ${summary}` : ''}`,
+    changedFields: ['effectiveUntil'],
+    changesBefore: JSON.stringify({ effectiveUntil: existing.effectiveUntil }),
+    changesAfter: JSON.stringify({ effectiveUntil: dayBefore, replacedBy: newId }),
+  });
+  await logAudit(ctx, {
+    organizationId: existing.workosOrgId,
+    entityType: 'routeAssignment',
+    entityId: newId,
+    entityName: replacement.name,
+    action: 'created',
+    performedBy: actor.userId,
+    performedByName: actor.userName,
+    performedByEmail: actor.userEmail,
+    description: `Created by scheduled change for ${route}, active from ${applyFrom}${summary ? ` — ${summary}` : ''} (replaces the rule ending ${dayBefore})`,
+    changesAfter: JSON.stringify(edit),
+  });
+
+  // Loads the current rule placed on or after applyFrom are no longer
+  // covered by it; a re-sync releases them and the sweep re-places them
+  // under the replacement. With a one-day horizon this is usually nothing.
+  if (actor.reassign) {
+    await scheduleRotation(ctx, existing._id, { userId: actor.userId, userName: actor.userName });
+  }
+  return newId;
+}
+
+/**
+ * A rule's change history, from the audit trail — who changed what, when,
+ * in the words the edit was described with.
+ */
+export const history = query({
+  args: { id: v.id('routeAssignments'), limit: v.optional(v.number()) },
+  returns: v.array(
+    v.object({
+      at: v.number(),
+      by: v.string(),
+      action: v.string(),
+      description: v.string(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const rule = await ctx.db.get(args.id);
+    if (!rule || rule.workosOrgId !== callerOrgId) return [];
+    const rows = await ctx.db
+      .query('auditLog')
+      .withIndex('by_org_entity', (q) =>
+        q.eq('organizationId', callerOrgId).eq('entityType', 'routeAssignment').eq('entityId', args.id),
+      )
+      .order('desc')
+      .take(Math.min(args.limit ?? 20, 100));
+    return rows.map((r) => ({
+      at: r.timestamp,
+      by: r.performedByName ?? r.performedByEmail ?? r.performedBy,
+      action: r.action,
+      description: r.description ?? '',
+    }));
   },
 });
 

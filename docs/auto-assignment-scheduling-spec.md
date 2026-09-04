@@ -259,65 +259,58 @@ So "loads with this rule's id" is exactly "loads the robot placed under
 this rule that nobody has touched since." That invariant is what makes C.3
 safe. Index `by_auto_assigned_route_status`.
 
-## C.3 Rotation — `routeRotation.ts`
+## C.3 Re-sync — `routeRotation.ts`
 
-`routeAssignments.update` takes `reassignFutureLoads`. When it is set *and*
-the driver/carrier actually changed, a scheduled action re-points the rule's
-provenance-matched loads at the new resource. `rotateLoads` is the explicit
-re-sync (same action, no "previous" constraint) — the retry path and the fix
-for a rule whose resource was changed earlier without one.
+The first design moved loads from the old resource to the new one, load
+by load, with swap detection for the case where two rules trade drivers.
+Dispatch pointed out it was far more machinery than the problem needs.
+The model now:
 
-Per load, in this order, first hit wins and is reported:
+- **Assign the day before.** With `assignAheadDays = 1` and the on-create
+  trigger off (the settings page has a one-click preset), each rule holds
+  at most a day's worth of loads. A rule change is a one-load change.
+- **A rule change releases, then auto-assignment re-places.** A load the
+  rule placed that no longer matches it — different resource, a day the
+  rule no longer covers, outside its effective range, rule paused — is
+  returned to `Open` through `unassignLoadResources` **without** the
+  opt-out flag, and the ordinary assignment decision runs on it again.
+  New driver, a different rule that covers that day, or nobody: the load
+  stays `Open` in front of a dispatcher and the run records the decision's
+  own reason (`OVERLAP_CONFLICT`, `NO_MATCH`, `DAY_RESTRICTED`,
+  `BEYOND_HORIZON` when it is simply not due yet).
+- **Release first, across everything, then re-place.** That ordering is
+  why two rules trading drivers just works: by the time anything is
+  re-placed both drivers are free of the loads leaving them. No swap.
+- Loads in motion, past pickup, or hand-placed are never touched. Each
+  held or open load is named on the rule (`lastRotation.heldLoads`) and in
+  the logs, with the reason and, for an overlap, what it collided with.
 
-| Hold | Meaning |
-|---|---|
-| `IN_MOTION` | a leg is ACTIVE/COMPLETED, or a carrier assignment is IN_PROGRESS |
-| `NO_SERVICE_DATE` / `PAST` | not demonstrably upcoming |
-| `MOVED_BY_HUMAN` | no longer on the resource the rule had (belt and braces — provenance should already be gone) |
-| `ALREADY_ON_TARGET` | nothing to do |
-| `DAY_RESTRICTED` | the edit also changed the calendar and the rule no longer covers this date |
-| `TARGET_INACTIVE` / `OVERLAP_CONFLICT` / `ERROR` | from the assignment itself; overlap uses R9's `blockOnOverlap` — the robot still never double-books |
+`routeAssignments.update({ reassignFutureLoads })` runs it for one rule;
+`rotateAllLoads` for the org (`previewOrgRotation` drives the page banner).
 
-One load per mutation, so one overlap does not roll back the rest, and each
-transaction carries one pay-recalc cascade rather than forty. Leaving a
-carrier closes its AWARDED `loadCarrierAssignments` row first (neither
-assign helper touches that table, and it is what the carrier's app shows).
-The outcome lands on the rule as `lastRotation`, same shape of reasoning as
-`lastRun`. The edit modal previews the exact set (`previewRotation`,
-evaluated against the *proposed* resource) before anything is saved.
+## C.4 Planned rotations — effective dates, and the audit trail
 
-Reassigning A → B leaves the load `Assigned`, so the sweep's
-`ALREADY_ASSIGNED` guard protects the result; `autoAssignOptOut` is never
-involved.
+"I'm setting up next week; this week must keep running as is." Rules
+carry `effectiveFrom` / `effectiveUntil` on the same service-date axis as
+the calendar: a rule claims a load only when `firstStopDate` is inside its
+range, and the collision guard lets two rules share an HCR + Trip + days
+when their ranges are disjoint.
 
-**Bulk.** A rotation usually touches several rules, and doing the re-sync
-one rule at a time was the first thing dispatch asked to change.
-`rotateAllLoads` → `runOrgRotation` walks every active rule with a
-resource, **sequentially** — two rules that now name the same driver must
-see each other's moves when the overlap pre-flight runs — and records one
-summary on `autoAssignmentSettings.lastBulkRotation`. `previewOrgRotation`
-answers "is anything out of sync" and drives the page banner: it shows the
-count and a *Re-sync all* button while loads sit on a previous assignee,
-and for a day afterwards shows what the run moved and what it held. The
-list gets a *Loads* column with the same per rule. Each rule also logs one
-`[rotation]` line, so the outcome is in the Convex logs as well as the app.
+`routeAssignments.update({ applyFrom })` is the planned change: the current
+rule is left exactly as it is and gains `effectiveUntil = applyFrom − 1`;
+a replacement — the current rule plus the edit — is created with
+`effectiveFrom = applyFrom`. Both are visible in the list (the outgoing one
+shows *Until …* and goes through the same expiring/expired chips as a
+template; the incoming one shows *From …*), and both are audited.
 
-**Swaps.** The first production re-sync moved nothing: 21 of 23 holds were
-`OVERLAP_CONFLICT`, every one against the same driver, and the loads
-blocking him were the ones the rotation wanted to move *off* him under
-other rules. A rotation is very often an exchange, and when the two loads
-overlap in time neither can move first. After the per-rule pass,
-`runOrgRotation` builds the conflict graph from the held loads: a group
-whose conflicts are **all** themselves waiting to move is exchanged in one
-transaction (`swapLoads`), each member's overlap pre-flight ignoring the
-other members (`assignDriverInternal.overlapIgnoreLoadIds`), and any
-failure throws so the whole exchange rolls back — a half-done swap can
-never leave a double-booking behind. A conflict with a load that is *not*
-moving (hand-placed, in motion) keeps the group held: that one is a
-dispatcher's call, and every held load now names what it collided with.
+Every edit's audit row now says what changed in words, before and after
+(`Driver: Dana Rae → Sam Rae · Days: Mon/Wed/Fri → every day`), and
+`routeAssignments.history` reads those rows back for the rule's edit
+modal. That is the "what did I change" trail.
 
 Tests: `lib/assignHorizon.test.ts`, `autoAssignment.horizon.test.ts`,
-`routeRotation.test.ts`.
+`routeRotation.test.ts`, `routeAssignments.effectiveDates.test.ts`,
+`migrations/018_backfill_auto_assign_provenance.test.ts`.
 
 ---
 

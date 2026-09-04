@@ -54,6 +54,19 @@ export function routeDaySet(route: { activeDays?: number[] }): number[] {
     : ALL_WEEKDAYS;
 }
 
+/** Could two rules ever claim the same service date? Open-ended ranges
+ *  overlap everything after (or before) their bound. */
+export function effectiveRangesOverlap(
+  a: { effectiveFrom?: string; effectiveUntil?: string },
+  b: { effectiveFrom?: string; effectiveUntil?: string },
+): boolean {
+  const aFrom = a.effectiveFrom ?? '0000-00-00';
+  const aUntil = a.effectiveUntil ?? '9999-99-99';
+  const bFrom = b.effectiveFrom ?? '0000-00-00';
+  const bUntil = b.effectiveUntil ?? '9999-99-99';
+  return aFrom <= bUntil && bFrom <= aUntil;
+}
+
 /** Days two routes would both claim. Empty means they never compete. */
 export function overlappingDays(
   a: { activeDays?: number[] },
@@ -98,7 +111,9 @@ export function routeServesDate(
   const restricted =
     (route.activeDays !== undefined && route.activeDays.length > 0) ||
     route.excludeFederalHolidays === true ||
-    (route.customExclusions !== undefined && route.customExclusions.length > 0);
+    (route.customExclusions !== undefined && route.customExclusions.length > 0) ||
+    route.effectiveFrom !== undefined ||
+    route.effectiveUntil !== undefined;
 
   if (!restricted) return { serves: true };
 
@@ -106,6 +121,16 @@ export function routeServesDate(
   // Guessing puts a Mon/Wed/Fri driver on an undated load; declining leaves
   // it Open in front of a dispatcher, which is the safer failure.
   if (!serviceDate) return { serves: false, reason: 'NO_SERVICE_DATE' };
+
+  // Effective range — a planned rotation: the outgoing rule stops
+  // claiming loads from its end date, the incoming one starts on its
+  // start date. Same YYYY-MM-DD string comparison as everything else here.
+  if (route.effectiveFrom !== undefined && serviceDate < route.effectiveFrom) {
+    return { serves: false, reason: 'CALENDAR' };
+  }
+  if (route.effectiveUntil !== undefined && serviceDate > route.effectiveUntil) {
+    return { serves: false, reason: 'CALENDAR' };
+  }
 
   if (route.activeDays !== undefined && route.activeDays.length > 0) {
     const dayOfWeek = new Date(`${serviceDate}T00:00:00.000Z`).getUTCDay();

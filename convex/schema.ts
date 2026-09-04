@@ -1156,6 +1156,15 @@ export default defineSchema({
     excludeFederalHolidays: v.optional(v.boolean()),
     customExclusions: v.optional(v.array(v.string())), // ["2026-12-25"]
 
+    // Effective range, on the same service-date axis as the calendar:
+    // the rule claims a load only when firstStopDate falls inside it.
+    // This is how a rotation is planned ahead — the current rule ends on
+    // Sunday, its replacement starts Monday, both exist and both are
+    // visible — without touching anything the current rule already
+    // placed. Absent = open-ended.
+    effectiveFrom: v.optional(v.string()), // YYYY-MM-DD, inclusive
+    effectiveUntil: v.optional(v.string()), // YYYY-MM-DD, inclusive
+
     // Metadata
     name: v.optional(v.string()), // Friendly name like "John's Amazon Route"
     notes: v.optional(v.string()),
