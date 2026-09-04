@@ -103,7 +103,7 @@ describe('018 — backfill auto-assignment provenance', () => {
     const w = await world();
 
     const totals = await w.t.action(migration.startBackfill, {});
-    expect(totals).toMatchObject({ scanned: 2, stamped: 1, skippedHuman: 1 });
+    expect(totals).toMatchObject({ scanned: 2, stamped: 1, skippedHuman: 1, noRuleLoads: [] });
 
     const robot = await w.t.run((ctx) => ctx.db.get(w.robot));
     expect(robot?.autoAssignedRouteId).toBe(w.routeId);
@@ -142,5 +142,17 @@ describe('018 — backfill auto-assignment provenance', () => {
 
     const preview = await asUser.query(api.routeAssignments.previewOrgRotation, { workosOrgId: ORG });
     expect(preview.outOfSync).toBe(1);
+  });
+
+  it('lists robot-assigned loads no rule claims, with the reason', async () => {
+    const w = await world();
+    // Pause the only rule: the robot's load is now unclaimed.
+    await w.t.run((ctx) => ctx.db.patch(w.routeId, { isActive: false }));
+
+    const totals = await w.t.action(migration.startBackfill, { dryRun: true });
+    expect(totals.skippedNoRule).toBe(1);
+    expect(totals.noRuleLoads).toEqual([
+      { orderNumber: 'ORD-R', hcr: HCR, trip: undefined, serviceDate: '2026-10-05', reason: 'NO_RULE' },
+    ]);
   });
 });

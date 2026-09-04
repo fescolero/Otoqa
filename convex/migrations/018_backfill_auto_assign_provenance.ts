@@ -68,6 +68,23 @@ const countsValidator = v.object({
   skippedNoRule: v.number(),
 });
 
+/**
+ * A robot-assigned load no active rule claims today. These are the ones a
+ * re-sync cannot reach, so they are listed rather than just counted:
+ *   NO_HCR      — the load carries no HCR facet
+ *   NO_RULE     — no active rule for that HCR (or HCR + trip)
+ *   CALENDAR    — a rule exists but its service days decline this date
+ *   NO_DATE     — a day-restricted rule exists and the load has no date
+ */
+const noRuleLoadValidator = v.object({
+  orderNumber: v.string(),
+  hcr: v.optional(v.string()),
+  trip: v.optional(v.string()),
+  serviceDate: v.optional(v.string()),
+  reason: v.string(),
+});
+const MAX_LISTED = 200;
+
 export const backfillBatch = internalMutation({
   args: {
     cursor: v.optional(v.string()),
@@ -76,6 +93,7 @@ export const backfillBatch = internalMutation({
   },
   returns: v.object({
     ...countsValidator.fields,
+    noRuleLoads: v.array(noRuleLoadValidator),
     isDone: v.boolean(),
     nextCursor: v.union(v.string(), v.null()),
   }),
@@ -90,6 +108,13 @@ export const backfillBatch = internalMutation({
           .paginate({ cursor: args.cursor ?? null, numItems: BATCH_SIZE });
 
     const counts = { scanned: 0, stamped: 0, skippedHuman: 0, skippedNoAudit: 0, skippedNoRule: 0 };
+    const noRuleLoads: Array<{
+      orderNumber: string;
+      hcr?: string;
+      trip?: string;
+      serviceDate?: string;
+      reason: string;
+    }> = [];
 
     for (const load of result.page) {
       if (load.status !== 'Assigned') continue;
@@ -128,6 +153,7 @@ export const backfillBatch = internalMutation({
       const facets = await getLoadFacets(ctx, load._id);
       if (!facets.hcr) {
         counts.skippedNoRule++;
+        noRuleLoads.push({ orderNumber: load.orderNumber, serviceDate: load.firstStopDate, reason: 'NO_HCR' });
         continue;
       }
       const match = await matchRouteAssignment(ctx, {
@@ -138,6 +164,18 @@ export const backfillBatch = internalMutation({
       });
       if (!match.route) {
         counts.skippedNoRule++;
+        noRuleLoads.push({
+          orderNumber: load.orderNumber,
+          hcr: facets.hcr,
+          trip: facets.trip,
+          serviceDate: load.firstStopDate,
+          reason:
+            match.declinedBecause === 'CALENDAR'
+              ? 'CALENDAR'
+              : match.declinedBecause === 'NO_SERVICE_DATE'
+                ? 'NO_DATE'
+                : 'NO_RULE',
+        });
         continue;
       }
 
@@ -152,6 +190,7 @@ export const backfillBatch = internalMutation({
 
     return {
       ...counts,
+      noRuleLoads,
       isDone: result.isDone,
       nextCursor: result.isDone ? null : result.continueCursor,
     };
@@ -160,10 +199,17 @@ export const backfillBatch = internalMutation({
 
 export const startBackfill = internalAction({
   args: { workosOrgId: v.optional(v.string()), dryRun: v.optional(v.boolean()) },
-  returns: countsValidator,
+  returns: v.object({ ...countsValidator.fields, noRuleLoads: v.array(noRuleLoadValidator) }),
   handler: async (ctx, args) => {
     let cursor: string | null = null;
     const totals = { scanned: 0, stamped: 0, skippedHuman: 0, skippedNoAudit: 0, skippedNoRule: 0 };
+    const noRuleLoads: Array<{
+      orderNumber: string;
+      hcr?: string;
+      trip?: string;
+      serviceDate?: string;
+      reason: string;
+    }> = [];
     let iterations = 0;
     const MAX_ITERATIONS = 20_000;
 
@@ -180,6 +226,9 @@ export const startBackfill = internalAction({
       totals.skippedHuman += batch.skippedHuman;
       totals.skippedNoAudit += batch.skippedNoAudit;
       totals.skippedNoRule += batch.skippedNoRule;
+      for (const l of batch.noRuleLoads) {
+        if (noRuleLoads.length < MAX_LISTED) noRuleLoads.push(l);
+      }
       if (batch.isDone) break;
       cursor = batch.nextCursor;
     }
@@ -188,6 +237,19 @@ export const startBackfill = internalAction({
       `[backfillAutoAssignProvenance]${args.dryRun ? ' DRY RUN' : ''} scanned=${totals.scanned} stamped=${totals.stamped} ` +
         `skippedHuman=${totals.skippedHuman} skippedNoAudit=${totals.skippedNoAudit} skippedNoRule=${totals.skippedNoRule}`,
     );
-    return totals;
+    // One line per unclaimed load so the list is readable in the CLI and
+    // in the Convex logs, sorted by HCR / trip / date.
+    noRuleLoads.sort((a, b) =>
+      `${a.hcr ?? ''}|${a.trip ?? ''}|${a.serviceDate ?? ''}`.localeCompare(
+        `${b.hcr ?? ''}|${b.trip ?? ''}|${b.serviceDate ?? ''}`,
+      ),
+    );
+    for (const l of noRuleLoads) {
+      console.log(
+        `[backfillAutoAssignProvenance] no rule: ${l.orderNumber} HCR ${l.hcr ?? '—'}` +
+          `${l.trip ? ` / Trip ${l.trip}` : ''} on ${l.serviceDate ?? 'no date'} — ${l.reason}`,
+      );
+    }
+    return { ...totals, noRuleLoads };
   },
 });
