@@ -46,6 +46,15 @@ export interface AssignedLoad {
   legLoadedMiles: number;
   carrierRate?: number;
   createdAt: number;
+  /** Leg schedule (ms epoch) — present when the dispatch leg carries it. */
+  scheduledStartMs?: number;
+  scheduledEndMs?: number;
+  /** Set when the load reached Completed. */
+  deliveredAt?: number;
+  /** Equipment on the dispatch leg — null when the leg has none, absent
+   *  on fallback paths that found the load without a leg. */
+  truck?: { unitId: string; make?: string; model?: string } | null;
+  trailer?: { unitId: string; size?: string; bodyType?: string } | null;
 }
 
 interface AssignedLoadsTableProps {

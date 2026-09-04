@@ -2431,6 +2431,10 @@ async function enrichLoadFromLeg(
     legLoadedMiles: number;
     driverId?: Id<'drivers'>;
     carrierPartnershipId?: Id<'carrierPartnerships'>;
+    truckId?: Id<'trucks'>;
+    trailerId?: Id<'trailers'>;
+    scheduledStartMs?: number;
+    scheduledEndMs?: number;
   },
 ) {
   const load = await ctx.db.get(leg.loadId);
@@ -2439,6 +2443,13 @@ async function enrichLoadFromLeg(
   // HCR/Trip from facet tags. Origin/destination/stopsCount from
   // denormalized columns (syncFirstStopDate keeps them fresh).
   const facets = await getLoadFacets(ctx, leg.loadId);
+
+  // Equipment on the leg — two point reads, only for legs that carry it.
+  // Feeds the driver Overview "Now" card (Truck / Trailer rows).
+  const [truck, trailer] = await Promise.all([
+    leg.truckId ? ctx.db.get(leg.truckId) : null,
+    leg.trailerId ? ctx.db.get(leg.trailerId) : null,
+  ]);
 
   return {
     _id: load._id as Id<'loadInformation'>,
@@ -2460,6 +2471,19 @@ async function enrichLoadFromLeg(
     parsedTripNumber: facets.trip,
     legStatus: leg.status,
     legLoadedMiles: leg.legLoadedMiles,
+    scheduledStartMs: leg.scheduledStartMs,
+    scheduledEndMs: leg.scheduledEndMs,
+    deliveredAt: load.deliveredAt as number | undefined,
+    truck: truck
+      ? { unitId: truck.unitId as string, make: truck.make as string | undefined, model: truck.model as string | undefined }
+      : null,
+    trailer: trailer
+      ? {
+          unitId: trailer.unitId as string,
+          size: trailer.size as string | undefined,
+          bodyType: trailer.bodyType as string | undefined,
+        }
+      : null,
     createdAt: load._creationTime as number,
   };
 }
@@ -2492,6 +2516,7 @@ async function enrichLoadDirectly(ctx: any, load: any) {
     parsedTripNumber: facets.trip,
     legStatus: 'PENDING',
     legLoadedMiles: load.effectiveMiles ?? 0,
+    deliveredAt: load.deliveredAt as number | undefined,
     createdAt: load._creationTime as number,
   };
 }
