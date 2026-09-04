@@ -281,7 +281,7 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
       ? [{
           key: 'shared', label: 'Shared', width: '110px',
           render: (r: DocumentRowModel) =>
-            r.ownDoc ? (
+            r.ownDoc && r.ownDoc.shared !== undefined ? (
               r.ownDoc.shared ? <Chip status="assigned" label="Shared" /> : <Chip status="inactive" label="Withheld" />
             ) : (
               <span className="text-[12px] text-[var(--text-tertiary)]">—</span>

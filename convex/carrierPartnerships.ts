@@ -613,6 +613,8 @@ export const create = mutation({
       createdBy: userId,
       linkedAt,
     });
+    // Stamp the missing-document summary so the list badge never guesses (spec §6).
+    await recomputePartnershipDocuments(ctx, partnershipId);
 
     return {
       partnershipId,
@@ -1168,6 +1170,9 @@ export const updateStatus = mutation({
     }
 
     await ctx.db.patch(args.partnershipId, patchData);
+    // Status decides whether the carrier's shared documents flow here
+    // (spec §6.2) — resummarize after every change.
+    await recomputePartnershipDocuments(ctx, args.partnershipId);
 
     return {
       success: true,
@@ -1374,6 +1379,8 @@ export const accept = mutation({
       status: 'ACTIVE',
       updatedAt: Date.now(),
     });
+    // Accepted → the carrier's shared documents now flow (spec §6.2).
+    await recomputePartnershipDocuments(ctx, args.partnershipId);
 
     return { success: true };
   },
@@ -1405,6 +1412,7 @@ export const decline = mutation({
       status: 'TERMINATED',
       updatedAt: Date.now(),
     });
+    await recomputePartnershipDocuments(ctx, args.partnershipId); // sharing ends with the link
 
     return { success: true };
   },
@@ -1639,6 +1647,7 @@ export const bulkTerminate = mutation({
           status: 'TERMINATED',
           updatedAt: now,
         });
+        await recomputePartnershipDocuments(ctx, partnershipId); // sharing ends with the link (spec §6.2)
 
         // === CASCADE: Soft-delete carrier organization and drivers ===
         let driversDeactivated = 0;
@@ -1977,6 +1986,7 @@ export const bulkReactivate = mutation({
           status: 'ACTIVE',
           updatedAt: now,
         });
+        await recomputePartnershipDocuments(ctx, partnershipId); // sharing resumes with the link (spec §6.2)
 
         // Log to audit
         await logAudit(ctx, {

@@ -49,6 +49,19 @@ export async function partnershipsLinkedToOrg(
   return out;
 }
 
+/**
+ * Does this partnership carry the carrier's shared documents to the broker
+ * (documents-storage-spec.md §6.2)? Only a link the carrier has accepted
+ * and that is still in force: ACTIVE, or SUSPENDED (paused, not ended).
+ * INVITED / PENDING links are not yet consented to; TERMINATED links are
+ * over — a carrier ends sharing by ending the partnership.
+ */
+export function partnershipSharesDocuments(
+  p: Pick<Doc<'carrierPartnerships'>, 'status' | 'carrierOrgId'>,
+): boolean {
+  return !!p.carrierOrgId && (p.status === 'ACTIVE' || p.status === 'SUSPENDED');
+}
+
 /** Offboarding window (documents-storage-spec.md §7): started, not yet purged. */
 export function isOffboarding(org: Pick<Doc<'organizations'>, 'offboardingStartedAt' | 'purgedAt'> | null | undefined): boolean {
   return !!org?.offboardingStartedAt && !org.purgedAt;

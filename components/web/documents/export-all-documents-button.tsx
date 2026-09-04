@@ -8,10 +8,15 @@
  * offboarding.
  *
  * Runs entirely in the browser: lists documents (settings:manage), fetches
- * each file through a short-lived signed GET, and packs them into a zip
- * with fflate (stored, level 0 — PDFs and JPEGs are already compressed).
- * A manifest.csv is included. Needs the bucket CORS rule to
- * allow GET from the web origin (it does; spec §1).
+ * each file through a short-lived export-scoped signed GET, and packs
+ * them into a zip with fflate (stored, level 0 — PDFs and JPEGs are
+ * already compressed). A manifest.csv is included. Needs the bucket CORS
+ * rule to allow GET from the web origin (it does; spec §1).
+ *
+ * Memory: the whole zip is built in memory (fflate 0.4 has no streaming
+ * writer), so the export is cut into parts of at most PART_LIMIT bytes —
+ * each part is downloaded and released before the next is filled. A
+ * small org gets one file; a large one gets `-part1`, `-part2`, ….
  */
 
 import * as React from 'react';
@@ -29,6 +34,11 @@ interface Progress {
   failed: number;
 }
 
+/** Max bytes held for one zip part (the browser holds ~2× this at zip time). */
+const PART_LIMIT = 200 * 1024 * 1024;
+
+const MANIFEST_HEADER = ['path', 'kind', 'entity', 'entityName', 'type', 'status', 'issueDate', 'expirationDate', 'uploadedAt'];
+
 function safe(part: string | undefined, fallback = 'unknown'): string {
   return (part || fallback).replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80);
 }
@@ -38,9 +48,19 @@ function csvCell(v: unknown): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+function triggerDownload(blob: Blob, name: string) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+}
+
 export function ExportAllDocumentsButton({ orgLabel }: { orgLabel?: string }) {
   const convex = useConvex();
-  const entityDownload = useAction(api.organizationDocuments.getDownloadUrl);
+  const entityDownload = useAction(api.organizationDocuments.getExportDownloadUrl);
   const loadDownload = useAction(api.s3Upload.getDocumentDownloadUrl);
   const [progress, setProgress] = React.useState<Progress | null>(null);
 
@@ -60,27 +80,43 @@ export function ExportAllDocumentsButton({ orgLabel }: { orgLabel?: string }) {
       }
       setProgress({ done: 0, total, failed: 0 });
 
-      const files: Record<string, Uint8Array> = {};
-      const manifest: string[][] = [
-        ['path', 'kind', 'entity', 'entityName', 'type', 'status', 'issueDate', 'expirationDate', 'uploadedAt'],
-      ];
+      let files: Record<string, Uint8Array> = {};
+      let manifest: string[][] = [MANIFEST_HEADER];
+      let partBytes = 0;
+      let part = 0;
       let done = 0;
       let failed = 0;
+      const stamp = new Date().toISOString().slice(0, 10);
 
-      const add = async (path: string, url: string) => {
+      const flush = (last: boolean) => {
+        if (Object.keys(files).length === 0) return;
+        part++;
+        files['manifest.csv'] = strToU8(manifest.map((r) => r.map(csvCell).join(',')).join('\n'));
+        const bytes = zipSync(files, { level: 0 });
+        const suffix = part === 1 && last ? '' : `-part${part}`;
+        triggerDownload(new Blob([bytes as BlobPart], { type: 'application/zip' }), `${safe(orgLabel, 'otoqa')}-documents-${stamp}${suffix}.zip`);
+        files = {};
+        manifest = [MANIFEST_HEADER];
+        partBytes = 0;
+      };
+
+      const add = async (path: string, url: string, row: string[]) => {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`fetch ${res.status}`);
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        if (partBytes > 0 && partBytes + bytes.byteLength > PART_LIMIT) flush(false);
         let unique = path;
         for (let i = 2; files[unique]; i++) unique = path.replace(/(\.[^.]*)?$/, `-${i}$1`);
-        files[unique] = new Uint8Array(await res.arrayBuffer());
+        files[unique] = bytes;
+        partBytes += bytes.byteLength;
+        manifest.push([unique, ...row.slice(1)]);
       };
 
       for (const d of entityDocs) {
         const path = `${d.entity}/${safe(d.entityName)}/${d.status === 'archived' ? 'archived/' : ''}${safe(d.typeKey)}-${safe(d.fileName, 'file')}`;
         try {
           const { downloadUrl } = await entityDownload({ docId: d.docId });
-          await add(path, downloadUrl);
-          manifest.push([path, 'entity', d.entity, d.entityName, d.typeKey, d.status, d.issueDate ?? '', d.expirationDate ?? '', new Date(d.uploadedAt).toISOString()]);
+          await add(path, downloadUrl, [path, 'entity', d.entity, d.entityName, d.typeKey, d.status, d.issueDate ?? '', d.expirationDate ?? '', new Date(d.uploadedAt).toISOString()]);
         } catch (e) {
           failed++;
           console.warn('[export] skipped', path, e);
@@ -93,8 +129,7 @@ export function ExportAllDocumentsButton({ orgLabel }: { orgLabel?: string }) {
         try {
           const { url } = await loadDownload({ documentId: d.documentId });
           if (!url) throw new Error('no url');
-          await add(path, url);
-          manifest.push([path, 'load', 'load', d.orderNumber ?? d.loadId, d.type, 'active', '', '', new Date(d.uploadedAt).toISOString()]);
+          await add(path, url, [path, 'load', 'load', d.orderNumber ?? d.loadId, d.type, 'active', '', '', new Date(d.uploadedAt).toISOString()]);
         } catch (e) {
           failed++;
           console.warn('[export] skipped', path, e);
@@ -103,18 +138,13 @@ export function ExportAllDocumentsButton({ orgLabel }: { orgLabel?: string }) {
         setProgress({ done, total, failed });
       }
 
-      files['manifest.csv'] = strToU8(manifest.map((r) => r.map(csvCell).join(',')).join('\n'));
-      const bytes = zipSync(files, { level: 0 });
-
-      const blob = new Blob([bytes as BlobPart], { type: 'application/zip' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `${safe(orgLabel, 'otoqa')}-documents-${new Date().toISOString().slice(0, 10)}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
-      toast.success(failed ? `Exported ${done - failed} of ${total} documents (${failed} could not be fetched)` : `Exported ${total} documents`);
+      flush(true);
+      const parts = part > 1 ? ` in ${part} zip files` : '';
+      toast.success(
+        failed
+          ? `Exported ${done - failed} of ${total} documents${parts} (${failed} could not be fetched)`
+          : `Exported ${total} documents${parts}`,
+      );
     } catch (e) {
       toast.error(convexErrorMessage(e) ?? (e instanceof Error ? e.message : 'Export failed'));
     } finally {

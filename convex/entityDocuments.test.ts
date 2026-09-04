@@ -11,7 +11,7 @@ import { api, internal } from './_generated/api';
 import { permissionsForLevel } from '../lib/team-rbac';
 import type { MutationCtx } from './_generated/server';
 import type { Id } from './_generated/dataModel';
-import { PENDING_TTL_MS } from './entityDocuments';
+import { PENDING_TTL_MS, recomputePartnershipDocuments } from './entityDocuments';
 
 const ORG_A = 'org_workos_docs_A';
 const ORG_B = 'org_workos_docs_B';
@@ -1002,6 +1002,73 @@ describe('second-review follow-ups', () => {
 
     p = await t.run((ctx) => ctx.db.get(partnershipId));
     expect(p?.missingDocTypeKeys).toContain('coi'); // no longer satisfied once the carrier is gone
+  });
+
+  it('sharing stops with the partnership: a TERMINATED link hides the shared row and revokes read access', async () => {
+    const t = setup();
+    const { partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const sharedDocId = await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    const asBroker = t.withIdentity(BROKER_USER as never);
+    expect((await asBroker.query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId })).shared).toHaveLength(1);
+    expect(await asBroker.query(internal.entityDocuments.getForAccess, { docId: sharedDocId })).not.toBeNull();
+
+    await t.run((ctx) => ctx.db.patch(partnershipId, { status: 'TERMINATED' }));
+    await t.run((ctx) => recomputePartnershipDocuments(ctx, partnershipId));
+
+    const after = await asBroker.query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(after.shared).toHaveLength(0);
+    expect(after.linkedCarrierName).toBeUndefined();
+    expect(await asBroker.query(internal.entityDocuments.getForAccess, { docId: sharedDocId })).toBeNull();
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.missingDocTypeKeys).toContain('coi');
+
+    // A paused link still shares.
+    await t.run((ctx) => ctx.db.patch(partnershipId, { status: 'SUSPENDED' }));
+    expect((await asBroker.query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId })).shared).toHaveLength(1);
+  });
+
+  it('a custom company type is never shareable: no toggle, setShared refuses, brokers never see it', async () => {
+    const t = setup();
+    const { partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const asCarrier = t.withIdentity(CARRIER_ADMIN as never);
+    await asCarrier.mutation(api.documentTypes.createCustomType, {
+      entity: 'organization',
+      key: 'safety_rating',
+      name: 'Safety rating',
+      expires: false,
+      issueDateRequired: false,
+      uploadRequired: true,
+      sharedByDefault: true, // ignored
+    });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const docId = await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'safety_rating', {});
+
+    const own = await asCarrier.query(api.entityDocuments.listForEntity, { entity: 'organization', entityId: CARRIER_ORG });
+    expect(own.documents.find((d) => d._id === docId)?.shared).toBeUndefined();
+    await expect(asCarrier.mutation(api.entityDocuments.setShared, { docId, shared: true })).rejects.toThrow(/standard company documents/);
+    const broker = await t.withIdentity(BROKER_USER as never).query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(broker.shared.map((s) => s.typeKey)).not.toContain('safety_rating');
+  });
+
+  it('recomputeSummariesForOrg pages through a large fleet by scheduling itself', async () => {
+    const t = setup();
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 205; i++) await insertDriver(ctx);
+    });
+    const first = await t.mutation(internal.entityDocuments.recomputeSummariesForOrg, { orgId: ORG_A, entity: 'driver' });
+    expect(first).toBe(100);
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const drivers = await t.run((ctx) => ctx.db.query('drivers').collect());
+    expect(drivers.filter((d) => d.missingDocTypeKeys !== undefined)).toHaveLength(drivers.length);
+  });
+
+  it('getForExport needs settings:manage and only serves the caller org\'s own files', async () => {
+    const t = setup();
+    await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const docId = await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    expect(await t.withIdentity(CARRIER_ADMIN as never).query(internal.entityDocuments.getForExport, { docId })).toMatchObject({ fileName: 'org_coi.pdf' });
+    // The linked broker can read it via sharing, but never export it.
+    await expect(t.withIdentity(BROKER_USER as never).query(internal.entityDocuments.getForExport, { docId })).rejects.toThrow(/settings:manage/);
+    await expect(t.query(internal.entityDocuments.getForExport, { docId })).rejects.toThrow();
   });
 
   it('startOffboarding is idempotent: a repeat call neither re-notifies nor re-audits', async () => {

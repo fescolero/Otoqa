@@ -353,19 +353,26 @@ The Documents tab badge and the attention item counts become live.
 
 ### 6.2 Linking shares top-down
 
-- When a partnership has `carrierOrgId` set, the carrier org's
-  `organization` documents whose type is `sharedByDefault` and whose
-  `shared` flag is not false appear on the broker's partnership Documents
-  tab as read-only rows with source **Carrier**.
+- When a partnership has `carrierOrgId` set AND its status is `ACTIVE` or
+  `SUSPENDED` (`partnershipSharesDocuments` in `convex/lib/orgLookup.ts`
+  — an `INVITED`/`PENDING` link is not yet consented to, a `TERMINATED`
+  one is over), the carrier org's `organization` documents whose type is
+  `sharedByDefault` and whose `shared` flag is not false appear on the
+  broker's partnership Documents tab as read-only rows with source
+  **Carrier**. Only the system company types share — they are the ones
+  with a `partnerTypeKey` counterpart on the broker side; a custom
+  company type has no sharing toggle at all.
 - The carrier controls sharing on its Settings › Documents page, per
   document. Defaults are shared for compliance types.
 - Carrier updates propagate automatically; the broker sees the carrier's
   current active row.
 - The broker can always add its own record alongside. The tab shows both
   sources.
-- Unlinking removes the carrier-shared rows from the broker's view. The
-  broker's own records stay. Whatever the broker had relied on from the
-  carrier reverts to the broker's own status immediately.
+- Unlinking or terminating the partnership removes the carrier-shared
+  rows from the broker's view (every status change resummarizes the
+  partnership). The broker's own records stay. Whatever the broker had
+  relied on from the carrier reverts to the broker's own status
+  immediately.
 
 ### 6.3 Effective status and mirrors
 
@@ -399,7 +406,9 @@ The Documents tab badge and the attention item counts become live.
   flow rather than assumed.
 - At `purgeAt` a cron (via `job()`) deletes the org's `orgs/{orgId}/`
   prefix and its `entityDocuments` and `loadDocuments` rows. This is the
-  only automated physical deletion. `convex/platform/support.ts` has no
+  only automated physical deletion. Each org is purged independently: one
+  org's storage error is logged and retried next run, never blocking the
+  others. `convex/platform/support.ts` has no
   storage purge today; this adds one.
 
 ---

@@ -11,9 +11,11 @@
  * anything else.
  */
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { action } from './_generated/server';
+import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
+import { presignGet } from './s3Upload';
 import {
   cancelEntityUpload,
   finalizeEntityUpload,
@@ -63,4 +65,22 @@ export const getDownloadUrl = action({
   returns: v.object({ url: v.string(), downloadUrl: v.string(), expiresAt: v.number() }),
   handler: async (ctx, args): Promise<{ url: string; downloadUrl: string; expiresAt: number }> =>
     signedDownloadUrl(ctx, args.docId),
+});
+
+/**
+ * Signed GET for the org-wide export (ExportAllDocumentsButton): any
+ * document the caller's org owns, under settings:manage alone — the
+ * per-entity view permissions are not required to export the whole file.
+ */
+export const getExportDownloadUrl = action({
+  args: { docId: v.id('entityDocuments') },
+  returns: v.object({ downloadUrl: v.string(), expiresAt: v.number() }),
+  handler: async (ctx, args): Promise<{ downloadUrl: string; expiresAt: number }> => {
+    const doc: { key: string; fileName?: string } | null = await ctx.runQuery(internal.entityDocuments.getForExport, {
+      docId: args.docId,
+    });
+    if (!doc) throw new ConvexError('Document not found');
+    const signed = await presignGet({ key: doc.key, downloadAs: doc.fileName ?? 'document' });
+    return { downloadUrl: signed.url, expiresAt: signed.expiresAt };
+  },
 });

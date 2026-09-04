@@ -131,7 +131,6 @@ export default function SettingsDocumentsPage() {
           issueDateRequired: form.issueDateRequired,
           uploadRequired: form.uploadRequired,
           singleton: form.singleton,
-          sharedByDefault: entity === 'organization' ? form.sharedByDefault : undefined,
         });
         toast.success(`Added "${form.name.trim()}"`);
       } else {
@@ -152,7 +151,7 @@ export default function SettingsDocumentsPage() {
         if (form.issueDateRequired !== t.issueDateRequired) changes.issueDateRequired = form.issueDateRequired;
         if (form.uploadRequired !== t.uploadRequired) changes.uploadRequired = form.uploadRequired;
         if (!t.isSystem && form.singleton !== t.singleton) changes.singleton = form.singleton;
-        if (entity === 'organization' && form.sharedByDefault !== t.sharedByDefault) {
+        if (entity === 'organization' && t.partnerTypeKey && form.sharedByDefault !== t.sharedByDefault) {
           changes.sharedByDefault = form.sharedByDefault;
         }
         if (Object.keys(changes).length === 0) {
@@ -286,7 +285,14 @@ export default function SettingsDocumentsPage() {
               <YesNo value={t.expires} />
               <YesNo value={t.issueDateRequired} label={t.issueDateRequired ? 'Required' : 'Optional'} />
               <YesNo value={t.uploadRequired} label={t.uploadRequired ? 'Required' : 'Optional'} />
-              {entity === 'organization' && <YesNo value={t.sharedByDefault} />}
+              {entity === 'organization' &&
+                (t.partnerTypeKey ? (
+                  <YesNo value={t.sharedByDefault} />
+                ) : (
+                  <span className="text-[12px] text-[var(--text-tertiary)]" title="Only the standard company documents have a counterpart on the broker side">
+                    n/a
+                  </span>
+                ))}
               <div>
                 <Chip status={t.isSystem ? 'assigned' : 'active'} label={t.isSystem ? 'System' : 'Custom'} />
               </div>
@@ -378,7 +384,7 @@ export default function SettingsDocumentsPage() {
                 onChange={(v) => setForm((f) => ({ ...f, singleton: v }))}
               />
             )}
-            {entity === 'organization' && (
+            {entity === 'organization' && dialog?.mode === 'edit' && dialog.type.partnerTypeKey && (
               <FlagRow
                 label="Shared with linked brokers by default"
                 hint="Each document can still be withheld individually."

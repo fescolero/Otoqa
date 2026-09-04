@@ -657,8 +657,14 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
     { id: 'pay',       label: 'Pay profile', icon: 'doc-dollar', content: payContent },
     {
       id: 'documents', label: 'Documents', icon: 'file-text',
+      // Live count from the same data the tab renders; the stored summary
+      // only bridges the first paint (an unstamped legacy row has no
+      // summary at all — never read that as "nothing missing").
       attention:
-        (partnership.missingDocTypeKeys?.length ?? 0) + (partnershipDocs.linkedCarrierOffboarding ? 1 : 0) || undefined,
+        (partnershipDocs.loading
+          ? (partnership.missingDocTypeKeys?.length ?? 0)
+          : partnershipDocs.counts.missing + partnershipDocs.counts.expired) +
+          (partnershipDocs.linkedCarrierOffboarding ? 1 : 0) || undefined,
       content: documentsContent,
     },
     { id: 'activity',  label: 'Activity',  icon: 'pulse',       content: activityContent },

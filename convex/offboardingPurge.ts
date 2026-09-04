@@ -22,31 +22,57 @@
  */
 
 import { v } from 'convex/values';
-import { internalAction } from './_generated/server';
+import { internalAction, type ActionCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
 import { deleteObjectsByKeys, listObjectKeys } from './s3Upload';
 
 export const purgeDueOrganizations = internalAction({
   args: {},
-  returns: v.object({ purged: v.number(), objectsDeleted: v.number(), rowsDeleted: v.number() }),
-  handler: async (ctx): Promise<{ purged: number; objectsDeleted: number; rowsDeleted: number }> => {
+  returns: v.object({ purged: v.number(), failed: v.number(), objectsDeleted: v.number(), rowsDeleted: v.number() }),
+  handler: async (ctx): Promise<{ purged: number; failed: number; objectsDeleted: number; rowsDeleted: number }> => {
     const due: Array<{ organizationId: Id<'organizations'>; workosOrgId?: string; name: string }> = await ctx.runQuery(
       internal.entityDocuments.dueForPurge,
       { now: Date.now() },
     );
     let purged = 0;
+    let failed = 0;
     let objectsDeleted = 0;
     let rowsDeleted = 0;
 
     for (const org of due) {
+      // One org's storage error must not block every other org's purge:
+      // log it, move on, and let tomorrow's run pick it up again (every
+      // step is idempotent).
+      try {
+        const r = await purgeOne(ctx, org);
+        objectsDeleted += r.objectsDeleted;
+        rowsDeleted += r.rowsDeleted;
+        if (r.stamped) purged++;
+      } catch (e) {
+        failed++;
+        console.error(`[offboardingPurge] ${org.name} (${org.workosOrgId ?? org.organizationId}) failed; will retry next run`, e);
+      }
+    }
+
+    return { purged, failed, objectsDeleted, rowsDeleted };
+  },
+});
+
+async function purgeOne(
+  ctx: ActionCtx,
+  org: { organizationId: Id<'organizations'>; workosOrgId?: string; name: string },
+): Promise<{ stamped: boolean; objectsDeleted: number; rowsDeleted: number }> {
+  let objectsDeleted = 0;
+  let rowsDeleted = 0;
+  {
       // Re-check right before touching anything (a cancel is refused once
       // purgeAt has passed, so this only catches a stale listing).
       const stillDue: boolean = await ctx.runQuery(internal.entityDocuments.isStillDueForPurge, {
         organizationId: org.organizationId,
         now: Date.now(),
       });
-      if (!stillDue) continue;
+      if (!stillDue) return { stamped: false, objectsDeleted, rowsDeleted };
 
       // 1. Bucket prefix.
       if (org.workosOrgId) {
@@ -87,13 +113,10 @@ export const purgeDueOrganizations = internalAction({
         organizationId: org.organizationId,
       });
       if (stamped) {
-        purged++;
         console.log(`[offboardingPurge] purged ${org.name} (${org.workosOrgId ?? org.organizationId})`);
       } else {
         console.warn(`[offboardingPurge] ${org.name} was no longer due mid-run; not stamped`);
       }
-    }
-
-    return { purged, objectsDeleted, rowsDeleted };
-  },
-});
+      return { stamped, objectsDeleted, rowsDeleted };
+  }
+}

@@ -40,7 +40,7 @@ import {
   loadEffectiveCatalog,
 } from './lib/documentCatalog';
 import type { DocumentEntity } from './lib/documentTypeDefaults';
-import { isOffboarding, orgByAnyId, partnershipsLinkedToOrg } from './lib/orgLookup';
+import { isOffboarding, orgByAnyId, partnershipSharesDocuments, partnershipsLinkedToOrg } from './lib/orgLookup';
 import { logPlatformAudit } from './lib/platformAudit';
 import {
   MAX_DOCUMENT_BYTES,
@@ -163,7 +163,9 @@ function toPublic(doc: Doc<'entityDocuments'>, type?: EffectiveDocumentType): Pu
     archivedBy: doc.archivedBy,
     archiveNote: doc.archiveNote,
     supersededById: doc.supersededById,
-    shared: doc.entity === 'organization' ? isSharedByRule(doc, type) : undefined,
+    // undefined = "sharing does not apply" (not a company document, or a
+    // type with no broker counterpart) so the UI offers no toggle.
+    shared: doc.entity === 'organization' && isShareableType(type) ? isSharedByRule(doc, type) : undefined,
   };
 }
 
@@ -238,8 +240,15 @@ export async function assertEntityAccess(
 /** Whether an organization document is visible to linked brokers: the
  *  type's default unless the document overrides it. Never true for a
  *  hidden type. */
+/** Can documents of this type reach linked brokers at all? Only the
+ *  system company types that map onto a carrier type (`partnerTypeKey`);
+ *  a custom company type has no counterpart on the broker's side. */
+function isShareableType(type: EffectiveDocumentType | undefined): type is EffectiveDocumentType {
+  return !!type && !type.hidden && !!type.partnerTypeKey;
+}
+
 function isSharedByRule(doc: Doc<'entityDocuments'>, type: EffectiveDocumentType | undefined): boolean {
-  if (doc.entity !== 'organization' || !type || type.hidden) return false;
+  if (doc.entity !== 'organization' || !isShareableType(type)) return false;
   return doc.shared ?? type.sharedByDefault;
 }
 
@@ -270,7 +279,9 @@ export async function canAccessDocument(
   }
   const carrierOrg = await orgByAnyId(ctx, doc.workosOrgId);
   if (!carrierOrg) return false;
-  const linked = (await partnershipsLinkedToOrg(ctx, carrierOrg)).some((p) => p.brokerOrgId === callerOrgId);
+  const linked = (await partnershipsLinkedToOrg(ctx, carrierOrg)).some(
+    (p) => p.brokerOrgId === callerOrgId && partnershipSharesDocuments(p),
+  );
   if (!linked) return false;
   const catalog = await loadEffectiveCatalog(ctx, doc.workosOrgId, 'organization');
   return isSharedByRule(doc, catalog.find((t) => t.key === doc.typeKey));
@@ -355,7 +366,7 @@ async function sharedDocsForPartnership(
   p: Doc<'carrierPartnerships'>,
   linkedOrg?: Doc<'organizations'> | null,
 ): Promise<SharedDoc[]> {
-  if (!p.carrierOrgId) return [];
+  if (!partnershipSharesDocuments(p)) return [];
   const org = linkedOrg === undefined ? await orgByAnyId(ctx, p.carrierOrgId) : linkedOrg;
   if (!org?.workosOrgId || org.isDeleted) return [];
   const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
@@ -882,6 +893,9 @@ export const setShared = mutation({
     if (doc.status !== 'active') throw new ConvexError('Only active documents can be shared');
     const catalog = await loadEffectiveCatalog(ctx, who.orgId, 'organization');
     const type = catalog.find((t) => t.key === doc.typeKey);
+    if (!isShareableType(type)) {
+      throw new ConvexError('Only the standard company documents (COI, W-9, operating authority) can be shared with brokers');
+    }
     const before = isSharedByRule(doc, type);
     if (before === args.shared && doc.shared === args.shared) return null;
     await ctx.db.patch(doc._id, { shared: args.shared });
@@ -957,7 +971,7 @@ export const listForEntity = query({
     if (args.entity === 'carrier') {
       const pid = ctx.db.normalizeId('carrierPartnerships', args.entityId);
       const p = pid ? await ctx.db.get(pid) : null;
-      if (p?.carrierOrgId) {
+      if (p && partnershipSharesDocuments(p)) {
         const org = await orgByAnyId(ctx, p.carrierOrgId);
         shared = await sharedDocsForPartnership(ctx, p, org);
         linkedCarrierName = org?.name;
@@ -1011,7 +1025,7 @@ export const getSharedForCopy = internalQuery({
   handler: async (ctx, args) => {
     await assertEntityAccess(ctx, 'carrier', args.partnershipId, 'edit');
     const p = await ctx.db.get(args.partnershipId);
-    if (!p?.carrierOrgId) throw new ConvexError('This partnership is not linked to a carrier account');
+    if (!p || !partnershipSharesDocuments(p)) throw new ConvexError('This partnership is not linked to a carrier account');
     const org = await orgByAnyId(ctx, p.carrierOrgId);
     if (!org?.workosOrgId) throw new ConvexError('Carrier organization not found');
     if (!isOffboarding(org)) throw new ConvexError('Save a copy is only available while the carrier is offboarding');
@@ -1220,6 +1234,7 @@ export const listAllForOrgExport = query({
       issueDate: v.optional(v.string()),
       expirationDate: v.optional(v.string()),
       uploadedAt: v.number(),
+      sizeBytes: v.optional(v.number()),
     }),
   ),
   handler: async (ctx) => {
@@ -1251,9 +1266,27 @@ export const listAllForOrgExport = query({
         issueDate: d.issueDate,
         expirationDate: d.expirationDate,
         uploadedAt: d.uploadedAt,
+        sizeBytes: d.sizeBytes,
       });
     }
     return out;
+  },
+});
+
+/**
+ * Export access: the org-wide export runs under settings:manage alone, so
+ * an admin who lacks fleet:view / partners:view can still take the whole
+ * file with them. Owner org only — never the sharing path.
+ */
+export const getForExport = internalQuery({
+  args: { docId: v.id('entityDocuments') },
+  returns: v.union(v.null(), v.object({ key: v.string(), fileName: v.optional(v.string()) })),
+  handler: async (ctx, args) => {
+    const { orgId } = await requireCallerIdentity(ctx);
+    await assertOrgPermission(ctx, orgId, 'settings:manage');
+    const doc = await ctx.db.get(args.docId);
+    if (!doc || doc.workosOrgId !== orgId || doc.status === 'pending' || !doc.externalKey) return null;
+    return { key: doc.externalKey, fileName: doc.fileName };
   },
 });
 
@@ -1283,43 +1316,64 @@ export const sweepPending = internalMutation({
 
 /** Scheduled by documentTypes mutations: a catalog change can flip
  *  Missing for every entity of that kind in the org. */
+const RECOMPUTE_PAGE = 100;
+
+/**
+ * Recompute every entity's summary after a catalog change. Paged and
+ * self-scheduling so a large fleet never exceeds one transaction's
+ * limits (a failed mutation would leave every summary stale silently).
+ * Returns the number processed on THIS page.
+ */
 export const recomputeSummariesForOrg = internalMutation({
-  args: { orgId: v.string(), entity: documentEntityValidator },
+  args: { orgId: v.string(), entity: documentEntityValidator, cursor: v.optional(v.string()) },
   returns: v.number(),
   handler: async (ctx, args) => {
     let n = 0;
+    let continueCursor: string | null = null;
     switch (args.entity) {
       case 'driver': {
         const catalog = await loadEffectiveCatalog(ctx, args.orgId, 'driver');
-        const drivers = await ctx.db
+        const page = await ctx.db
           .query('drivers')
           .withIndex('by_organization', (q) => q.eq('organizationId', args.orgId))
-          .collect();
-        for (const d of drivers) {
+          .paginate({ cursor: args.cursor ?? null, numItems: RECOMPUTE_PAGE });
+        for (const d of page.page) {
           if (d.isDeleted) continue;
           await recomputeEntitySummary(ctx, args.orgId, 'driver', d._id, catalog);
           n++;
         }
-        return n;
+        continueCursor = page.isDone ? null : page.continueCursor;
+        break;
       }
       case 'carrier': {
         const catalog = await loadEffectiveCatalog(ctx, args.orgId, 'carrier');
-        const partnerships = await ctx.db
+        const page = await ctx.db
           .query('carrierPartnerships')
           .withIndex('by_broker', (q) => q.eq('brokerOrgId', args.orgId))
-          .collect();
-        for (const p of partnerships) {
+          .paginate({ cursor: args.cursor ?? null, numItems: RECOMPUTE_PAGE });
+        for (const p of page.page) {
           await recomputePartnershipDocuments(ctx, p._id, catalog);
           n++;
         }
-        return n;
+        continueCursor = page.isDone ? null : page.continueCursor;
+        break;
       }
       case 'organization': {
         // A sharing default changed → every linked broker's view changes.
+        // One org links to a handful of brokers; no paging needed.
         await recomputeLinkedPartnerships(ctx, args.orgId);
-        return 1;
+        n = 1;
+        break;
       }
     }
+    if (continueCursor) {
+      await ctx.scheduler.runAfter(0, internal.entityDocuments.recomputeSummariesForOrg, {
+        orgId: args.orgId,
+        entity: args.entity,
+        cursor: continueCursor,
+      });
+    }
+    return n;
   },
 });
 

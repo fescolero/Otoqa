@@ -161,7 +161,9 @@ export const createCustomType = mutation({
       issueDateRequired: args.issueDateRequired,
       uploadRequired: args.uploadRequired,
       singleton: args.singleton ?? true,
-      sharedByDefault: args.entity === 'organization' ? (args.sharedByDefault ?? false) : undefined,
+      // Sharing needs a broker-side counterpart (partnerTypeKey), which
+      // only the system company types have — a custom type never shares.
+      sharedByDefault: undefined,
       sortOrder: args.sortOrder,
       createdBy: who.userId,
       createdAt: now,
@@ -208,7 +210,7 @@ export const updateCustomType = mutation({
     if (rest.issueDateRequired !== undefined) patch.issueDateRequired = rest.issueDateRequired;
     if (rest.uploadRequired !== undefined) patch.uploadRequired = rest.uploadRequired;
     if (rest.singleton !== undefined) patch.singleton = rest.singleton;
-    if (rest.sharedByDefault !== undefined && row.entity === 'organization') patch.sharedByDefault = rest.sharedByDefault;
+    // sharedByDefault is ignored on purpose: custom types cannot share.
     if (rest.sortOrder !== undefined) patch.sortOrder = rest.sortOrder;
     await ctx.db.patch(row._id, patch);
     await logAudit(ctx, {
