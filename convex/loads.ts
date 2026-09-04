@@ -2423,6 +2423,24 @@ const assignedLoadStatusValidator = v.union(
   v.literal('Expired'),
 );
 
+/**
+ * On-time summary a leg carries once completed (lib/legOnTime.ts), in the
+ * shape the web tables render as a badge. null until the leg completes or
+ * when no delivery on it was evaluable.
+ */
+function legOnTimePublic(leg: {
+  deliveriesEvaluated?: number;
+  deliveriesOnTime?: number;
+  deliveriesMaxLateMs?: number;
+}): { evaluated: number; onTime: number; maxLateMs: number } | null {
+  if (!leg.deliveriesEvaluated) return null;
+  return {
+    evaluated: leg.deliveriesEvaluated,
+    onTime: leg.deliveriesOnTime ?? 0,
+    maxLateMs: leg.deliveriesMaxLateMs ?? 0,
+  };
+}
+
 async function enrichLoadFromLeg(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ctx: any,
@@ -2436,6 +2454,9 @@ async function enrichLoadFromLeg(
     trailerId?: Id<'trailers'>;
     scheduledStartMs?: number;
     scheduledEndMs?: number;
+    deliveriesEvaluated?: number;
+    deliveriesOnTime?: number;
+    deliveriesMaxLateMs?: number;
   },
 ) {
   const load = await ctx.db.get(leg.loadId);
@@ -2475,6 +2496,7 @@ async function enrichLoadFromLeg(
     scheduledStartMs: leg.scheduledStartMs,
     scheduledEndMs: leg.scheduledEndMs,
     deliveredAt: load.deliveredAt as number | undefined,
+    onTime: legOnTimePublic(leg),
     truck: truck
       ? { unitId: truck.unitId as string, make: truck.make as string | undefined, model: truck.model as string | undefined }
       : null,
@@ -2518,6 +2540,8 @@ async function enrichLoadDirectly(ctx: any, load: any) {
     legStatus: 'PENDING',
     legLoadedMiles: load.effectiveMiles ?? 0,
     deliveredAt: load.deliveredAt as number | undefined,
+    // No leg on this path; getRecentByDriver overwrites when it has one.
+    onTime: null as ReturnType<typeof legOnTimePublic>,
     createdAt: load._creationTime as number,
   };
 }
@@ -2690,7 +2714,13 @@ export const getRecentByDriver = query({
     const seenLoadIds = new Set<string>();
     const candidates: Array<{
       load: any;
-      leg?: { status: string; legLoadedMiles: number };
+      leg?: {
+        status: string;
+        legLoadedMiles: number;
+        deliveriesEvaluated?: number;
+        deliveriesOnTime?: number;
+        deliveriesMaxLateMs?: number;
+      };
     }> = [];
 
     const recentLegs = await ctx.db
@@ -2704,7 +2734,16 @@ export const getRecentByDriver = query({
       seenLoadIds.add(leg.loadId);
       const load = await ctx.db.get(leg.loadId);
       if (!load) continue;
-      candidates.push({ load, leg: { status: leg.status, legLoadedMiles: leg.legLoadedMiles } });
+      candidates.push({
+        load,
+        leg: {
+          status: leg.status,
+          legLoadedMiles: leg.legLoadedMiles,
+          deliveriesEvaluated: leg.deliveriesEvaluated,
+          deliveriesOnTime: leg.deliveriesOnTime,
+          deliveriesMaxLateMs: leg.deliveriesMaxLateMs,
+        },
+      });
     }
 
     const loadStatuses = ['Open', 'Assigned', 'Completed', 'Canceled', 'Expired'] as const;
@@ -2747,6 +2786,7 @@ export const getRecentByDriver = query({
       if (leg) {
         enriched.legStatus = leg.status;
         enriched.legLoadedMiles = leg.legLoadedMiles;
+        enriched.onTime = legOnTimePublic(leg);
       }
       enrichedLoads.push(enriched);
     }

@@ -14,7 +14,7 @@ export async function computeLegOnTime(
   leg: Pick<Doc<'dispatchLegs'>, 'loadId' | 'startStopId' | 'endStopId'>,
 ): Promise<LegOnTimeSummary> {
   const [startStop, endStop] = await Promise.all([ctx.db.get(leg.startStopId), ctx.db.get(leg.endStopId)]);
-  if (!startStop || !endStop) return { deliveriesEvaluated: 0, deliveriesOnTime: 0 };
+  if (!startStop || !endStop) return { deliveriesEvaluated: 0, deliveriesOnTime: 0, deliveriesMaxLateMs: 0 };
   const startSeq = startStop.sequenceNumber ?? 0;
   const endSeq = endStop.sequenceNumber ?? startSeq;
   const stops = await ctx.db

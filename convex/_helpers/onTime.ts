@@ -67,6 +67,9 @@ export function evaluateDeliveryOnTime(
 export interface LegOnTimeSummary {
   deliveriesEvaluated: number;
   deliveriesOnTime: number;
+  /** Worst lateness among evaluated deliveries, ms past window end +
+   *  grace; 0 when every evaluated delivery was on time. */
+  deliveriesMaxLateMs: number;
 }
 
 /**
@@ -84,6 +87,7 @@ export function summarizeLegOnTime(
   const hi = Math.max(startSeq, endSeq);
   let deliveriesEvaluated = 0;
   let deliveriesOnTime = 0;
+  let deliveriesMaxLateMs = 0;
   for (const s of stops) {
     if (typeof s.sequenceNumber !== 'number') continue;
     if (s.sequenceNumber < lo || s.sequenceNumber > hi) continue;
@@ -91,8 +95,20 @@ export function summarizeLegOnTime(
     if (!r) continue;
     deliveriesEvaluated++;
     if (r.onTime) deliveriesOnTime++;
+    else deliveriesMaxLateMs = Math.max(deliveriesMaxLateMs, r.lateMs);
   }
-  return { deliveriesEvaluated, deliveriesOnTime };
+  return { deliveriesEvaluated, deliveriesOnTime, deliveriesMaxLateMs };
+}
+
+/** "42m", "2h 05m", "1d 3h" — for a "Late …" badge. */
+export function formatLateDuration(ms: number): string {
+  const totalMin = Math.max(1, Math.round(ms / 60_000));
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+  return `${m}m`;
 }
 
 /** Percentage 0–100 (rounded) or null when nothing was evaluable. */

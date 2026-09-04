@@ -2361,6 +2361,7 @@ export default defineSchema({
     // completed before the stamp existed until migration 017 backfills.
     deliveriesEvaluated: v.optional(v.float64()),
     deliveriesOnTime: v.optional(v.float64()),
+    deliveriesMaxLateMs: v.optional(v.float64()),
 
     // PAY ENGINE — latest-wins coalesce key for calculatePayForLeg.
     // Upstream sites that schedule a pay-engine recalc (legacy

@@ -72,5 +72,6 @@ describe('dispatchLegs.completeLeg on-time stamp', () => {
     expect(leg?.status).toBe('COMPLETED');
     expect(leg?.deliveriesEvaluated).toBe(3);
     expect(leg?.deliveriesOnTime).toBe(2);
+    expect(leg?.deliveriesMaxLateMs).toBe(1 * MIN); // stop 4: 16 min past a 15-min grace
   });
 });

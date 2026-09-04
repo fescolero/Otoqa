@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ON_TIME_GRACE_MS,
   evaluateDeliveryOnTime,
+  formatLateDuration,
   onTimePercent,
   stopArrivalMs,
   summarizeLegOnTime,
@@ -61,10 +62,20 @@ describe('summarizeLegOnTime', () => {
       delivery({ sequenceNumber: 9, checkedInAt: iso(WINDOW_END) }),                 // outside leg → excluded
       delivery({ sequenceNumber: undefined, checkedInAt: iso(WINDOW_END) }),         // unplaceable → excluded
     ];
-    expect(summarizeLegOnTime(stops, 1, 4)).toEqual({ deliveriesEvaluated: 2, deliveriesOnTime: 1 });
+    expect(summarizeLegOnTime(stops, 1, 4)).toEqual({ deliveriesEvaluated: 2, deliveriesOnTime: 1, deliveriesMaxLateMs: 15 * MIN });
   });
   it('accepts a reversed sequence range', () => {
-    expect(summarizeLegOnTime([delivery({ checkedInAt: iso(WINDOW_END) })], 3, 1)).toEqual({ deliveriesEvaluated: 1, deliveriesOnTime: 1 });
+    expect(summarizeLegOnTime([delivery({ checkedInAt: iso(WINDOW_END) })], 3, 1)).toEqual({ deliveriesEvaluated: 1, deliveriesOnTime: 1, deliveriesMaxLateMs: 0 });
+  });
+});
+
+describe('formatLateDuration', () => {
+  it('formats minutes, hours, and days; never shows 0m', () => {
+    expect(formatLateDuration(1)).toBe('1m');
+    expect(formatLateDuration(42 * MIN)).toBe('42m');
+    expect(formatLateDuration(125 * MIN)).toBe('2h 05m');
+    expect(formatLateDuration(26 * 60 * MIN)).toBe('1d 2h');
+    expect(formatLateDuration(48 * 60 * MIN)).toBe('2d');
   });
 });
 

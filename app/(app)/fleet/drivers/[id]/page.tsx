@@ -49,6 +49,7 @@ import {
   resolveStatusId,
 } from '@/components/web';
 import { PayeeProfilesCard } from '@/components/web/pay-profiles/payee-profiles-card';
+import { OnTimeChip } from '@/components/web/on-time-chip';
 import { EntityDocumentsTab } from '@/components/web/documents/entity-documents-tab';
 import { useDriverDocuments } from '@/components/web/documents/use-entity-documents';
 import {
@@ -913,6 +914,8 @@ export default function DriverDetailPage() {
       render: (r) => <span className="num">{r.firstStopDate ?? '—'}</span> },
     { key: 'status', label: 'Status', width: '110px',
       render: (r) => <Chip status={r.status === 'In Transit' ? 'active' : r.status === 'Delivered' ? 'delivered' : 'assigned'} label={r.status} /> },
+    { key: 'onTime', label: 'On-time', width: '110px',
+      render: (r) => <OnTimeChip onTime={r.onTime} /> },
   ];
   const recentTrips: RecentTripRow[] = ((recentDriverLoads ?? []) as AssignedLoad[])
     .map((l) => ({ ...l, id: l._id as unknown as string }));
