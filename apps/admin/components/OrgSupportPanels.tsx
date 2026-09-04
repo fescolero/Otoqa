@@ -849,6 +849,9 @@ export function OffboardingPanel({
 
   const state = purgedAt ? 'purged' : offboardingStartedAt ? 'offboarding' : 'active';
   const tone = state === 'purged' ? 'danger' : state === 'offboarding' ? 'warn' : 'neutral';
+  // Once purgeAt passes the purge is committed (the next daily run deletes
+  // storage first); cancelOffboarding refuses, so don't offer it.
+  const windowEnded = state === 'offboarding' && purgeAt !== undefined && purgeAt <= Date.now();
 
   return (
     <Panel
@@ -857,6 +860,8 @@ export function OffboardingPanel({
       subtitle={
         state === 'purged'
           ? `Purged ${formatWhen(purgedAt!)} — documents and storage are gone.`
+          : windowEnded
+            ? `Retention window ended ${formatAgo(purgeAt!)} — purge is committed and runs with the next daily job; it can no longer be cancelled.`
           : state === 'offboarding'
             ? `Started ${formatAgo(offboardingStartedAt!)} · purge scheduled ${formatWhen(purgeAt!)}${offboardingReason ? ` · ${offboardingReason}` : ''}`
             : 'Not offboarding. Starting keeps all data for 14 days, then purges documents and storage.'
@@ -879,7 +884,7 @@ export function OffboardingPanel({
             }}
           />
         )}
-        {state === 'offboarding' && (
+        {state === 'offboarding' && !windowEnded && (
           <ReasonAction
             label="Cancel offboarding"
             onSubmit={async (reason) => {

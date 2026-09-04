@@ -43,6 +43,16 @@ import {
 } from '@/components/web';
 import type { Id } from '@/convex/_generated/dataModel';
 import { DocPreviewModal, type DocRecord } from '@/components/loads/doc-preview-modal';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Label } from '@/components/ui/label';
+import { DateInput } from '@/components/ui/date-input';
 
 import { DocumentUploadDialog } from './document-upload-dialog';
 import {
@@ -65,6 +75,17 @@ export interface EntityDocumentsTabProps {
 
 type ArchivedRow = EntityDocument & { id: string; typeName: string };
 type AnyDoc = EntityDocument | SharedDocument;
+type CopyTarget = { row: DocumentRowModel; doc: SharedDocument };
+type CopyDates = { issueDate?: string; expirationDate?: string };
+
+/** The copy activates under OUR carrier type, whose flags may require a
+ *  date the carrier's copy never carried (spec §7). */
+function missingCopyDates(target: CopyTarget): { issue: boolean; expiry: boolean } {
+  return {
+    issue: !!target.row.type.issueDateRequired && !target.doc.issueDate,
+    expiry: !!target.row.type.expires && !target.doc.expirationDate,
+  };
+}
 
 export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocumentsTabProps) {
   const docs = useEntityDocuments(entity, entityId);
@@ -72,6 +93,7 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
   const setShared = useMutation(api.entityDocuments.setShared);
   const saveSharedCopy = useAction(api.carrierDocuments.saveSharedCopy);
   const [copying, setCopying] = React.useState<string | null>(null);
+  const [copyTarget, setCopyTarget] = React.useState<CopyTarget | null>(null);
   const download = {
     driver: useAction(api.driverDocuments.getDownloadUrl),
     carrier: useAction(api.carrierDocuments.getDownloadUrl),
@@ -183,17 +205,31 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
     }
   };
 
-  const onSaveCopy = async (row: DocumentRowModel) => {
-    if (entity !== 'carrier' || !row.doc || !isSharedDocument(row.doc)) return;
-    setCopying(row.id);
+  const performSaveCopy = async (target: CopyTarget, dates?: CopyDates) => {
+    setCopying(target.row.id);
     try {
-      await saveSharedCopy({ partnershipId: entityId as Id<'carrierPartnerships'>, sharedDocId: row.doc._id });
-      toast.success(`${row.type.name} saved to your records`);
+      await saveSharedCopy({
+        partnershipId: entityId as Id<'carrierPartnerships'>,
+        sharedDocId: target.doc._id,
+        ...dates,
+      });
+      toast.success(`${target.row.type.name} saved to your records`);
+      setCopyTarget(null);
     } catch (e) {
       toast.error(convexErrorMessage(e) ?? 'Could not save a copy');
     } finally {
       setCopying(null);
     }
+  };
+
+  const onSaveCopy = (row: DocumentRowModel) => {
+    if (entity !== 'carrier' || !row.doc || !isSharedDocument(row.doc)) return;
+    const target: CopyTarget = { row, doc: row.doc };
+    const missing = missingCopyDates(target);
+    // Ask for any date our type requires before copying — the server
+    // refuses the copy without it, and there is nowhere else to enter it.
+    if (missing.issue || missing.expiry) setCopyTarget(target);
+    else void performSaveCopy(target);
   };
 
   const onToggleShare = async (row: DocumentRowModel) => {
@@ -281,7 +317,7 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
       actions.push({
         label: copying === r.id ? 'Saving…' : 'Save a copy',
         icon: 'copy',
-        onClick: () => void onSaveCopy(r),
+        onClick: () => onSaveCopy(r),
       });
     }
     if (docs.canEdit) {
@@ -442,7 +478,85 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
       />
 
       <DocPreviewModal doc={preview} onClose={() => setPreview(null)} />
+
+      {copyTarget && (
+        <SaveCopyDialog
+          target={copyTarget}
+          busy={copying === copyTarget.row.id}
+          onClose={() => setCopyTarget(null)}
+          onConfirm={(dates) => void performSaveCopy(copyTarget, dates)}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Collects the date(s) our carrier type requires that the carrier's shared
+ * copy lacks, then saves the copy. Mounted only while open, so it starts
+ * clean each time.
+ */
+function SaveCopyDialog({
+  target,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  target: CopyTarget;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: (dates: CopyDates) => void;
+}) {
+  const missing = missingCopyDates(target);
+  const [issueDate, setIssueDate] = React.useState(target.doc.issueDate ?? '');
+  const [expirationDate, setExpirationDate] = React.useState(target.doc.expirationDate ?? '');
+  const complete = (!missing.issue || !!issueDate) && (!missing.expiry || !!expirationDate);
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && !busy && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Save a copy · {target.row.type.name}</DialogTitle>
+          <DialogDescription>
+            {target.doc.sharedFromOrgName}&apos;s copy has no {missing.issue && missing.expiry ? 'issue or expiration date' : missing.issue ? 'issue date' : 'expiration date'}.
+            Your records require {missing.issue && missing.expiry ? 'them' : 'it'} — enter {missing.issue && missing.expiry ? 'them' : 'it'} from the document to save the copy.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-4">
+          {missing.expiry && (
+            <div className="grid gap-1.5">
+              <Label htmlFor="copy-exp">Expiration date</Label>
+              <DateInput
+                id="copy-exp"
+                value={expirationDate}
+                onDateChange={(d) => setExpirationDate(d ?? '')}
+                disabled={busy}
+                placeholder="As printed on the document"
+              />
+            </div>
+          )}
+          {missing.issue && (
+            <div className="grid gap-1.5">
+              <Label htmlFor="copy-issue">Issue date</Label>
+              <DateInput id="copy-issue" value={issueDate} onDateChange={(d) => setIssueDate(d ?? '')} disabled={busy} />
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <WBtn variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+            Cancel
+          </WBtn>
+          <WBtn
+            variant="primary"
+            size="sm"
+            disabled={busy || !complete}
+            onClick={() => onConfirm({ issueDate: issueDate || undefined, expirationDate: expirationDate || undefined })}
+          >
+            {busy ? 'Saving…' : 'Save a copy'}
+          </WBtn>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

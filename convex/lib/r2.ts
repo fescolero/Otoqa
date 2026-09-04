@@ -6,6 +6,7 @@
  * Bucket contract: docs/documents-storage-spec.md §1.
  */
 
+import { v } from 'convex/values';
 import type { DocumentEntity } from './documentTypeDefaults';
 
 /**
@@ -40,6 +41,20 @@ export function isStoredContentType(ct: string | undefined | null): ct is Stored
 }
 
 export const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
+
+/** Load-document types a web/ops user may upload (no deprecated alias).
+ *  One definition for the presign action, the record mutation and the
+ *  upload dialog, so the three can never disagree. */
+export const WEB_LOAD_DOCUMENT_TYPES = ['POD', 'Receipt', 'Cargo', 'Damage', 'Accident', 'Other'] as const;
+export type WebLoadDocumentType = (typeof WEB_LOAD_DOCUMENT_TYPES)[number];
+export const webLoadDocTypeValidator = v.union(
+  v.literal('POD'),
+  v.literal('Receipt'),
+  v.literal('Cargo'),
+  v.literal('Damage'),
+  v.literal('Accident'),
+  v.literal('Other'),
+);
 
 // ─── Key building ────────────────────────────────────────────────────────
 

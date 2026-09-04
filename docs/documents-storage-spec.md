@@ -385,7 +385,10 @@ The Documents tab badge and the attention item counts become live.
 - `organizations` has soft-delete fields but no offboarding state. Add
   `offboardingStartedAt` and `purgeAt`. A platform action starts or
   cancels offboarding; `purgeAt = start + 14 days`. Data is retained in
-  full during the window.
+  full during the window. Once `purgeAt` has passed the purge is
+  committed and cancel is refused: the daily job deletes the bucket
+  prefix first, and a cancel landing after that would keep rows whose
+  bytes are gone.
 - Every broker linked to an offboarding carrier org is notified and sees a
   **Save a copy** action on each carrier-shared row during the window
   only. Saving performs a server-side `CopyObject` into the broker's

@@ -1388,8 +1388,6 @@ export const recordPOD = mutation({
 
     // loadDocuments is the single source for POD (spec §9); the legacy
     // stop.deliveryPhotos dual-write is gone.
-    await ctx.db.patch(args.stopId, { updatedAt: Date.now() });
-
     await ctx.db.insert('loadDocuments', {
       loadId: stop.loadId,
       workosOrgId: load.workosOrgId,

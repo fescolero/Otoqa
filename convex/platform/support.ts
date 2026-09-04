@@ -594,6 +594,12 @@ export const cancelOffboarding = mutation({
     if (!org) throw new ConvexError('Organization not found');
     if (org.purgedAt) throw new ConvexError('Organization was already purged — nothing to cancel');
     if (!org.offboardingStartedAt) return null; // idempotent
+    // The purge is committed the moment the retention window ends: the
+    // daily job deletes the bucket prefix first, and a cancel landing
+    // after that would keep rows whose bytes are gone (spec §7).
+    if (org.purgeAt !== undefined && org.purgeAt <= Date.now()) {
+      throw new ConvexError('The 14-day retention window has ended and the purge is committed — offboarding can no longer be cancelled');
+    }
     await ctx.db.patch(args.organizationId, {
       offboardingStartedAt: undefined,
       offboardingReason: undefined,

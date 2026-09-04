@@ -15,7 +15,10 @@
  *
  * This is the ONLY automated physical deletion in the documents system.
  * It is idempotent: a crash mid-way leaves fewer objects/rows and the
- * next run finishes the job.
+ * next run finishes the job. Cancelling offboarding is refused once
+ * `purgeAt` has passed (platform.support.cancelOffboarding), so step 1
+ * — the irreversible one — never races a cancel; the re-checks below
+ * are defense in depth.
  */
 
 import { v } from 'convex/values';
@@ -37,8 +40,8 @@ export const purgeDueOrganizations = internalAction({
     let rowsDeleted = 0;
 
     for (const org of due) {
-      // Re-check right before touching anything: a cancel that landed after
-      // dueForPurge listed this org must win.
+      // Re-check right before touching anything (a cancel is refused once
+      // purgeAt has passed, so this only catches a stale listing).
       const stillDue: boolean = await ctx.runQuery(internal.entityDocuments.isStillDueForPurge, {
         organizationId: org.organizationId,
         now: Date.now(),
@@ -79,7 +82,7 @@ export const purgeDueOrganizations = internalAction({
         done = r.done;
       }
 
-      // 4. Stamp — a no-op (false) if staff cancelled while we were running.
+      // 4. Stamp — false only if the org somehow stopped being due mid-run.
       const stamped: boolean = await ctx.runMutation(internal.entityDocuments.markPurged, {
         organizationId: org.organizationId,
       });
@@ -87,7 +90,7 @@ export const purgeDueOrganizations = internalAction({
         purged++;
         console.log(`[offboardingPurge] purged ${org.name} (${org.workosOrgId ?? org.organizationId})`);
       } else {
-        console.warn(`[offboardingPurge] ${org.name} was cancelled mid-run; not stamped`);
+        console.warn(`[offboardingPurge] ${org.name} was no longer due mid-run; not stamped`);
       }
     }
 

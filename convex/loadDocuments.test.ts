@@ -188,4 +188,41 @@ describe('assertWebUploadKey (ownership before any storage side effect)', () => 
       }),
     ).rejects.toThrow(/Invalid document key/);
   });
+
+  it('refuses a key an existing document already references — finalize/cancel are for in-flight uploads only', async () => {
+    const t = convexTest(schema);
+    const loadId = await t.run((ctx) => insertLoad(ctx));
+    const asEditor = t.withIdentity(EDITOR as never);
+    const recorded = `orgs/${ORG}/loads/${loadId}/POD/1-abc-pod.pdf`;
+    await asEditor.mutation(internal.loadDocuments.createFromWeb, {
+      loadId,
+      type: 'POD',
+      externalKey: recorded,
+      fileName: 'pod.pdf',
+      contentType: 'application/pdf',
+    });
+
+    // Neither cancel (delete the bytes behind a recorded row) nor a second
+    // row on the same object gets past the ownership check.
+    await expect(asEditor.query(internal.loadDocuments.assertWebUploadKey, { key: recorded })).rejects.toThrow(
+      /Invalid document key/,
+    );
+    await expect(
+      asEditor.mutation(internal.loadDocuments.createFromWeb, {
+        loadId,
+        type: 'POD',
+        externalKey: recorded,
+        fileName: 'pod.pdf',
+        contentType: 'application/pdf',
+      }),
+    ).rejects.toThrow(/Invalid document key/);
+
+    // A fresh key under the same prefix is still an in-flight upload.
+    const fresh = `orgs/${ORG}/loads/${loadId}/POD/2-def-pod.pdf`;
+    expect(await asEditor.query(internal.loadDocuments.assertWebUploadKey, { key: fresh })).toEqual({
+      loadId,
+      orgId: ORG,
+      type: 'POD',
+    });
+  });
 });

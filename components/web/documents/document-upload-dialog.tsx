@@ -25,10 +25,7 @@ import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import type { EffectiveDocumentType } from '@/convex/_helpers/documentStatus';
 import type { DocumentEntity } from '@/convex/lib/documentTypeDefaults';
-import { MAX_DOCUMENT_BYTES } from '@/convex/lib/r2';
-import { normalizeUploadImage, UPLOAD_INPUT_ACCEPT } from '@/lib/normalize-upload-image';
-import { putWithProgress } from '@/lib/upload-put';
-import { convexErrorMessage } from '@/lib/convex-error';
+import { UPLOAD_INPUT_ACCEPT } from '@/lib/normalize-upload-image';
 import { WBtn, WIcon } from '@/components/web';
 import {
   Dialog,
@@ -49,15 +46,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { formatBytes } from './entity-documents-model';
-
-type Phase = 'idle' | 'converting' | 'presigning' | 'uploading' | 'finalizing';
-
-const PHASE_LABEL: Record<Exclude<Phase, 'idle'>, string> = {
-  converting: 'Converting photo…',
-  presigning: 'Preparing upload…',
-  uploading: 'Uploading…',
-  finalizing: 'Saving…',
-};
+import { UploadProgress, useUploadSequence, validateUploadFile } from './use-upload-sequence';
 
 export interface DocumentUploadDialogProps {
   open: boolean;
@@ -125,20 +114,18 @@ function UploadForm({
   const [issueDate, setIssueDate] = React.useState<string>('');
   const [expirationDate, setExpirationDate] = React.useState<string>('');
   const [note, setNote] = React.useState('');
-  const [phase, setPhase] = React.useState<Phase>('idle');
-  const [progress, setProgress] = React.useState<number | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
+  const seq = useUploadSequence();
+  const { busy, error } = seq;
   const inputRef = React.useRef<HTMLInputElement>(null);
 
   const type = visibleTypes.find((t) => t.key === typeKey) ?? null;
-  const busy = phase !== 'idle';
 
   const validate = (): string | null => {
     if (!type) return 'Pick a document type.';
     if (type.uploadRequired && !file) return 'Attach the document file.';
     if (type.expires && !expirationDate) return 'Enter the expiration date shown on the document.';
     if (type.issueDateRequired && !issueDate) return 'Enter the issue date.';
-    if (file && file.size > MAX_DOCUMENT_BYTES) return 'File is too large (25 MB max).';
+    if (file) return validateUploadFile(file);
     return null;
   };
 
@@ -160,62 +147,24 @@ function UploadForm({
   const submit = async () => {
     const problem = validate();
     if (problem) {
-      setError(problem);
+      seq.setError(problem);
       return;
     }
     if (!type) return;
-    setError(null);
 
-    try {
-      if (!file) {
-        setPhase('finalizing');
-        await createDateOnly({
-          entity,
-          entityId,
-          typeKey: type.key,
-          issueDate: issueDate || undefined,
-          expirationDate: expirationDate || undefined,
-          note: note || undefined,
-        });
-      } else {
-        const normalized = await normalizeUploadImage(file, () => setPhase('converting'));
+    const dates = { issueDate: issueDate || undefined, expirationDate: expirationDate || undefined, note: note || undefined };
+    const result = file
+      ? await seq.upload(file, {
+          presign: (f) => presign(f.fileName, f.contentType, f.sizeBytes),
+          cancel: (p) => actions.cancelUpload({ docId: p.docId }),
+          finalize: (p) => actions.finalizeUpload({ docId: p.docId, ...dates }),
+        })
+      : await seq.runSaving(() => createDateOnly({ entity, entityId, typeKey: type.key, ...dates }));
+    if (result === undefined) return; // error shown in the dialog
 
-        setPhase('presigning');
-        const presigned = await presign(normalized.file.name, normalized.contentType, normalized.file.size);
-
-        setPhase('uploading');
-        setProgress(0);
-        try {
-          await putWithProgress(
-            presigned.uploadUrl,
-            normalized.file,
-            { 'Content-Type': normalized.contentType, ...presigned.metadataHeaders },
-            setProgress,
-          );
-        } catch (putErr) {
-          // Never leave a pending row behind for a failed PUT.
-          await actions.cancelUpload({ docId: presigned.docId }).catch(() => undefined);
-          throw putErr;
-        }
-
-        setPhase('finalizing');
-        await actions.finalizeUpload({
-          docId: presigned.docId,
-          issueDate: issueDate || undefined,
-          expirationDate: expirationDate || undefined,
-          note: note || undefined,
-        });
-      }
-
-      toast.success(`${type.name} ${replacingName ? 'replaced' : 'added'}`);
-      onSaved?.();
-      onOpenChange(false);
-    } catch (e) {
-      setError(convexErrorMessage(e) ?? (e instanceof Error ? e.message : 'Upload failed. Please try again.'));
-    } finally {
-      setPhase('idle');
-      setProgress(null);
-    }
+    toast.success(`${type.name} ${replacingName ? 'replaced' : 'added'}`);
+    onSaved?.();
+    onOpenChange(false);
   };
 
   return (
@@ -265,7 +214,7 @@ function UploadForm({
             onChange={(e) => {
               const f = e.target.files?.[0] ?? null;
               setFile(f);
-              setError(null);
+              seq.setError(null);
             }}
           />
           <button
@@ -319,20 +268,7 @@ function UploadForm({
           />
         </div>
 
-        {busy && (
-          <div className="text-[12px] text-[var(--text-secondary)]">
-            {PHASE_LABEL[phase as Exclude<Phase, 'idle'>]}
-            {phase === 'uploading' && progress != null ? ` ${Math.round(progress * 100)}%` : ''}
-            {phase === 'uploading' && (
-              <div className="mt-1.5 h-1 w-full overflow-hidden rounded bg-[var(--bg-surface-3)]">
-                <div
-                  className="h-full bg-[var(--accent)] transition-[width]"
-                  style={{ width: `${Math.round((progress ?? 0) * 100)}%` }}
-                />
-              </div>
-            )}
-          </div>
-        )}
+        <UploadProgress phase={seq.phase} progress={seq.progress} />
 
         {error && (
           <p role="alert" className="m-0 text-[12.5px]" style={{ color: '#B43030' }}>

@@ -946,7 +946,7 @@ describe('second-review follow-ups', () => {
     process.env.STAFF_EMAIL_ALLOWLIST = savedEnv.STAFF_EMAIL_ALLOWLIST;
   });
 
-  it('a cancel that lands mid-purge stops every later step and never stamps the org', async () => {
+  it('cancel is refused once the retention window has ended, so the purge never races a cancel', async () => {
     const t = setup();
     const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
     await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
@@ -954,7 +954,26 @@ describe('second-review follow-ups', () => {
     await t.run((ctx) => ctx.db.patch(orgId, { offboardingStartedAt: now - 20 * 86400000, purgeAt: now - 1000 }));
     expect(await t.query(internal.entityDocuments.isStillDueForPurge, { organizationId: orgId, now })).toBe(true);
 
-    // Staff cancels after dueForPurge already listed the org.
+    await expect(
+      t.withIdentity(STAFF as never).mutation(api.platform.support.cancelOffboarding, { organizationId: orgId, reason: 'Retained' }),
+    ).rejects.toThrow(/can no longer be cancelled/);
+
+    // Still due: the row and stamp steps run to completion.
+    expect(await t.query(internal.entityDocuments.isStillDueForPurge, { organizationId: orgId, now: Date.now() })).toBe(true);
+    let done = false;
+    while (!done) done = (await t.mutation(internal.entityDocuments.purgeOrgRows, { organizationId: orgId })).done;
+    expect(await t.mutation(internal.entityDocuments.markPurged, { organizationId: orgId })).toBe(true);
+    expect(await t.run((ctx) => ctx.db.query('entityDocuments').collect())).toHaveLength(0);
+    expect((await t.run((ctx) => ctx.db.get(orgId)))?.purgedAt).toBeDefined();
+  });
+
+  it('a cancel inside the window closes it, and the purge guards then refuse to touch the org', async () => {
+    const t = setup();
+    const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    const now = Date.now();
+    await t.run((ctx) => ctx.db.patch(orgId, { offboardingStartedAt: now - 86400000, purgeAt: now + 13 * 86400000 }));
+
     await t.withIdentity(STAFF as never).mutation(api.platform.support.cancelOffboarding, { organizationId: orgId, reason: 'Retained' });
 
     expect(await t.query(internal.entityDocuments.isStillDueForPurge, { organizationId: orgId, now: Date.now() })).toBe(false);

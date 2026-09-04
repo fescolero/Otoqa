@@ -1,9 +1,10 @@
 import { ConvexError, v } from 'convex/values';
-import { internalMutation, internalQuery, mutation, query } from './_generated/server';
+import { internalMutation, internalQuery, mutation, query, type QueryCtx } from './_generated/server';
+import type { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { assertOrgPermission, getCallerOrgId, requireCallerIdentity, requireCallerOrgId } from './lib/auth';
 import { logAudit } from './lib/audit';
-import { isStoredContentType, keyFromExternalUrl } from './lib/r2';
+import { isStoredContentType, keyFromExternalUrl, webLoadDocTypeValidator as webDocType } from './lib/r2';
 import { resolveAuthenticatedDriver } from './driverMobile';
 
 /**
@@ -31,15 +32,19 @@ const docType = v.union(
   v.literal('EXTRA_DOC'), // DEPRECATED
 );
 
-/** Types a web/ops user may upload (no deprecated alias). */
-const webDocType = v.union(
-  v.literal('POD'),
-  v.literal('Receipt'),
-  v.literal('Cargo'),
-  v.literal('Damage'),
-  v.literal('Accident'),
-  v.literal('Other'),
-);
+/**
+ * True when a loadDocuments row on this load already references `key`.
+ * A web caller may only finalize or cancel its OWN in-flight upload —
+ * never register a second row on an existing object, and never delete
+ * the bytes behind a recorded document (that is `remove`, audited).
+ */
+async function keyAlreadyRecorded(ctx: QueryCtx, loadId: Id<'loadInformation'>, key: string): Promise<boolean> {
+  const rows = await ctx.db
+    .query('loadDocuments')
+    .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .collect();
+  return rows.some((r) => (r.externalKey ?? (r.externalUrl ? keyFromExternalUrl(r.externalUrl) : null)) === key);
+}
 
 /**
  * Web/ops upload — step 1 (called by loadDocumentsWeb.getUploadUrl).
@@ -65,9 +70,10 @@ export const resolveLoadForWebUpload = internalQuery({
 /**
  * Ownership check for a client-supplied object key on the web load path.
  * Parses `orgs/{orgId}/loads/{loadId}/{type}/…`, requires the caller to be
- * a loads:edit member of THAT org, and requires the load to exist there.
- * Runs before any HEAD / DELETE so an unauthenticated or cross-org caller
- * can neither probe nor delete another org's objects.
+ * a loads:edit member of THAT org, requires the load to exist there, and
+ * refuses a key an existing document row already references. Runs before
+ * any HEAD / DELETE so a caller can neither probe nor delete objects it
+ * did not just presign.
  */
 export const assertWebUploadKey = internalQuery({
   args: { key: v.string() },
@@ -82,6 +88,7 @@ export const assertWebUploadKey = internalQuery({
     const loadId = ctx.db.normalizeId('loadInformation', rawLoadId);
     const load = loadId ? await ctx.db.get(loadId) : null;
     if (!load || !loadId || load.workosOrgId !== orgId) throw new ConvexError('Invalid document key');
+    if (await keyAlreadyRecorded(ctx, loadId, args.key)) throw new ConvexError('Invalid document key');
     return { loadId, orgId, type };
   },
 });
@@ -108,6 +115,7 @@ export const createFromWeb = internalMutation({
     const who = await assertOrgPermission(ctx, load.workosOrgId, 'loads:edit');
     const prefix = `orgs/${load.workosOrgId}/loads/${args.loadId}/${args.type}/`;
     if (!args.externalKey.startsWith(prefix)) throw new ConvexError('Invalid document key');
+    if (await keyAlreadyRecorded(ctx, args.loadId, args.externalKey)) throw new ConvexError('Invalid document key');
     if (!isStoredContentType(args.contentType)) throw new ConvexError('Unsupported file type');
 
     const now = Date.now();

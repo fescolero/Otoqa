@@ -134,27 +134,36 @@ export default function SettingsDocumentsPage() {
           sharedByDefault: entity === 'organization' ? form.sharedByDefault : undefined,
         });
         toast.success(`Added "${form.name.trim()}"`);
-      } else if (dialog.type.isSystem) {
-        await upsertOverride({
-          key: dialog.type.key,
-          name: form.name,
-          expires: form.expires,
-          issueDateRequired: form.issueDateRequired,
-          uploadRequired: form.uploadRequired,
-          sharedByDefault: entity === 'organization' ? form.sharedByDefault : undefined,
-        });
-        toast.success(`Updated "${form.name.trim()}"`);
       } else {
-        await updateCustom({
-          key: dialog.type.key,
-          name: form.name,
-          expires: form.expires,
-          issueDateRequired: form.issueDateRequired,
-          uploadRequired: form.uploadRequired,
-          singleton: form.singleton,
-          sharedByDefault: entity === 'organization' ? form.sharedByDefault : undefined,
-        });
-        toast.success(`Updated "${form.name.trim()}"`);
+        // Only the fields that changed: for a system type an unmentioned
+        // flag stays on the code default (and follows it later), exactly
+        // as the dialog promises; for a custom type it is simply a no-op.
+        const t = dialog.type;
+        const changes: {
+          name?: string;
+          expires?: boolean;
+          issueDateRequired?: boolean;
+          uploadRequired?: boolean;
+          singleton?: boolean;
+          sharedByDefault?: boolean;
+        } = {};
+        if (form.name.trim() !== t.name) changes.name = form.name.trim();
+        if (form.expires !== t.expires) changes.expires = form.expires;
+        if (form.issueDateRequired !== t.issueDateRequired) changes.issueDateRequired = form.issueDateRequired;
+        if (form.uploadRequired !== t.uploadRequired) changes.uploadRequired = form.uploadRequired;
+        if (!t.isSystem && form.singleton !== t.singleton) changes.singleton = form.singleton;
+        if (entity === 'organization' && form.sharedByDefault !== t.sharedByDefault) {
+          changes.sharedByDefault = form.sharedByDefault;
+        }
+        if (Object.keys(changes).length === 0) {
+          toast.message('No changes to save');
+        } else if (t.isSystem) {
+          await upsertOverride({ key: t.key, ...changes });
+          toast.success(`Updated "${form.name.trim()}"`);
+        } else {
+          await updateCustom({ key: t.key, ...changes });
+          toast.success(`Updated "${form.name.trim()}"`);
+        }
       }
       setDialog(null);
     } catch (e) {

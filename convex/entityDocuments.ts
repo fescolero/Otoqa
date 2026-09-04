@@ -348,10 +348,15 @@ interface SharedDoc extends PublicDoc {
 }
 
 /** The linked carrier org's shared organization documents, mapped onto
- *  the carrier type keys they satisfy on this partnership. */
-async function sharedDocsForPartnership(ctx: Ctx, p: Doc<'carrierPartnerships'>): Promise<SharedDoc[]> {
+ *  the carrier type keys they satisfy on this partnership. Pass `linkedOrg`
+ *  when the caller already resolved it (orgByAnyId is up to three reads). */
+async function sharedDocsForPartnership(
+  ctx: Ctx,
+  p: Doc<'carrierPartnerships'>,
+  linkedOrg?: Doc<'organizations'> | null,
+): Promise<SharedDoc[]> {
   if (!p.carrierOrgId) return [];
-  const org = await orgByAnyId(ctx, p.carrierOrgId);
+  const org = linkedOrg === undefined ? await orgByAnyId(ctx, p.carrierOrgId) : linkedOrg;
   if (!org?.workosOrgId || org.isDeleted) return [];
   const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
   const rows = await activeDocsFor(ctx, org.workosOrgId, 'organization', org.workosOrgId);
@@ -952,14 +957,12 @@ export const listForEntity = query({
     if (args.entity === 'carrier') {
       const pid = ctx.db.normalizeId('carrierPartnerships', args.entityId);
       const p = pid ? await ctx.db.get(pid) : null;
-      if (p) {
-        shared = await sharedDocsForPartnership(ctx, p);
-        if (p.carrierOrgId) {
-          const org = await orgByAnyId(ctx, p.carrierOrgId);
-          linkedCarrierName = org?.name;
-          if (org && isOffboarding(org) && org.purgeAt && org.offboardingStartedAt) {
-            linkedCarrierOffboarding = { purgeAt: org.purgeAt, startedAt: org.offboardingStartedAt };
-          }
+      if (p?.carrierOrgId) {
+        const org = await orgByAnyId(ctx, p.carrierOrgId);
+        shared = await sharedDocsForPartnership(ctx, p, org);
+        linkedCarrierName = org?.name;
+        if (org && isOffboarding(org) && org.purgeAt && org.offboardingStartedAt) {
+          linkedCarrierOffboarding = { purgeAt: org.purgeAt, startedAt: org.offboardingStartedAt };
         }
       }
     }
@@ -1078,8 +1081,10 @@ const PURGE_BATCH = 200;
  * unreferenced bytes. Paged. Entity documents never need this — their
  * keys are always built under the prefix.
  */
-/** True only while the org is due AND still offboarding — a staff cancel
- *  that lands mid-run must stop every later step (spec §7). */
+/** True only while the org is due AND still offboarding. Once `purgeAt`
+ *  has passed, cancelOffboarding refuses (spec §7: the purge is committed),
+ *  so this is defense in depth for the row/stamp steps — the first
+ *  irreversible step (deleting the prefix) can never race a cancel. */
 function stillDueForPurge(org: Doc<'organizations'> | null, now: number): org is Doc<'organizations'> {
   return !!org && isOffboarding(org) && org.purgeAt !== undefined && org.purgeAt <= now;
 }
@@ -1373,16 +1378,6 @@ export const backfillPartnershipSummaries = internalMutation({
       processed++;
     }
     return { processed, nextCursor: page.isDone ? null : page.continueCursor };
-  },
-});
-
-/** Convenience for tests and the driver page: who the caller is. */
-export const whoami = internalQuery({
-  args: {},
-  returns: v.object({ orgId: v.string(), userId: v.string() }),
-  handler: async (ctx) => {
-    const { orgId, userId } = await requireCallerIdentity(ctx);
-    return { orgId, userId };
   },
 });
 

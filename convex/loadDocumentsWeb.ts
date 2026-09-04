@@ -20,22 +20,19 @@ import { ConvexError, v } from 'convex/values';
 import { action } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
-import { MAX_DOCUMENT_BYTES, isStoredContentType, metadataToHeaders, sanitizeFilename } from './lib/r2';
+import {
+  MAX_DOCUMENT_BYTES,
+  isStoredContentType,
+  metadataToHeaders,
+  sanitizeFilename,
+  webLoadDocTypeValidator as webDocType,
+} from './lib/r2';
 import {
   buildLoadDocumentKey,
   deleteObjectByKey,
   headObject,
   presignPutWithMetadata,
 } from './s3Upload';
-
-const webDocType = v.union(
-  v.literal('POD'),
-  v.literal('Receipt'),
-  v.literal('Cargo'),
-  v.literal('Damage'),
-  v.literal('Accident'),
-  v.literal('Other'),
-);
 
 export const getUploadUrl = action({
   args: {
@@ -87,8 +84,9 @@ export const finalizeUpload = action({
   },
   returns: v.object({ documentId: v.id('loadDocuments') }),
   handler: async (ctx, args): Promise<{ documentId: Id<'loadDocuments'> }> => {
-    // Ownership first: the key must be under a load the caller's org owns
-    // and match the load/type being recorded. No storage call before this.
+    // Ownership first: the key must be under a load the caller's org owns,
+    // match the load/type being recorded, and not already back a recorded
+    // document. No storage call before this.
     const owned: { loadId: Id<'loadInformation'>; orgId: string; type: string } = await ctx.runQuery(
       internal.loadDocuments.assertWebUploadKey,
       { key: args.key },
@@ -123,8 +121,9 @@ export const cancelUpload = action({
   args: { key: v.string() },
   returns: v.null(),
   handler: async (ctx, args): Promise<null> => {
-    // Same ownership rule as finalize — an unauthenticated or cross-org
-    // caller must not be able to delete anyone's object.
+    // Same rule as finalize — an unauthenticated or cross-org caller must
+    // not be able to delete anyone's object, and nobody may delete the
+    // bytes behind a recorded document this way (that is loadDocuments.remove).
     await ctx.runQuery(internal.loadDocuments.assertWebUploadKey, { key: args.key });
     try {
       await deleteObjectByKey(args.key);

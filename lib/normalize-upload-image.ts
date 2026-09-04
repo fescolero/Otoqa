@@ -15,6 +15,8 @@
 
 export const ACCEPTED_UPLOAD_EXTENSIONS = ['.pdf', '.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif'];
 
+import { isStoredContentType } from '@/convex/lib/r2';
+
 export const UPLOAD_INPUT_ACCEPT = [
   ...ACCEPTED_UPLOAD_EXTENSIONS,
   'application/pdf',
@@ -24,8 +26,6 @@ export const UPLOAD_INPUT_ACCEPT = [
   'image/heic',
   'image/heif',
 ].join(',');
-
-const STORED_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/webp']);
 
 const EXT_TO_TYPE: Record<string, string> = {
   pdf: 'application/pdf',
@@ -56,7 +56,7 @@ export function isHeic(file: File): boolean {
 }
 
 export function isStoredType(file: File): boolean {
-  return STORED_TYPES.has(effectiveContentType(file));
+  return isStoredContentType(effectiveContentType(file));
 }
 
 export interface NormalizedUpload {
