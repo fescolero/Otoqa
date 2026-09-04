@@ -1340,6 +1340,9 @@ export default defineSchema({
         moved: v.number(),
         held: v.number(),
         byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+        // Open loads the closing sweep assigned — released earlier and
+        // refused then, placed now that whatever blocked them is gone.
+        sweepAssigned: v.optional(v.number()),
       }),
     ),
 

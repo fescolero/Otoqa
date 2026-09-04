@@ -493,6 +493,7 @@ export const recordBulkRotation = internalMutation({
       moved: v.number(),
       held: v.number(),
       byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+      sweepAssigned: v.optional(v.number()),
     }),
   },
   returns: v.null(),
@@ -514,8 +515,11 @@ export const recordBulkRotation = internalMutation({
  * rule; phase 2 re-places them. Splitting the phases across rules is what
  * makes a driver exchange between two rules work: by the time anything is
  * re-placed, both drivers are free of the loads that are leaving them.
- * One summary lands on autoAssignmentSettings for the page banner; each
- * rule still gets its own record.
+ * Phase 3 runs the ordinary sweep for the org, so loads released by an
+ * EARLIER run and refused then (the blocker was still there) are placed
+ * now instead of waiting up to an hour. One summary lands on
+ * autoAssignmentSettings for the page banner; each rule still gets its
+ * own record.
  */
 export const runOrgRotation = internalAction({
   args: {
@@ -526,7 +530,7 @@ export const runOrgRotation = internalAction({
   handler: async (
     ctx,
     args,
-  ): Promise<{ rules: number; considered: number; moved: number; held: number }> => {
+  ): Promise<{ rules: number; considered: number; moved: number; held: number; sweepAssigned: number }> => {
     const ruleIds = await ctx.runQuery(internal.routeRotation.listOrgRuleIds, {
       workosOrgId: args.workosOrgId,
     });
@@ -583,6 +587,23 @@ export const runOrgRotation = internalAction({
       }
     }
 
+    // Phase 3 — the ordinary sweep, now. Anything Open and due (released
+    // by this run or an earlier one) gets the assignment decision again
+    // with the blockers gone. Respects the horizon and every other rule
+    // the hourly sweep does; a load not due yet stays Open until it is.
+    let sweepAssigned = 0;
+    try {
+      const sweep = await ctx.runAction(internal.autoAssignment.autoAssignPendingLoads, {
+        workosOrgId: args.workosOrgId,
+      });
+      sweepAssigned = sweep.assigned;
+      console.log(
+        `[rotation] org ${args.workosOrgId}: closing sweep checked ${sweep.processed}, assigned ${sweep.assigned}`,
+      );
+    } catch (err) {
+      console.error(`[rotation] org ${args.workosOrgId}: closing sweep failed:`, err);
+    }
+
     await ctx.runMutation(internal.routeRotation.recordBulkRotation, {
       workosOrgId: args.workosOrgId,
       lastBulkRotation: {
@@ -594,13 +615,15 @@ export const runOrgRotation = internalAction({
         byReason: [...byReason.entries()]
           .map(([reason, count]) => ({ reason, count }))
           .sort((a, b) => b.count - a.count),
+        sweepAssigned,
       },
     });
 
     console.log(
       `[rotation] org ${args.workosOrgId}: ${ruleIds.length} rules, ${moved} re-placed, ${held} not` +
-        (unclaimedReleased > 0 ? ` (${unclaimedReleased} unclaimed released)` : ''),
+        (unclaimedReleased > 0 ? ` (${unclaimedReleased} unclaimed released)` : '') +
+        (sweepAssigned > 0 ? `, sweep assigned ${sweepAssigned}` : ''),
     );
-    return { rules: ruleIds.length, considered, moved, held };
+    return { rules: ruleIds.length, considered, moved, held, sweepAssigned };
   },
 });

@@ -1247,6 +1247,7 @@ export const getSettings = query({
           moved: v.number(),
           held: v.number(),
           byReason: v.array(v.object({ reason: v.string(), count: v.number() })),
+          sweepAssigned: v.optional(v.number()),
         }),
       ),
       lastRun: v.optional(

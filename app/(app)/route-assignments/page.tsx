@@ -728,6 +728,12 @@ export default function RouteAssignmentsPage() {
           ]}
           actions={
             <>
+              {/* Always reachable — the banner only appears when a rule
+                  owns out-of-sync loads, but the org-wide run also clears
+                  leftovers no rule claims and re-runs the sweep. */}
+              <WBtn size="sm" leading="refresh" onClick={() => setConfirmBulkResync(true)}>
+                Re-sync all
+              </WBtn>
               <WBtn size="sm" leading="export">
                 Export
               </WBtn>
@@ -810,10 +816,16 @@ export default function RouteAssignmentsPage() {
               </span>
               <div className="text-[12.5px] text-foreground">
                 <strong className="font-semibold">
-                  Re-sync {formatAgo(autoAssignSettings.lastBulkRotation.at)}: moved{' '}
-                  {autoAssignSettings.lastBulkRotation.moved} load
-                  {autoAssignSettings.lastBulkRotation.moved === 1 ? '' : 's'} across{' '}
-                  {autoAssignSettings.lastBulkRotation.rules} rule
+                  Re-sync {formatAgo(autoAssignSettings.lastBulkRotation.at)}: re-assigned{' '}
+                  {autoAssignSettings.lastBulkRotation.moved +
+                    (autoAssignSettings.lastBulkRotation.sweepAssigned ?? 0)}{' '}
+                  load
+                  {autoAssignSettings.lastBulkRotation.moved +
+                    (autoAssignSettings.lastBulkRotation.sweepAssigned ?? 0) ===
+                  1
+                    ? ''
+                    : 's'}{' '}
+                  across {autoAssignSettings.lastBulkRotation.rules} rule
                   {autoAssignSettings.lastBulkRotation.rules === 1 ? '' : 's'}.
                 </strong>{' '}
                 {autoAssignSettings.lastBulkRotation.held > 0 ? (
@@ -1039,12 +1051,13 @@ export default function RouteAssignmentsPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Re-sync upcoming loads for every rule?</AlertDialogTitle>
             <AlertDialogDescription>
-              {orgRotation
-                ? `Releases ${orgRotation.outOfSync} upcoming load${orgRotation.outOfSync === 1 ? '' : 's'} across ${orgRotation.rules} rule${orgRotation.rules === 1 ? '' : 's'} and auto-assigns them again under the rules as they are now. `
-                : ''}
-              Loads that have started, are past pickup, or were placed by a dispatcher are never
-              touched. A load no rule claims, or whose assignee is already booked, stays Open for
-              dispatch and is reported here when the run finishes.
+              {orgRotation && orgRotation.outOfSync > 0
+                ? `Releases ${orgRotation.outOfSync} upcoming load${orgRotation.outOfSync === 1 ? '' : 's'} across ${orgRotation.rules} rule${orgRotation.rules === 1 ? '' : 's'} that no longer match, `
+                : 'Releases any auto-assigned loads that no longer match their rule, '}
+              clears leftovers the robot placed that no rule claims now, then runs the assignment
+              sweep. Loads that have started, are past pickup, or were placed by a dispatcher are
+              never touched. A load no rule claims, or whose assignee is already booked, stays
+              Open for dispatch and is reported here when the run finishes.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
