@@ -135,7 +135,9 @@ export default function CapturePhotoScreen() {
 
       if (photo?.uri) {
         const rawUri = photo.uri.startsWith('file://') ? photo.uri : `file://${photo.uri}`;
-        const uri = await prepareImageForUpload(rawUri, photo.width, photo.height);
+        // Camera captures are JPEG regardless of the URI's suffix — say so,
+        // or the extension sniff can force a needless re-encode.
+        const uri = await prepareImageForUpload(rawUri, photo.width, photo.height, 'image/jpeg');
         setCapturedPhoto(uri);
         trackPhotoCapture(true, loadId);
       } else {

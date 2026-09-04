@@ -10,7 +10,7 @@ import {
 } from './clerkSyncScheduler';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 import { logAudit } from './lib/audit';
-import { stampNewDriverSummary } from './entityDocuments';
+import { assertMirrorsEditable, stampNewDriverSummary } from './entityDocuments';
 
 /**
  * Carrier Mobile API
@@ -1368,6 +1368,8 @@ export const updateDriver = mutation({
       }
     }
 
+    // Expiration mirrors belong to the documents once a document exists.
+    await assertMirrorsEditable(ctx, 'driver', driver.organizationId, driverId, cleanUpdates, driver);
     await ctx.db.patch(driverId, cleanUpdates);
 
     // Log the update

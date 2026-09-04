@@ -74,24 +74,44 @@ export function DocumentUploadDialog(props: DocumentUploadDialogProps) {
   );
 }
 
-/** The per-entity action set. Same shapes; different owning rows. */
-function useEntityActions(entity: DocumentEntity) {
-  const driver = {
-    getUploadUrl: useAction(api.driverDocuments.getUploadUrl),
-    finalizeUpload: useAction(api.driverDocuments.finalizeUpload),
-    cancelUpload: useAction(api.driverDocuments.cancelUpload),
+interface PresignCommon {
+  typeKey: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+}
+
+/** The per-entity action set. finalize/cancel share one shape; presign
+ *  differs only in the id field, so it is closed over here with each
+ *  action's real argument type (no casts at the call site). */
+function useEntityActions(entity: DocumentEntity, entityId: string) {
+  const driverPresign = useAction(api.driverDocuments.getUploadUrl);
+  const carrierPresign = useAction(api.carrierDocuments.getUploadUrl);
+  const orgPresign = useAction(api.organizationDocuments.getUploadUrl);
+  const finalize = {
+    driver: useAction(api.driverDocuments.finalizeUpload),
+    carrier: useAction(api.carrierDocuments.finalizeUpload),
+    organization: useAction(api.organizationDocuments.finalizeUpload),
   };
-  const carrier = {
-    getUploadUrl: useAction(api.carrierDocuments.getUploadUrl),
-    finalizeUpload: useAction(api.carrierDocuments.finalizeUpload),
-    cancelUpload: useAction(api.carrierDocuments.cancelUpload),
+  const cancel = {
+    driver: useAction(api.driverDocuments.cancelUpload),
+    carrier: useAction(api.carrierDocuments.cancelUpload),
+    organization: useAction(api.organizationDocuments.cancelUpload),
   };
-  const organization = {
-    getUploadUrl: useAction(api.organizationDocuments.getUploadUrl),
-    finalizeUpload: useAction(api.organizationDocuments.finalizeUpload),
-    cancelUpload: useAction(api.organizationDocuments.cancelUpload),
-  };
-  return { driver, carrier, organization }[entity];
+  const presign = React.useCallback(
+    (common: PresignCommon) => {
+      switch (entity) {
+        case 'driver':
+          return driverPresign({ ...common, driverId: entityId as Id<'drivers'> });
+        case 'carrier':
+          return carrierPresign({ ...common, partnershipId: entityId as Id<'carrierPartnerships'> });
+        case 'organization':
+          return orgPresign({ ...common, orgId: entityId });
+      }
+    },
+    [entity, entityId, driverPresign, carrierPresign, orgPresign],
+  );
+  return { presign, finalizeUpload: finalize[entity], cancelUpload: cancel[entity] };
 }
 
 function UploadForm({
@@ -104,7 +124,7 @@ function UploadForm({
   entityName,
   onSaved,
 }: DocumentUploadDialogProps) {
-  const actions = useEntityActions(entity);
+  const actions = useEntityActions(entity, entityId);
   const createDateOnly = useMutation(api.entityDocuments.createDateOnly);
 
   const visibleTypes = React.useMemo(() => types.filter((t) => !t.hidden), [types]);
@@ -129,21 +149,6 @@ function UploadForm({
     return null;
   };
 
-  const presign = async (fileName: string, contentType: string, sizeBytes: number) => {
-    const common = { typeKey: type!.key, fileName, contentType, sizeBytes };
-    switch (entity) {
-      case 'driver':
-        return (actions as ReturnType<typeof useEntityActions>).getUploadUrl({
-          ...common,
-          driverId: entityId as Id<'drivers'>,
-        } as never);
-      case 'carrier':
-        return actions.getUploadUrl({ ...common, partnershipId: entityId as Id<'carrierPartnerships'> } as never);
-      case 'organization':
-        return actions.getUploadUrl({ ...common, orgId: entityId } as never);
-    }
-  };
-
   const submit = async () => {
     const problem = validate();
     if (problem) {
@@ -155,7 +160,7 @@ function UploadForm({
     const dates = { issueDate: issueDate || undefined, expirationDate: expirationDate || undefined, note: note || undefined };
     const result = file
       ? await seq.upload(file, {
-          presign: (f) => presign(f.fileName, f.contentType, f.sizeBytes),
+          presign: (f) => actions.presign({ typeKey: type.key, ...f }),
           cancel: (p) => actions.cancelUpload({ docId: p.docId }),
           finalize: (p) => actions.finalizeUpload({ docId: p.docId, ...dates }),
         })

@@ -42,6 +42,19 @@ export function isStoredContentType(ct: string | undefined | null): ct is Stored
 
 export const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
 
+/** Size rule alone (the browser checks this before any conversion). */
+export function fileSizeProblem(sizeBytes: number): string | null {
+  if (!(sizeBytes > 0)) return 'File is empty.';
+  if (sizeBytes > MAX_DOCUMENT_BYTES) return 'File is too large (25 MB max).';
+  return null;
+}
+
+/** THE declared-file check every presign runs: stored type + size. */
+export function declaredFileProblem(contentType: string, sizeBytes: number): string | null {
+  if (!isStoredContentType(contentType)) return 'Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.';
+  return fileSizeProblem(sizeBytes);
+}
+
 /** Load-document types a web/ops user may upload (no deprecated alias).
  *  One definition for the presign action, the record mutation and the
  *  upload dialog, so the three can never disagree. */

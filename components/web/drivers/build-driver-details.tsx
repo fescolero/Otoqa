@@ -53,6 +53,10 @@ export interface DriverRow {
   /** Time-independent missing-documents summary written by the backend.
    *  Undefined on rows from before the summary existed. */
   missingDocTypeKeys?: string[];
+  /** typeKey → effective expiration for expiring types with an active
+   *  document (written with the summary; covers non-mirrored types). */
+  docExpirations?: Record<string, string>;
+  needsDateTypeKeys?: string[];
   hireDate?: string;
   employmentStatus?: string;
   employmentType?: string;

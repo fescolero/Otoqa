@@ -1101,6 +1101,16 @@ describe('second-review follow-ups', () => {
     const asOwnerOrg = { ...CARRIER_ADMIN, org_id: orgId as string, permissions: [...permissionsForLevel('fleet', 'edit')] };
     await uploadFor(t, asOwnerOrg, 'driver', driverId, 'cdl', { expirationDate: '2031-07-07' });
     expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2031-07-07');
+
+    // The broker's own owner_driver_cdl document competes: latest expiry wins, one writer.
+    await uploadFor(t, BROKER_USER, 'carrier', partnershipId, 'owner_driver_cdl', { expirationDate: '2032-01-01' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2032-01-01');
+    await uploadFor(t, asOwnerOrg, 'driver', driverId, 'cdl', { expirationDate: '2031-09-09' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2032-01-01');
+    // …and the partnership mirror is locked while any of those documents exists.
+    await expect(
+      t.withIdentity(BROKER_USER as never).mutation(api.carrierPartnerships.update, { partnershipId, ownerDriverLicenseExpiration: '2040-01-01' }),
+    ).rejects.toThrow(/replace the document/);
   });
 
   it('a soft-deleted carrier shares nothing on the read path either', async () => {
@@ -1121,6 +1131,83 @@ describe('second-review follow-ups', () => {
     expect(page.rows).toHaveLength(1);
     expect(page.rows[0].sizeBytes).toBe(10);
     expect(page.nextCursor).toBeNull();
+  });
+
+  it('backfillDriverSummaries finishes the whole table from one command by scheduling later pages', async () => {
+    const t = setup();
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 7; i++) await insertDriver(ctx);
+    });
+    const first = await t.mutation(internal.entityDocuments.backfillDriverSummaries, { batch: 3 });
+    expect(first).toMatchObject({ processed: 3, scheduledNext: true });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const drivers = await t.run((ctx) => ctx.db.query('drivers').collect());
+    expect(drivers.every((d) => d.missingDocTypeKeys !== undefined)).toBe(true);
+  });
+
+  it('a soft-deleted carrier is not announced as linked', async () => {
+    const t = setup();
+    const { orgId, partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    await t.run((ctx) => ctx.db.patch(orgId, { isDeleted: true }));
+    const list = await t.withIdentity(BROKER_USER as never).query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    expect(list.shared).toHaveLength(0);
+    expect(list.linkedCarrierName).toBeUndefined();
+  });
+
+  it('the summary stamps docExpirations for every expiring type, and drivers.update refuses to edit a mirrored date once a document exists', async () => {
+    const t = setup();
+    const driverId = await t.run((ctx) => insertDriver(ctx));
+    await uploadFor(t, EDITOR, 'driver', driverId, 'hazmat', { expirationDate: '2031-02-02' });
+    await uploadFor(t, EDITOR, 'driver', driverId, 'cdl', { expirationDate: '2031-03-03' });
+    const d = await t.run((ctx) => ctx.db.get(driverId));
+    expect(d?.docExpirations).toEqual({ hazmat: '2031-02-02', cdl: '2031-03-03' });
+    expect(d?.licenseExpiration).toBe('2031-03-03');
+
+    await expect(
+      t.withIdentity(EDITOR as never).mutation(api.drivers.update, { id: driverId, licenseExpiration: '2040-01-01' }),
+    ).rejects.toThrow(/replace the document/);
+    // A full-form save that resends the unchanged value is not a mirror edit.
+    await t.withIdentity(EDITOR as never).mutation(api.drivers.update, { id: driverId, licenseExpiration: '2031-03-03', phone: '+15550001111' });
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.phone).toBe('+15550001111');
+    // A mirror with no document behind it stays editable.
+    await t.withIdentity(EDITOR as never).mutation(api.drivers.update, { id: driverId, medicalExpiration: '2030-01-01' });
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.medicalExpiration).toBe('2030-01-01');
+  });
+
+  it('soft-deleting and restoring a carrier org resummarizes its linked partnerships', async () => {
+    const t = setup();
+    const { orgId, partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.missingDocTypeKeys).not.toContain('coi');
+    const asStaff = t.withIdentity(STAFF as never);
+    await asStaff.mutation(api.platform.support.softDeleteOrg, { organizationId: orgId, reason: 'Test' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.missingDocTypeKeys).toContain('coi');
+    await asStaff.mutation(api.platform.support.restoreOrg, { organizationId: orgId, reason: 'Test' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.missingDocTypeKeys).not.toContain('coi');
+  });
+
+  it('a type flipped to Expires after a dated-less upload is "Needs date" on the list too', async () => {
+    const t = setup();
+    const driverId = await t.run((ctx) => insertDriver(ctx));
+    const asAdmin = t.withIdentity(ADMIN as never);
+    await asAdmin.mutation(api.documentTypes.upsertSystemOverride, { key: 'medical', expires: false });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    await uploadFor(t, ADMIN, 'driver', driverId, 'medical', {});
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.needsDateTypeKeys).toEqual([]);
+    await asAdmin.mutation(api.documentTypes.upsertSystemOverride, { key: 'medical', expires: true });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.needsDateTypeKeys).toEqual(['medical']);
+  });
+
+  it('an empty file is refused as empty, not as too large', async () => {
+    const t = setup();
+    const driverId = await t.run((ctx) => insertDriver(ctx));
+    await expect(
+      t.withIdentity(EDITOR as never).mutation(internal.entityDocuments.createPending, {
+        entity: 'driver', entityId: driverId, typeKey: 'cdl', fileName: 'cdl.pdf', contentType: 'application/pdf', sizeBytes: 0,
+      }),
+    ).rejects.toThrow(/File is empty/);
   });
 
   it('startOffboarding is idempotent: a repeat call neither re-notifies nor re-audits', async () => {

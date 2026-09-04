@@ -5,7 +5,7 @@ import { countDriverAttention } from './_helpers/documentStatus';
 import { loadEffectiveCatalog } from './lib/documentCatalog';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
-import { stampNewDriverSummary } from './entityDocuments';
+import { assertMirrorsEditable, stampNewDriverSummary } from './entityDocuments';
 import {
   scheduleCreateClerkUserForDriver,
   scheduleUpdateClerkUserPhone,
@@ -178,7 +178,7 @@ export const create = mutation({
     licenseNumber: v.string(),
     // License Information (non-sensitive)
     licenseState: v.string(),
-    licenseExpiration: v.string(),
+    licenseExpiration: v.optional(v.string()), // the CDL document sets the mirror (spec §5.4)
     licenseClass: v.string(),
     gender: v.optional(v.string()),
     // Medical
@@ -375,6 +375,9 @@ export const update = mutation({
     if (driver.organizationId !== callerOrgId) {
       throw new ConvexError('Driver not found');
     }
+
+    // Expiration mirrors belong to the documents once a document exists.
+    await assertMirrorsEditable(ctx, 'driver', driver.organizationId, id, updates, driver);
 
     // Handle payPlanId separately (it's an Id type, not a string)
     if (payPlanId !== undefined) {

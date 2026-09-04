@@ -15,7 +15,7 @@
 
 import * as React from 'react';
 
-import { MAX_DOCUMENT_BYTES } from '@/convex/lib/r2';
+import { fileSizeProblem } from '@/convex/lib/r2';
 import { normalizeUploadImage, type NormalizedUpload } from '@/lib/normalize-upload-image';
 import { putWithProgress } from '@/lib/upload-put';
 import { convexErrorMessage } from '@/lib/convex-error';
@@ -46,8 +46,7 @@ export interface UploadSteps<P extends PresignedUpload, R> {
 /** Pre-flight the file locally so the user hears about it before any call. */
 export function validateUploadFile(file: File | null): string | null {
   if (!file) return 'Attach the document file.';
-  if (file.size > MAX_DOCUMENT_BYTES) return 'File is too large (25 MB max).';
-  return null;
+  return fileSizeProblem(file.size); // type is checked after HEIC conversion
 }
 
 export function useUploadSequence() {
@@ -90,7 +89,17 @@ export function useUploadSequence() {
         }
 
         setPhase('finalizing');
-        return await steps.finalize(presigned, normalized);
+        try {
+          return await steps.finalize(presigned, normalized);
+        } catch (finalizeErr) {
+          // Whatever finalize refused (dates, a type hidden meanwhile, an
+          // object that never landed): drop the pending row and any object
+          // now rather than leaving one per retry until the sweep. The
+          // server discards on every finalize failure too; cancel is a
+          // no-op once a row is active.
+          await steps.cancel(presigned).catch(() => undefined);
+          throw finalizeErr;
+        }
       } catch (e) {
         setError(convexErrorMessage(e) ?? (e instanceof Error ? e.message : 'Upload failed. Please try again.'));
         return undefined;

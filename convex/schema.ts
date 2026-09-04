@@ -737,6 +737,13 @@ export default defineSchema({
     // the summary existed (treated as "everything missing" by
     // _helpers/documentStatus.driverMissingKeys until the backfill runs).
     missingDocTypeKeys: v.optional(v.array(v.string())),
+    // Effective expiration per expiring type with an active document
+    // (typeKey → YYYY-MM-DD), so list-row attention covers every expiring
+    // type, not only the four mirrored ones. Same writer as above.
+    docExpirations: v.optional(v.record(v.string(), v.string())),
+    // Expiring types whose active document(s) carry no date (the Documents
+    // tab's "Needs date"), so list-row attention agrees with the tab.
+    needsDateTypeKeys: v.optional(v.array(v.string())),
 
     // Employment
     hireDate: v.string(),
@@ -2581,6 +2588,7 @@ export default defineSchema({
     note: v.optional(v.string()),
   })
     .index('by_load', ['loadId'])
+    .index('by_externalKey', ['externalKey'])
     .index('by_load_type', ['loadId', 'type'])
     .index('by_load_capturedAt', ['loadId', 'capturedAt'])
     .index('by_driver_captured', ['driverId', 'capturedAt'])

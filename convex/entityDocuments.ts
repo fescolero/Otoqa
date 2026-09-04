@@ -32,7 +32,7 @@ import {
   type MutationCtx,
   type QueryCtx,
 } from './_generated/server';
-import { assertOrgPermission, getCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { assertOrgPermission, assertOrgPermissionOrNotFound, getCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit, type AuditEntityType } from './lib/audit';
 import {
   documentEntityValidator,
@@ -40,18 +40,19 @@ import {
   loadEffectiveCatalog,
 } from './lib/documentCatalog';
 import type { DocumentEntity } from './lib/documentTypeDefaults';
+import { CARRIER_MIRROR_TO_TYPE_KEY, DRIVER_MIRROR_TO_TYPE_KEY } from './lib/documentTypeDefaults';
 import { isOffboarding, orgByAnyId, partnershipSharesDocuments, partnershipsLinkedToOrg } from './lib/orgLookup';
 import { logPlatformAudit } from './lib/platformAudit';
 import {
-  MAX_DOCUMENT_BYTES,
   buildEntityDocumentKey,
-  isStoredContentType,
+  declaredFileProblem,
   keyFromExternalUrl,
   sanitizeFilename,
 } from './lib/r2';
 import { parseDateString } from './_helpers/dateUtils';
 import {
   computeMissingTypeKeys,
+  computeNeedsDateTypeKeys,
   pickEffectiveDocument,
   type EffectiveDocumentType,
 } from './_helpers/documentStatus';
@@ -225,21 +226,11 @@ export async function assertEntityAccess(
 ): Promise<Caller & { owner: Owner }> {
   const owner = await resolveOwner(ctx, entity, entityId);
   if (!owner) throw new ConvexError('Not found');
-  let who: Caller;
-  try {
-    who = await assertOrgPermission(ctx, owner.orgId, `${PERMISSION_AREA[entity]}:${intent}`);
-  } catch (e) {
-    // Cross-org callers get the same answer as a missing row.
-    const msg = e instanceof ConvexError ? String(e.data) : '';
-    if (msg.includes('Not authorized')) throw new ConvexError('Not found');
-    throw e;
-  }
+  // Cross-org callers get the same answer as a missing row.
+  const who: Caller = await assertOrgPermissionOrNotFound(ctx, owner.orgId, `${PERMISSION_AREA[entity]}:${intent}`);
   return { ...who, owner };
 }
 
-/** Whether an organization document is visible to linked brokers: the
- *  type's default unless the document overrides it. Never true for a
- *  hidden type. */
 /** Can documents of this type reach linked brokers at all? Only the
  *  system company types that map onto a carrier type (`partnerTypeKey`);
  *  a custom company type has no counterpart on the broker's side. */
@@ -247,6 +238,9 @@ function isShareableType(type: EffectiveDocumentType | undefined): type is Effec
   return !!type && !type.hidden && !!type.partnerTypeKey;
 }
 
+/** Whether an organization document is visible to linked brokers: the
+ *  type's default unless the document overrides it. Never true for a
+ *  hidden or non-shareable type. */
 function isSharedByRule(doc: Doc<'entityDocuments'>, type: EffectiveDocumentType | undefined): boolean {
   if (doc.entity !== 'organization' || !isShareableType(type)) return false;
   return doc.shared ?? type.sharedByDefault;
@@ -364,17 +358,11 @@ interface SharedDoc extends PublicDoc {
   raw: Doc<'entityDocuments'>;
 }
 
-/** The linked carrier org's shared organization documents, mapped onto
- *  the carrier type keys they satisfy on this partnership. Pass `linkedOrg`
- *  when the caller already resolved it (orgByAnyId is up to three reads). */
-async function sharedDocsForPartnership(
-  ctx: Ctx,
-  p: Doc<'carrierPartnerships'>,
-  linkedOrg?: Doc<'organizations'> | null,
-): Promise<SharedDoc[]> {
-  if (!partnershipSharesDocuments(p)) return [];
-  const org = linkedOrg === undefined ? await orgByAnyId(ctx, p.carrierOrgId) : linkedOrg;
-  if (!org?.workosOrgId || org.isDeleted) return [];
+/** Everything a carrier org shares, mapped onto the carrier type keys it
+ *  satisfies — identical for every partnership of that org, so callers
+ *  that fan out over partnerships compute it once. */
+async function sharedDocsFromOrg(ctx: Ctx, org: Doc<'organizations'>): Promise<SharedDoc[]> {
+  if (!org.workosOrgId || org.isDeleted) return [];
   const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
   const rows = await activeDocsFor(ctx, org.workosOrgId, 'organization', org.workosOrgId);
   const out: SharedDoc[] = [];
@@ -391,6 +379,21 @@ async function sharedDocsForPartnership(
     });
   }
   return out;
+}
+
+/** The linked carrier org's shared documents as seen from ONE partnership
+ *  (nothing unless the link shares). Pass `linkedOrg` / `fromOrg` when the
+ *  caller already resolved them (orgByAnyId is up to three reads). */
+async function sharedDocsForPartnership(
+  ctx: Ctx,
+  p: Doc<'carrierPartnerships'>,
+  linkedOrg?: Doc<'organizations'> | null,
+  fromOrg?: SharedDoc[],
+): Promise<SharedDoc[]> {
+  if (!partnershipSharesDocuments(p)) return [];
+  const org = linkedOrg === undefined ? await orgByAnyId(ctx, p.carrierOrgId) : linkedOrg;
+  if (!org?.workosOrgId || org.isDeleted) return [];
+  return fromOrg ?? sharedDocsFromOrg(ctx, org);
 }
 
 // ─── Mirrors + summaries ─────────────────────────────────────────────────
@@ -414,26 +417,15 @@ async function writeDriverMirror(
   if (driver[field] === expirationDate) return;
   await ctx.db.patch(id, { [field]: expirationDate, updatedAt: Date.now() });
   if (field === 'licenseExpiration') {
-    await syncOwnerDriverLicense(ctx, driver, expirationDate);
   }
 }
 
-/**
- * Owner-operator drivers mirror their CDL expiry onto every partnership
- * that lists them as owner-driver (same rule drivers.update applies).
- */
-async function syncOwnerDriverLicense(
-  ctx: MutationCtx,
-  driver: Doc<'drivers'>,
-  licenseExpiration: string | undefined,
-): Promise<void> {
-  // Owner-operator drivers store the organizations _id (not the WorkOS
-  // id) in organizationId — resolve across every shape, as drivers.update does.
-  const org = await orgByAnyId(ctx, driver.organizationId);
-  if (!org || !org.isOwnerOperator || org.ownerDriverId !== driver._id) return;
-  for (const p of await partnershipsLinkedToOrg(ctx, org)) {
-    await ctx.db.patch(p._id, { ownerDriverLicenseExpiration: licenseExpiration, updatedAt: Date.now() });
-  }
+
+function sameRecord(a: Record<string, string> | undefined, b: Record<string, string>): boolean {
+  if (!a) return false; // unstamped → stamp (even an empty map marks it computed)
+  const ak = Object.keys(a).sort();
+  const bk = Object.keys(b).sort();
+  return ak.length === bk.length && ak.every((k, i) => k === bk[i] && a[k] === b[k]);
 }
 
 function sameKeys(a: string[] | undefined, b: string[]): boolean {
@@ -453,12 +445,19 @@ export async function recomputePartnershipDocuments(
   ctx: MutationCtx,
   partnershipId: Id<'carrierPartnerships'>,
   catalogIn?: EffectiveDocumentType[],
+  sharedIn?: SharedDoc[],
+  linkedOrgIn?: Doc<'organizations'> | null,
 ): Promise<void> {
   const p = await ctx.db.get(partnershipId);
   if (!p) return;
   const catalog = catalogIn ?? (await loadEffectiveCatalog(ctx, p.brokerOrgId, 'carrier'));
   const own = await activeDocsFor(ctx, p.brokerOrgId, 'carrier', p._id);
-  const shared = await sharedDocsForPartnership(ctx, p);
+  const linkedOrg =
+    linkedOrgIn !== undefined ? linkedOrgIn : p.carrierOrgId ? await orgByAnyId(ctx, p.carrierOrgId) : null;
+  const shared = sharedIn ?? (await sharedDocsForPartnership(ctx, p, linkedOrg));
+  // The linked owner-operator's own CDL document (its stamped expiry) is a
+  // third candidate for ownerDriverLicenseExpiration, never a second writer.
+  const ownerCdlExpiry = await linkedOwnerCdlExpiry(ctx, p, linkedOrg);
 
   const missing = computeMissingTypeKeys(catalog, [
     ...own.map((d) => ({ typeKey: d.typeKey, hasFile: !!d.externalKey })),
@@ -473,7 +472,12 @@ export async function recomputePartnershipDocuments(
     const eff = pickEffectiveDocument<{ expirationDate?: string }>(
       type,
       own.filter((d) => d.typeKey === type.key).map((d) => ({ expirationDate: d.expirationDate })),
-      shared.filter((s) => s.partnerTypeKey === type.key).map((s) => ({ expirationDate: s.expirationDate })),
+      [
+        ...shared.filter((s) => s.partnerTypeKey === type.key).map((s) => ({ expirationDate: s.expirationDate })),
+        ...(type.mirrorField === 'ownerDriverLicenseExpiration' && ownerCdlExpiry
+          ? [{ expirationDate: ownerCdlExpiry }]
+          : []),
+      ],
     );
     if (!eff?.doc.expirationDate) continue; // nothing effective → keep stale
     const field = type.mirrorField as 'insuranceExpiration' | 'ownerDriverLicenseExpiration';
@@ -485,13 +489,39 @@ export async function recomputePartnershipDocuments(
   }
 }
 
-/** A carrier org's organization documents changed (or its sharing did):
- *  every broker linked to it may see a different effective set. */
-async function recomputeLinkedPartnerships(ctx: MutationCtx, orgWorkosId: string): Promise<void> {
-  const org = await orgByAnyId(ctx, orgWorkosId);
+/** The linked carrier's owner-driver CDL expiry as stamped from THEIR
+ *  documents (drivers.docExpirations.cdl) — undefined when the link does
+ *  not share, the org is not an owner-operator, or no CDL document exists.
+ *  A hand-entered legacy licenseExpiration is not a document and is not
+ *  a candidate. */
+async function linkedOwnerCdlExpiry(
+  ctx: Ctx,
+  p: Doc<'carrierPartnerships'>,
+  org: Doc<'organizations'> | null,
+): Promise<string | undefined> {
+  if (!org || org.isDeleted || !org.isOwnerOperator || !org.ownerDriverId) return undefined;
+  if (!partnershipSharesDocuments(p)) return undefined;
+  const driver = await ctx.db.get(org.ownerDriverId);
+  if (!driver || driver.isDeleted) return undefined;
+  return driver.docExpirations?.cdl;
+}
+
+/** Resummarize every partnership linked to a carrier org after anything
+ *  on the carrier side changed (a document, a sharing flag, soft-delete /
+ *  restore, purge). The org's shared set and each broker's catalog are
+ *  resolved once, not once per partnership. */
+export async function recomputeLinkedPartnerships(ctx: MutationCtx, orgAnyId: string): Promise<void> {
+  const org = await orgByAnyId(ctx, orgAnyId);
   if (!org) return;
+  const fromOrg = await sharedDocsFromOrg(ctx, org);
+  const catalogs = new Map<string, EffectiveDocumentType[]>();
   for (const p of await partnershipsLinkedToOrg(ctx, org)) {
-    await recomputePartnershipDocuments(ctx, p._id);
+    let catalog = catalogs.get(p.brokerOrgId);
+    if (!catalog) {
+      catalog = await loadEffectiveCatalog(ctx, p.brokerOrgId, 'carrier');
+      catalogs.set(p.brokerOrgId, catalog);
+    }
+    await recomputePartnershipDocuments(ctx, p._id, catalog, partnershipSharesDocuments(p) ? fromOrg : [], org);
   }
 }
 
@@ -512,20 +542,47 @@ export async function recomputeEntitySummary(
   entity: DocumentEntity,
   entityId: string,
   catalog?: EffectiveDocumentType[],
+  /** The entity's active documents as they stand NOW, when the caller
+   *  already holds them (activate does) — saves the index re-read. */
+  activeIn?: Doc<'entityDocuments'>[],
 ): Promise<void> {
   switch (entity) {
     case 'driver': {
       const types = catalog ?? (await loadEffectiveCatalog(ctx, orgId, 'driver'));
-      const active = await activeDocsFor(ctx, orgId, 'driver', entityId);
+      const active = activeIn ?? (await activeDocsFor(ctx, orgId, 'driver', entityId));
       const missing = computeMissingTypeKeys(
         types,
         active.map((d) => ({ typeKey: d.typeKey, hasFile: !!d.externalKey })),
       );
+      // Effective expiration per expiring type (latest wins for
+      // multi-document types) — list-row attention for the types that
+      // have no mirror field.
+      const docExpirations: Record<string, string> = {};
+      for (const d of active) {
+        const type = types.find((t) => t.key === d.typeKey);
+        if (!type?.expires || type.hidden || !d.expirationDate) continue;
+        const cur = docExpirations[d.typeKey];
+        if (!cur || d.expirationDate > cur) docExpirations[d.typeKey] = d.expirationDate;
+      }
       const id = ctx.db.normalizeId('drivers', entityId);
       if (!id) return;
       const driver = await ctx.db.get(id);
-      if (driver && !sameKeys(driver.missingDocTypeKeys, missing)) {
-        await ctx.db.patch(id, { missingDocTypeKeys: missing });
+      if (!driver) return;
+      const needsDate = computeNeedsDateTypeKeys(
+        types,
+        active.map((d) => ({ typeKey: d.typeKey, expirationDate: d.expirationDate })),
+      );
+      const patch: Partial<Doc<'drivers'>> = {};
+      if (!sameKeys(driver.missingDocTypeKeys, missing)) patch.missingDocTypeKeys = missing;
+      if (!sameRecord(driver.docExpirations, docExpirations)) patch.docExpirations = docExpirations;
+      if (!sameKeys(driver.needsDateTypeKeys, needsDate)) patch.needsDateTypeKeys = needsDate;
+      if (Object.keys(patch).length > 0) await ctx.db.patch(id, patch);
+      // An owner-operator's CDL is a candidate for every linked
+      // partnership's ownerDriverLicenseExpiration (latest expiry wins with
+      // the broker's own owner_driver_cdl document) — one writer, here.
+      const org = await orgByAnyId(ctx, driver.organizationId);
+      if (org?.isOwnerOperator && org.ownerDriverId === driver._id) {
+        await recomputeLinkedPartnerships(ctx, org._id as string);
       }
       return;
     }
@@ -537,6 +594,52 @@ export async function recomputeEntitySummary(
     case 'organization':
       await recomputeLinkedPartnerships(ctx, entityId);
       return;
+  }
+}
+
+/**
+ * Mirror fields (drivers.licenseExpiration…, carrierPartnerships.
+ * insuranceExpiration / ownerDriverLicenseExpiration) are written FROM the
+ * effective document. Once a document exists for the type, the field is
+ * read-only everywhere else — a second writer would put the list badges
+ * and the Documents tab in disagreement (spec §6.3). Rows with no
+ * document keep the field editable.
+ */
+export async function assertMirrorsEditable(
+  ctx: Ctx,
+  entity: 'driver' | 'carrier',
+  orgId: string,
+  entityId: string,
+  /** The update being applied (full-form saves resend every field). */
+  edits: Record<string, unknown>,
+  /** The row as stored — only a CHANGED mirror value is a mirror edit. */
+  current: Record<string, unknown>,
+): Promise<void> {
+  const mirrorToType: Record<string, string> =
+    entity === 'driver' ? DRIVER_MIRROR_TO_TYPE_KEY : CARRIER_MIRROR_TO_TYPE_KEY;
+  const touched = Object.keys(mirrorToType).filter(
+    (f) => edits[f] !== undefined && edits[f] !== (current[f] ?? undefined),
+  );
+  if (touched.length === 0) return;
+  const catalog = await loadEffectiveCatalog(ctx, orgId, entity);
+  const own = await activeDocsFor(ctx, orgId, entity, entityId);
+  const covered = new Set(own.map((d) => d.typeKey));
+  if (entity === 'carrier') {
+    const pid = ctx.db.normalizeId('carrierPartnerships', entityId);
+    const p = pid ? await ctx.db.get(pid) : null;
+    if (p) {
+      const org = p.carrierOrgId ? await orgByAnyId(ctx, p.carrierOrgId) : null;
+      for (const sd of await sharedDocsForPartnership(ctx, p, org)) covered.add(sd.partnerTypeKey);
+      if (await linkedOwnerCdlExpiry(ctx, p, org)) covered.add(CARRIER_MIRROR_TO_TYPE_KEY.ownerDriverLicenseExpiration);
+    }
+  }
+  for (const field of touched) {
+    const typeKey = mirrorToType[field];
+    if (!covered.has(typeKey)) continue;
+    const name = catalog.find((t) => t.key === typeKey)?.name ?? typeKey;
+    throw new ConvexError(
+      `${name} expiration comes from the ${name} document — replace the document from the Documents tab to change it`,
+    );
   }
 }
 
@@ -560,9 +663,10 @@ async function activate(
 
   // Singleton: the previous active row is superseded, never deleted.
   let replaced: Doc<'entityDocuments'> | null = null;
+  let activeBefore: Doc<'entityDocuments'>[] | undefined;
   if (type.singleton) {
-    const active = await activeDocsFor(ctx, doc.workosOrgId, doc.entity, doc.entityId);
-    for (const prev of active) {
+    activeBefore = await activeDocsFor(ctx, doc.workosOrgId, doc.entity, doc.entityId);
+    for (const prev of activeBefore) {
       if (prev.typeKey !== doc.typeKey || prev._id === doc._id) continue;
       await ctx.db.patch(prev._id, {
         status: 'archived',
@@ -587,7 +691,14 @@ async function activate(
   });
 
   if (doc.entity === 'driver') await writeDriverMirror(ctx, doc.entityId, type, dates.expirationDate);
-  await recomputeEntitySummary(ctx, doc.workosOrgId, doc.entity, doc.entityId, args.catalog);
+  // The active set after this activation, from the list already read —
+  // the superseded row out, this row in with its final fields.
+  const activated = await ctx.db.get(doc._id);
+  const activeAfter =
+    activeBefore && activated
+      ? [...activeBefore.filter((d) => d._id !== doc._id && d._id !== replaced?._id), activated]
+      : undefined;
+  await recomputeEntitySummary(ctx, doc.workosOrgId, doc.entity, doc.entityId, args.catalog, activeAfter);
 
   await logAudit(ctx, {
     organizationId: doc.workosOrgId,
@@ -639,12 +750,8 @@ export const createPending = internalMutation({
     if (who.owner.deleted) throw new ConvexError('Cannot add documents to a deleted record');
     await requireType(ctx, who.orgId, args.entity, args.typeKey);
     const contentType = args.contentType.toLowerCase();
-    if (!isStoredContentType(contentType)) {
-      throw new ConvexError('Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.');
-    }
-    if (args.sizeBytes <= 0 || args.sizeBytes > MAX_DOCUMENT_BYTES) {
-      throw new ConvexError('File is too large (25 MB max).');
-    }
+    const problem = declaredFileProblem(contentType, args.sizeBytes);
+    if (problem) throw new ConvexError(problem);
     const fileName = sanitizeFilename(args.fileName);
     const now = Date.now();
     const docId = await ctx.db.insert('entityDocuments', {
@@ -977,8 +1084,10 @@ export const listForEntity = query({
       if (p && partnershipSharesDocuments(p)) {
         const org = await orgByAnyId(ctx, p.carrierOrgId);
         shared = await sharedDocsForPartnership(ctx, p, org);
-        linkedCarrierName = org?.name;
-        if (org && isOffboarding(org) && org.purgeAt && org.offboardingStartedAt) {
+        // A soft-deleted carrier shares nothing (see sharedDocsForPartnership),
+        // so don't announce a link that carries nothing.
+        linkedCarrierName = org && !org.isDeleted ? org.name : undefined;
+        if (org && !org.isDeleted && isOffboarding(org) && org.purgeAt && org.offboardingStartedAt) {
           linkedCarrierOffboarding = { purgeAt: org.purgeAt, startedAt: org.offboardingStartedAt };
         }
       }
@@ -1090,14 +1199,6 @@ export const dueForPurge = internalQuery({
 
 const PURGE_BATCH = 200;
 
-/**
- * Object keys referenced by the org's load documents that live OUTSIDE
- * the org prefix (legacy `pod-photos/` / `load-documents/` rows). The
- * purge action deletes these BEFORE any row is removed, so a failure
- * between the two steps leaves rows behind (re-listed next run), never
- * unreferenced bytes. Paged. Entity documents never need this — their
- * keys are always built under the prefix.
- */
 /** True only while the org is due AND still offboarding. Once `purgeAt`
  *  has passed, cancelOffboarding refuses (spec §7: the purge is committed),
  *  so this is defense in depth for the row/stamp steps — the first
@@ -1112,6 +1213,14 @@ export const isStillDueForPurge = internalQuery({
   handler: async (ctx, args) => stillDueForPurge(await ctx.db.get(args.organizationId), args.now),
 });
 
+/**
+ * Object keys referenced by the org's load documents that live OUTSIDE
+ * the org prefix (legacy `pod-photos/` / `load-documents/` rows). The
+ * purge action deletes these BEFORE any row is removed, so a failure
+ * between the two steps leaves rows behind (re-listed next run), never
+ * unreferenced bytes. Paged. Entity documents never need this — their
+ * keys are always built under the prefix.
+ */
 export const legacyLoadKeysForOrg = internalQuery({
   args: { organizationId: v.id('organizations'), cursor: v.optional(v.string()) },
   returns: v.object({ keys: v.array(v.string()), nextCursor: v.union(v.string(), v.null()) }),
@@ -1388,13 +1497,15 @@ export const recomputeSummariesForOrg = internalMutation({
 /**
  * One-time backfill after deploy: stamp `missingDocTypeKeys` on every
  * driver so list pages stop relying on the "undefined = all missing"
- * fallback. Paged; re-runnable.
+ * fallback. Paged and self-scheduling: one run stamps the first page and
+ * schedules the rest, so the documented command finishes the whole table.
+ * Re-runnable (already-stamped rows are no-ops).
  *
  *   npx convex run entityDocuments:backfillDriverSummaries
  */
 export const backfillDriverSummaries = internalMutation({
   args: { cursor: v.optional(v.string()), batch: v.optional(v.number()) },
-  returns: v.object({ processed: v.number(), nextCursor: v.union(v.string(), v.null()) }),
+  returns: v.object({ processed: v.number(), nextCursor: v.union(v.string(), v.null()), scheduledNext: v.boolean() }),
   handler: async (ctx, args) => {
     const page = await ctx.db
       .query('drivers')
@@ -1411,19 +1522,27 @@ export const backfillDriverSummaries = internalMutation({
       await recomputeEntitySummary(ctx, d.organizationId, 'driver', d._id, catalog);
       processed++;
     }
-    return { processed, nextCursor: page.isDone ? null : page.continueCursor };
+    const nextCursor = page.isDone ? null : page.continueCursor;
+    if (nextCursor) {
+      await ctx.scheduler.runAfter(0, internal.entityDocuments.backfillDriverSummaries, {
+        cursor: nextCursor,
+        batch: args.batch,
+      });
+    }
+    return { processed, nextCursor, scheduledNext: nextCursor !== null };
   },
 });
 
 /**
  * Phase 2 backfill: stamp `missingDocTypeKeys` (and any effective mirrors
- * from shared carrier documents) on every partnership. Paged; re-runnable.
+ * from shared carrier documents) on every partnership. Paged and
+ * self-scheduling like backfillDriverSummaries; re-runnable.
  *
  *   npx convex run entityDocuments:backfillPartnershipSummaries
  */
 export const backfillPartnershipSummaries = internalMutation({
   args: { cursor: v.optional(v.string()), batch: v.optional(v.number()) },
-  returns: v.object({ processed: v.number(), nextCursor: v.union(v.string(), v.null()) }),
+  returns: v.object({ processed: v.number(), nextCursor: v.union(v.string(), v.null()), scheduledNext: v.boolean() }),
   handler: async (ctx, args) => {
     const page = await ctx.db
       .query('carrierPartnerships')
@@ -1439,7 +1558,14 @@ export const backfillPartnershipSummaries = internalMutation({
       await recomputePartnershipDocuments(ctx, p._id, catalog);
       processed++;
     }
-    return { processed, nextCursor: page.isDone ? null : page.continueCursor };
+    const nextCursor = page.isDone ? null : page.continueCursor;
+    if (nextCursor) {
+      await ctx.scheduler.runAfter(0, internal.entityDocuments.backfillPartnershipSummaries, {
+        cursor: nextCursor,
+        batch: args.batch,
+      });
+    }
+    return { processed, nextCursor, scheduledNext: nextCursor !== null };
   },
 });
 

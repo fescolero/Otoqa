@@ -2,7 +2,13 @@ import { ConvexError, v } from 'convex/values';
 import { internalMutation, internalQuery, mutation, query, type QueryCtx } from './_generated/server';
 import type { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
-import { assertOrgPermission, getCallerOrgId, requireCallerIdentity, requireCallerOrgId } from './lib/auth';
+import {
+  assertOrgPermission,
+  assertOrgPermissionOrNotFound,
+  getCallerOrgId,
+  requireCallerIdentity,
+  requireCallerOrgId,
+} from './lib/auth';
 import { logAudit } from './lib/audit';
 import { isStoredContentType, keyFromExternalUrl, webLoadDocTypeValidator as webDocType } from './lib/r2';
 import { resolveAuthenticatedDriver } from './driverMobile';
@@ -39,11 +45,14 @@ const docType = v.union(
  * the bytes behind a recorded document (that is `remove`, audited).
  */
 async function keyAlreadyRecorded(ctx: QueryCtx, loadId: Id<'loadInformation'>, key: string): Promise<boolean> {
-  const rows = await ctx.db
+  // Indexed: web keys are always stored in externalKey. Legacy rows that
+  // only carry externalUrl live under pod-photos/ or load-documents/, which
+  // can never equal an orgs/{org}/loads/… key, so they need no scan.
+  const row = await ctx.db
     .query('loadDocuments')
-    .withIndex('by_load', (q) => q.eq('loadId', loadId))
-    .collect();
-  return rows.some((r) => (r.externalKey ?? (r.externalUrl ? keyFromExternalUrl(r.externalUrl) : null)) === key);
+    .withIndex('by_externalKey', (q) => q.eq('externalKey', key))
+    .first();
+  return !!row && row.loadId === loadId;
 }
 
 /**
@@ -56,13 +65,7 @@ export const resolveLoadForWebUpload = internalQuery({
   handler: async (ctx, args) => {
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new ConvexError('Load not found');
-    try {
-      await assertOrgPermission(ctx, load.workosOrgId, 'loads:edit');
-    } catch (e) {
-      const msg = e instanceof ConvexError ? String(e.data) : '';
-      if (msg.includes('Not authorized')) throw new ConvexError('Load not found');
-      throw e;
-    }
+    await assertOrgPermissionOrNotFound(ctx, load.workosOrgId, 'loads:edit', 'Load not found');
     return { orgId: load.workosOrgId, orderNumber: load.orderNumber };
   },
 });

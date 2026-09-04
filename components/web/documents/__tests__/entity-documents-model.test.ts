@@ -115,6 +115,14 @@ describe('composeDocumentsViewModel', () => {
     expect(vm.archived.map((d) => d.expirationDate)).toEqual(['2025-01-01', '2024-01-01']);
   });
 
+  it('a date-only row on a type that now requires a file is Missing, not also On file', () => {
+    const types = [type({ key: 'drug_screen', expires: false, uploadRequired: true, singleton: false })];
+    const vm = composeDocumentsViewModel(types, [doc({ typeKey: 'drug_screen', hasFile: false, issueDate: '2026-01-01' })], today);
+    expect(vm.rows[0].status).toBe('missing');
+    expect(vm.counts.missing).toBe(1);
+    expect(vm.counts.onFile).toBe(0);
+  });
+
   it('never shows hidden types', () => {
     const vm = composeDocumentsViewModel(types, [doc({ typeKey: 'hidden', expirationDate: '2030-01-01' })], today);
     expect(vm.rows.some((r) => r.type.key === 'hidden')).toBe(false);

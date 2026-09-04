@@ -11,12 +11,10 @@
  * `localTodayDateStr()`; Convex queries take it as an argument.
  */
 
-import { diffCalendarDays } from './dateUtils';
+import { getDateStatus } from './dateUtils';
 import type { DocumentEntity, MirrorField } from '../lib/documentTypeDefaults';
 import { DRIVER_MIRROR_TO_TYPE_KEY, type DriverMirrorField } from '../lib/documentTypeDefaults';
 
-export const EXPIRING_WITHIN_DAYS = 30;
-export const WARNING_WITHIN_DAYS = 60;
 
 export type DocumentStatus =
   | 'missing'
@@ -59,13 +57,8 @@ export function dateExpiryStatus(
   dateStr: string | undefined | null,
   todayStr: string,
 ): 'missing' | 'expired' | 'expiring' | 'warning' | 'valid' {
-  if (!dateStr) return 'missing';
-  const diff = diffCalendarDays(dateStr, todayStr);
-  if (diff === null) return 'missing';
-  if (diff < 0) return 'expired';
-  if (diff <= EXPIRING_WITHIN_DAYS) return 'expiring';
-  if (diff <= WARNING_WITHIN_DAYS) return 'warning';
-  return 'valid';
+  // One tiering for every date on the platform (dateUtils.getDateStatus).
+  return getDateStatus(dateStr ?? undefined, todayStr);
 }
 
 /**
@@ -141,6 +134,24 @@ export function computeMissingTypeKeys(
 }
 
 /**
+ * Time-independent "needs date" summary: visible expiring types whose
+ * active document(s) carry no expiration date (a flag flipped to Expires
+ * after the upload). Stored beside `missingDocTypeKeys` for list rows.
+ */
+export function computeNeedsDateTypeKeys(
+  types: readonly Pick<EffectiveDocumentType, 'key' | 'expires' | 'hidden'>[],
+  activeDocs: readonly { typeKey: string; expirationDate?: string }[],
+): string[] {
+  const dated = new Set<string>();
+  const present = new Set<string>();
+  for (const d of activeDocs) {
+    present.add(d.typeKey);
+    if (d.expirationDate) dated.add(d.typeKey);
+  }
+  return types.filter((t) => t.expires && !t.hidden && present.has(t.key) && !dated.has(t.key)).map((t) => t.key);
+}
+
+/**
  * Attention count for a driver LIST row, without reading documents:
  * every missing type counts once, plus every mirrored date that is
  * expired/expiring for a type that is NOT already missing (a Missing type
@@ -153,6 +164,13 @@ export function computeMissingTypeKeys(
  */
 export interface DriverAttentionInput {
   missingDocTypeKeys?: string[] | null;
+  /** typeKey → effective expiration for every expiring type with an
+   *  active document (written with the summary). Covers types that have
+   *  no mirror field (hazmat, custom types). */
+  docExpirations?: Record<string, string> | null;
+  /** Expiring types whose active document has no date (written with the
+   *  summary) — "Needs date" on the tab, attention here. */
+  needsDateTypeKeys?: string[] | null;
   licenseExpiration?: string;
   medicalExpiration?: string;
   badgeExpiration?: string;
@@ -181,18 +199,28 @@ export function countDriverAttention(
    *  are not compliance (the Documents tab shows nothing for them). */
   hiddenTypeKeys?: ReadonlySet<string>,
 ): number {
-  const missing = new Set(driverMissingKeys(row));
+  // The unstamped-row fallback lists every default type; hidden ones must
+  // drop out here exactly as they do from a stamped summary.
+  const missing = new Set(driverMissingKeys(row).filter((k) => !hiddenTypeKeys?.has(k)));
   let count = missing.size;
+  for (const k of row.needsDateTypeKeys ?? []) {
+    if (!missing.has(k) && !hiddenTypeKeys?.has(k)) count++;
+  }
+  // One date per type: the mirror fields (legacy rows) overlaid by the
+  // per-type summary, which is written from the same documents and also
+  // covers the types that have no mirror.
+  const dates = new Map<string, string | undefined>();
   const mirrors: DriverMirrorField[] = [
     'licenseExpiration',
     'medicalExpiration',
     'badgeExpiration',
     'twicExpiration',
   ];
-  for (const field of mirrors) {
-    const typeKey = DRIVER_MIRROR_TO_TYPE_KEY[field];
+  for (const field of mirrors) dates.set(DRIVER_MIRROR_TO_TYPE_KEY[field], row[field]);
+  for (const [typeKey, date] of Object.entries(row.docExpirations ?? {})) dates.set(typeKey, date);
+  for (const [typeKey, date] of dates) {
     if (missing.has(typeKey) || hiddenTypeKeys?.has(typeKey)) continue;
-    const s = dateExpiryStatus(row[field], todayStr);
+    const s = dateExpiryStatus(date, todayStr);
     if (s === 'expired' || s === 'expiring') count++;
   }
   return count;

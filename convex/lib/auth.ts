@@ -96,13 +96,18 @@ export async function requireCallerIdentity(ctx: AnyCtx): Promise<{
  * still need to prove the caller owns that org. New code should just call
  * `requireCallerOrgId` and ignore any client-supplied value entirely.
  */
+/** The one message assertCallerOwnsOrg throws for a cross-org caller;
+ *  assertOrgPermissionOrNotFound matches it exactly, so a capability or
+ *  permission error is never mistaken for it. */
+export const NOT_ORG_MEMBER_MESSAGE = 'Not authorized for this organization';
+
 export async function assertCallerOwnsOrg(
   ctx: AnyCtx,
   claimedOrgId: string,
 ): Promise<{ orgId: string; userId: string; userName: string | undefined; userEmail: string | undefined }> {
   const result = await requireCallerIdentity(ctx);
   if (result.orgId !== claimedOrgId) {
-    throw new ConvexError('Not authorized for this organization');
+    throw new ConvexError(NOT_ORG_MEMBER_MESSAGE);
   }
   return result;
 }
@@ -230,6 +235,26 @@ export async function assertOrgPermission(
     throw new ConvexError(`Your role doesn't have the ${slug} permission`);
   }
   return result;
+}
+
+/**
+ * assertOrgPermission whose cross-org refusal reads as "not found", so a
+ * caller cannot tell another org's row from a missing one.
+ */
+export async function assertOrgPermissionOrNotFound(
+  ctx: AnyCtx,
+  claimedOrgId: string,
+  slug: string,
+  notFoundMessage = 'Not found',
+): Promise<{ orgId: string; userId: string; userName: string | undefined; userEmail: string | undefined }> {
+  try {
+    return await assertOrgPermission(ctx, claimedOrgId, slug);
+  } catch (e) {
+    // Only the cross-org refusal is masked; a real permission error
+    // ("Your role doesn't have…") must still reach the caller.
+    if (e instanceof ConvexError && e.data === NOT_ORG_MEMBER_MESSAGE) throw new ConvexError(notFoundMessage);
+    throw e;
+  }
 }
 
 /**

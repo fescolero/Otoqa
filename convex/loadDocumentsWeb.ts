@@ -21,18 +21,13 @@ import { action } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
 import {
-  MAX_DOCUMENT_BYTES,
-  isStoredContentType,
+  declaredFileProblem,
   metadataToHeaders,
   sanitizeFilename,
   webLoadDocTypeValidator as webDocType,
 } from './lib/r2';
-import {
-  buildLoadDocumentKey,
-  deleteObjectByKey,
-  headObject,
-  presignPutWithMetadata,
-} from './s3Upload';
+import { buildLoadDocumentKey, deleteObjectByKey, presignPutWithMetadata } from './s3Upload';
+import { verifyStoredObject } from './lib/documentActionHandlers';
 
 export const getUploadUrl = action({
   args: {
@@ -52,12 +47,8 @@ export const getUploadUrl = action({
     args,
   ): Promise<{ key: string; uploadUrl: string; metadataHeaders: Record<string, string> }> => {
     const contentType = args.contentType.toLowerCase();
-    if (!isStoredContentType(contentType)) {
-      throw new ConvexError('Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.');
-    }
-    if (args.sizeBytes <= 0 || args.sizeBytes > MAX_DOCUMENT_BYTES) {
-      throw new ConvexError('File is too large (25 MB max).');
-    }
+    const problem = declaredFileProblem(contentType, args.sizeBytes);
+    if (problem) throw new ConvexError(problem);
     // Org comes from the load row (never the client); loads:edit enforced.
     const load: { orgId: string } = await ctx.runQuery(internal.loadDocuments.resolveLoadForWebUpload, {
       loadId: args.loadId,
@@ -93,23 +84,15 @@ export const finalizeUpload = action({
     );
     if (owned.loadId !== args.loadId || owned.type !== args.type) throw new ConvexError('Invalid document key');
 
-    const head = await headObject(args.key);
-    if (!head) throw new ConvexError('Upload not found in storage. Please try again.');
-    const contentType = (head.contentType ?? '').toLowerCase();
-    const tooBig = head.contentLength > MAX_DOCUMENT_BYTES;
-    const badType = !isStoredContentType(contentType);
-    if (tooBig || badType) {
-      await deleteObjectByKey(args.key);
-      throw new ConvexError(
-        tooBig ? 'File is too large (25 MB max).' : 'Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.',
-      );
-    }
+    // Same verification policy as entity documents (documentActionHandlers).
+    const check = await verifyStoredObject(args.key);
+    if (!check.ok) throw new ConvexError(check.message);
     const created: { _id: Id<'loadDocuments'> } = await ctx.runMutation(internal.loadDocuments.createFromWeb, {
       loadId: args.loadId,
       type: args.type,
       externalKey: args.key,
       fileName: sanitizeFilename(args.fileName),
-      contentType,
+      contentType: check.contentType,
       note: args.note,
     });
     return { documentId: created._id };

@@ -34,6 +34,13 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Checkbox } from '@/components/ui/checkbox';
 
 const ENTITY_TABS: Array<{ id: DocumentEntity; label: string; hint: string }> = [
@@ -450,48 +457,29 @@ function RowMenu({
   onToggleHidden: () => void;
   onDelete?: () => void;
 }) {
-  const [open, setOpen] = React.useState(false);
-  const ref = React.useRef<HTMLDivElement>(null);
-  React.useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
   return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        aria-label={`Actions for ${type.name}`}
-        onClick={() => setOpen((o) => !o)}
-        className="focus-ring rounded-md p-1 text-[var(--text-tertiary)] hover:bg-[var(--bg-surface-2)] hover:text-foreground"
-      >
-        <WIcon name="kebab-h" size={14} />
-      </button>
-      {open && (
-        <div className="absolute right-0 z-20 mt-1 min-w-[150px] overflow-hidden rounded-lg border border-[var(--border-hairline)] bg-card py-1 shadow-md">
-          <MenuItem onClick={() => { setOpen(false); onEdit(); }}>Edit</MenuItem>
-          <MenuItem onClick={() => { setOpen(false); onToggleHidden(); }}>{type.hidden ? 'Unhide' : 'Hide'}</MenuItem>
-          {onDelete && (
-            <MenuItem danger onClick={() => { setOpen(false); onDelete(); }}>Delete</MenuItem>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MenuItem({ children, onClick, danger }: { children: React.ReactNode; onClick: () => void; danger?: boolean }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="block w-full px-3 py-1.5 text-left text-[12.5px] hover:bg-[var(--bg-surface-2)]"
-      style={danger ? { color: '#B43030' } : undefined}
-    >
-      {children}
-    </button>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Actions for ${type.name}`}
+          className="focus-ring rounded-md p-1 text-[var(--text-tertiary)] hover:bg-[var(--bg-surface-2)] hover:text-foreground"
+        >
+          <WIcon name="kebab-h" size={14} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-[150px]">
+        <DropdownMenuItem onSelect={onEdit}>Edit</DropdownMenuItem>
+        <DropdownMenuItem onSelect={onToggleHidden}>{type.hidden ? 'Unhide' : 'Hide'}</DropdownMenuItem>
+        {onDelete && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onSelect={onDelete}>
+              Delete
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

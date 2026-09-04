@@ -76,6 +76,35 @@ export interface FinalizeArgs {
   note?: string;
 }
 
+export type StoredObjectCheck =
+  | { ok: true; contentType: string; sizeBytes: number }
+  /** `missing`: nothing at the key (the client may retry the PUT).
+   *  `rejected`: the object was there but violates the bucket contract —
+   *  it has already been deleted. */
+  | { ok: false; reason: 'missing' | 'rejected'; message: string };
+
+/**
+ * THE verification every finalize runs (entity and load documents alike):
+ * HEAD the object, take the stored content type (falling back to what the
+ * client declared), enforce size and type, delete on rejection.
+ */
+export async function verifyStoredObject(key: string, declaredContentType?: string): Promise<StoredObjectCheck> {
+  const head = await headObject(key);
+  if (!head) return { ok: false, reason: 'missing', message: 'Upload not found in storage. Please try again.' };
+  const contentType = (head.contentType ?? declaredContentType ?? '').toLowerCase();
+  const tooBig = head.contentLength > MAX_DOCUMENT_BYTES;
+  const badType = !isStoredContentType(contentType);
+  if (tooBig || badType) {
+    await deleteObjectByKey(key);
+    return {
+      ok: false,
+      reason: 'rejected',
+      message: tooBig ? 'File is too large (25 MB max).' : 'Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.',
+    };
+  }
+  return { ok: true, contentType, sizeBytes: head.contentLength };
+}
+
 /** Step 3: verify the object R2 holds, then activate. */
 export async function finalizeEntityUpload(ctx: ActionCtx, args: FinalizeArgs): Promise<{ status: string }> {
   const pending: { status: string; key?: string; declaredContentType?: string } | null =
@@ -86,23 +115,17 @@ export async function finalizeEntityUpload(ctx: ActionCtx, args: FinalizeArgs): 
     throw new ConvexError('Upload is no longer pending');
   }
 
-  const head = await headObject(pending.key);
-  if (!head) throw new ConvexError('Upload not found in storage. Please try again.');
-
-  const contentType = (head.contentType ?? pending.declaredContentType ?? '').toLowerCase();
-  const tooBig = head.contentLength > MAX_DOCUMENT_BYTES;
-  const badType = !isStoredContentType(contentType);
-  if (tooBig || badType) {
-    await deleteObjectByKey(pending.key);
+  const check = await verifyStoredObject(pending.key, pending.declaredContentType);
+  if (!check.ok) {
+    // Rejected (object deleted) or missing (nothing landed): either way the
+    // client starts over from presign, so the pending row goes now.
     await ctx.runMutation(internal.entityDocuments.discardPending, { docId: args.docId });
-    throw new ConvexError(
-      tooBig ? 'File is too large (25 MB max).' : 'Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.',
-    );
+    throw new ConvexError(check.message);
   }
 
   const result: { status: string } = await ctx.runMutation(internal.entityDocuments.finalize, {
     docId: args.docId,
-    verified: { contentType, sizeBytes: head.contentLength },
+    verified: { contentType: check.contentType, sizeBytes: check.sizeBytes },
     issueDate: args.issueDate,
     expirationDate: args.expirationDate,
     note: args.note,

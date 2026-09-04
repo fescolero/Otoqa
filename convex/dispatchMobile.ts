@@ -2052,7 +2052,7 @@ export const getDriverDetail = query({
       hireDate: driver.hireDate,
       licenseClass: driver.licenseClass,
       licenseState: driver.licenseState,
-      licenseExpiration: driver.licenseExpiration,
+      licenseExpiration: driver.licenseExpiration ?? null,
       medicalExpiration: driver.medicalExpiration ?? null,
       twicExpiration: driver.twicExpiration ?? null,
       lastFixAt: location?.recordedAt ?? null,

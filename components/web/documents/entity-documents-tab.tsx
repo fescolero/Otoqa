@@ -58,6 +58,7 @@ import { DocumentUploadDialog } from './document-upload-dialog';
 import {
   chipForStatus,
   formatBytes,
+  formatTimestamp,
   formatYmd,
   isSharedDocument,
   type DocumentRowModel,
@@ -159,7 +160,7 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
       id: doc._id,
       name: `${typeName}${doc.fileName ? ` — ${doc.fileName}` : ''}`,
       src: shared ? doc.sharedFromOrgName : doc.uploadedByName ?? 'Ops',
-      when: formatYmd(new Date(doc.activatedAt ?? doc.uploadedAt).toISOString().slice(0, 10)),
+      when: formatTimestamp(doc.activatedAt ?? doc.uploadedAt),
       status: 'valid',
       preview: isPdf ? { kind: 'pdf', url: '' } : { kind: 'image', url: '' },
       activity: [
@@ -363,7 +364,7 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
     },
     {
       key: 'archivedAt', label: 'Archived', width: '120px',
-      render: (r) => <span className="num">{r.archivedAt ? formatYmd(new Date(r.archivedAt).toISOString().slice(0, 10)) : '—'}</span>,
+      render: (r) => <span className="num">{formatTimestamp(r.archivedAt)}</span>,
     },
     {
       key: 'note', label: 'Note', width: '180px',
@@ -399,7 +400,7 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
           <span>
             <strong className="font-medium">{docs.linkedCarrierName ?? 'This carrier'}</strong> is leaving Otoqa.
             Documents they share disappear on{' '}
-            <span className="num font-medium">{formatYmd(new Date(docs.linkedCarrierOffboarding.purgeAt).toISOString().slice(0, 10))}</span>.
+            <span className="num font-medium">{formatTimestamp(docs.linkedCarrierOffboarding.purgeAt)}</span>.
             Use <em>Save a copy</em> on each shared row to keep it in your own records.
           </span>
         </div>
