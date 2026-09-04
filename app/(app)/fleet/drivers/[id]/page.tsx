@@ -138,6 +138,13 @@ export default function DriverDetailPage() {
   // Assigned loads regardless of the Loads tab's filter, so flipping the
   // tab to Completed can't blank the card.
   const assignedLoadsData = useQuery(api.loads.getByDriver, { driverId, status: 'Assigned' });
+  // Calendar-year bounds in the viewer's local time, fixed for the
+  // component's life (a stale bound only matters across New Year's).
+  const yearBounds = React.useMemo(() => {
+    const y = new Date().getFullYear();
+    return { yearStartMs: new Date(y, 0, 1).getTime(), yearEndMs: new Date(y + 1, 0, 1).getTime() };
+  }, []);
+  const yearStats = useQuery(api.loads.getDriverYearStats, { driverId, ...yearBounds });
   const recentDriverLoads = useQuery(api.loads.getRecentByDriver, { driverId, limit: 4 });
   // Documents summary — same rows/status as the Documents tab (one source).
   // Held at 'skip' until the driver row is confirmed: listForEntity throws
@@ -920,9 +927,8 @@ export default function DriverDetailPage() {
 
       <QuickStats
         stats={[
-          { label: 'Active loads', value: assignedLoadsData ? String(inProgressLoads.length) : '—' },
-          { label: 'Loads YTD',    value: '—' },
-          { label: 'Miles YTD',    value: '—' },
+          { label: 'Loads YTD',    value: yearStats ? yearStats.loads.toLocaleString('en-US') : '—' },
+          { label: 'Miles YTD',    value: yearStats ? yearStats.miles.toLocaleString('en-US') : '—' },
           { label: 'Score',        value: '—' },
           { label: 'On-time',      value: '—' },
         ]}

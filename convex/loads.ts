@@ -2754,6 +2754,52 @@ export const getRecentByDriver = query({
 });
 
 /**
+ * Loads and loaded miles a driver completed in a calendar year — the
+ * "Loads YTD" / "Miles YTD" KPIs on the driver Overview.
+ *
+ * Walks COMPLETED legs through `by_driver_status_scheduled_start`, range-
+ * bounded to [yearStartMs, yearEndMs), so the read is proportional to one
+ * year of one driver's work. The caller passes local calendar-year bounds
+ * so "this year" is the viewer's, not the server's. A leg is attributed
+ * to the year it was scheduled to start (migration 010 backfilled that
+ * field onto every leg); a load split into several legs counts once.
+ * Loads that reached the driver without a dispatch leg (primaryDriverId /
+ * carrier-assignment fallbacks in getByDriver) are not counted here.
+ */
+export const getDriverYearStats = query({
+  args: {
+    driverId: v.id('drivers'),
+    yearStartMs: v.number(),
+    yearEndMs: v.number(),
+  },
+  returns: v.object({ loads: v.number(), miles: v.number() }),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
+
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver_status_scheduled_start', (q) =>
+        q
+          .eq('driverId', args.driverId)
+          .eq('status', 'COMPLETED')
+          .gte('scheduledStartMs', args.yearStartMs)
+          .lt('scheduledStartMs', args.yearEndMs),
+      )
+      .collect();
+
+    const loadIds = new Set<string>();
+    let miles = 0;
+    for (const leg of legs) {
+      loadIds.add(leg.loadId);
+      miles += leg.legLoadedMiles ?? 0;
+    }
+    return { loads: loadIds.size, miles: Math.round(miles) };
+  },
+});
+
+/**
  * Suggested drivers for a load awaiting assignment.
  *
  * Score-rank active in-org drivers, with a busy check via the
