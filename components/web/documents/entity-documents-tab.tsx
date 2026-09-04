@@ -257,7 +257,10 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
             </div>
           ) : r.status === 'missing' && r.lastArchived ? (
             <div className="truncate text-[11px] text-[var(--text-tertiary)]">
-              Last on file {r.lastArchived.expirationDate ? `expired ${formatYmd(r.lastArchived.expirationDate)}` : 'archived'}
+              Last on file{' '}
+              {r.lastArchived.expirationDate
+                ? `${r.lastArchivedStatus === 'expired' ? 'expired' : 'expires'} ${formatYmd(r.lastArchived.expirationDate)}`
+                : 'archived'}
             </div>
           ) : r.status === 'missing' ? (
             <div className="text-[11px] text-[var(--text-tertiary)]">No file on record</div>

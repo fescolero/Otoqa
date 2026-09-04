@@ -543,6 +543,8 @@ export async function recomputeEntitySummary(
   /** The entity's active documents as they stand NOW, when the caller
    *  already holds them (activate does) — saves the index re-read. */
   activeIn?: Doc<'entityDocuments'>[],
+  /** Per-org cache for loops (the owner-operator check is org-level). */
+  orgs?: Map<string, Doc<'organizations'> | null>,
 ): Promise<void> {
   switch (entity) {
     case 'driver': {
@@ -578,7 +580,11 @@ export async function recomputeEntitySummary(
       // An owner-operator's CDL is a candidate for every linked
       // partnership's ownerDriverLicenseExpiration (latest expiry wins with
       // the broker's own owner_driver_cdl document) — one writer, here.
-      const org = await orgByAnyId(ctx, driver.organizationId);
+      let org = orgs?.get(driver.organizationId);
+      if (org === undefined) {
+        org = await orgByAnyId(ctx, driver.organizationId);
+        orgs?.set(driver.organizationId, org);
+      }
       if (org?.isOwnerOperator && org.ownerDriverId === driver._id) {
         await recomputeLinkedPartnerships(ctx, org._id as string);
       }
@@ -619,7 +625,27 @@ export async function assertMirrorsEditable(
     (f) => edits[f] !== undefined && edits[f] !== (current[f] ?? undefined),
   );
   if (touched.length === 0) return;
-  const catalog = await loadEffectiveCatalog(ctx, orgId, entity);
+  const owned = await documentOwnedMirrorTypes(ctx, entity, orgId, entityId);
+  for (const field of touched) {
+    const typeKey = mirrorToType[field];
+    if (!owned.has(typeKey)) continue;
+    const catalog = await loadEffectiveCatalog(ctx, orgId, entity);
+    const name = catalog.find((t) => t.key === typeKey)?.name ?? typeKey;
+    throw new ConvexError(
+      `${name} expiration comes from the ${name} document — replace the document from the Documents tab to change it`,
+    );
+  }
+}
+
+/** Type keys whose mirror on this entity is document-owned right now:
+ *  an own active document, and for a partnership also a carrier-shared
+ *  one or the linked owner-operator's CDL document. */
+async function documentOwnedMirrorTypes(
+  ctx: Ctx,
+  entity: 'driver' | 'carrier',
+  orgId: string,
+  entityId: string,
+): Promise<Set<string>> {
   const own = await activeDocsFor(ctx, orgId, entity, entityId);
   const covered = new Set(own.map((d) => d.typeKey));
   if (entity === 'carrier') {
@@ -631,14 +657,21 @@ export async function assertMirrorsEditable(
       if (await linkedOwnerCdlExpiry(ctx, p, org)) covered.add(CARRIER_MIRROR_TO_TYPE_KEY.ownerDriverLicenseExpiration);
     }
   }
-  for (const field of touched) {
-    const typeKey = mirrorToType[field];
-    if (!covered.has(typeKey)) continue;
-    const name = catalog.find((t) => t.key === typeKey)?.name ?? typeKey;
-    throw new ConvexError(
-      `${name} expiration comes from the ${name} document — replace the document from the Documents tab to change it`,
-    );
-  }
+  return covered;
+}
+
+/**
+ * For the legacy driver→partnership / org→partnership sync paths: is this
+ * partnership mirror document-owned? A sync must then leave it alone —
+ * recomputePartnershipDocuments is its only writer.
+ */
+export async function partnershipMirrorIsDocumentOwned(
+  ctx: Ctx,
+  partnership: Doc<'carrierPartnerships'>,
+  field: keyof typeof CARRIER_MIRROR_TO_TYPE_KEY,
+): Promise<boolean> {
+  const owned = await documentOwnedMirrorTypes(ctx, 'carrier', partnership.brokerOrgId, partnership._id);
+  return owned.has(CARRIER_MIRROR_TO_TYPE_KEY[field]);
 }
 
 // ─── Activation (shared by finalize + date-only) ─────────────────────────
@@ -1445,13 +1478,14 @@ export const recomputeSummariesForOrg = internalMutation({
     switch (args.entity) {
       case 'driver': {
         const catalog = await loadEffectiveCatalog(ctx, args.orgId, 'driver');
+        const orgs = new Map<string, Doc<'organizations'> | null>();
         const page = await ctx.db
           .query('drivers')
           .withIndex('by_organization', (q) => q.eq('organizationId', args.orgId))
           .paginate({ cursor: args.cursor ?? null, numItems: RECOMPUTE_PAGE });
         for (const d of page.page) {
           if (d.isDeleted) continue;
-          await recomputeEntitySummary(ctx, args.orgId, 'driver', d._id, catalog);
+          await recomputeEntitySummary(ctx, args.orgId, 'driver', d._id, catalog, undefined, orgs);
           n++;
         }
         continueCursor = page.isDone ? null : page.continueCursor;
@@ -1506,6 +1540,7 @@ export const backfillDriverSummaries = internalMutation({
       .query('drivers')
       .paginate({ cursor: args.cursor ?? null, numItems: args.batch ?? 100 });
     const catalogs = new Map<string, EffectiveDocumentType[]>();
+    const orgs = new Map<string, Doc<'organizations'> | null>();
     let processed = 0;
     for (const d of page.page) {
       if (d.isDeleted) continue;
@@ -1514,7 +1549,7 @@ export const backfillDriverSummaries = internalMutation({
         catalog = await loadEffectiveCatalog(ctx, d.organizationId, 'driver');
         catalogs.set(d.organizationId, catalog);
       }
-      await recomputeEntitySummary(ctx, d.organizationId, 'driver', d._id, catalog);
+      await recomputeEntitySummary(ctx, d.organizationId, 'driver', d._id, catalog, undefined, orgs);
       processed++;
     }
     const nextCursor = page.isDone ? null : page.continueCursor;

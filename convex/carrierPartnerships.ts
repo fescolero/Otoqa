@@ -3,7 +3,12 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
-import { assertMirrorsEditable, recomputePartnershipDocuments, stampNewDriverSummary } from './entityDocuments';
+import {
+  assertMirrorsEditable,
+  partnershipMirrorIsDocumentOwned,
+  recomputePartnershipDocuments,
+  stampNewDriverSummary,
+} from './entityDocuments';
 import {
   scheduleCreateClerkUserForDriver,
   scheduleSyncCarrierOwnerToClerk,
@@ -1509,12 +1514,15 @@ export const syncFromCarrierOrg = mutation({
       .withIndex('by_carrier', (q) => q.eq('carrierOrgId', args.carrierOrgId))
       .collect();
 
-    // Update each partnership with current org info
+    // Update each partnership with current org info. The insurance mirror
+    // is document-owned once a COI document exists (own or shared) —
+    // recomputePartnershipDocuments is its only writer then (spec §6.3).
     for (const partnership of partnerships) {
+      const insuranceOwned = await partnershipMirrorIsDocumentOwned(ctx, partnership, 'insuranceExpiration');
       await ctx.db.patch(partnership._id, {
         carrierName: org.name,
         insuranceProvider: org.insuranceProvider,
-        insuranceExpiration: org.insuranceExpiration,
+        ...(insuranceOwned ? {} : { insuranceExpiration: org.insuranceExpiration }),
         updatedAt: now,
       });
     }

@@ -246,6 +246,10 @@ export const DRIVER_MIRROR_TO_TYPE_KEY: Record<DriverMirrorField, string> = {
   twicExpiration: 'twic',
 };
 
+/** The driver mirror fields, in display order — the single list every
+ *  caller iterates (attention counting, Missing-row context dates). */
+export const DRIVER_MIRROR_FIELDS = Object.keys(DRIVER_MIRROR_TO_TYPE_KEY) as readonly DriverMirrorField[];
+
 /** Custom type keys are org-scoped slugs; they must never collide with a
  *  system key and must be safe to embed in an R2 object key. */
 export const CUSTOM_TYPE_KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{1,39}$/;

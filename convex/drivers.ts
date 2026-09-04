@@ -5,7 +5,7 @@ import { countDriverAttention } from './_helpers/documentStatus';
 import { loadEffectiveCatalog } from './lib/documentCatalog';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
-import { assertMirrorsEditable, stampNewDriverSummary } from './entityDocuments';
+import { assertMirrorsEditable, partnershipMirrorIsDocumentOwned, stampNewDriverSummary } from './entityDocuments';
 import {
   scheduleCreateClerkUserForDriver,
   scheduleUpdateClerkUserPhone,
@@ -506,7 +506,15 @@ export const update = mutation({
         if (licenseNumber !== undefined) partnershipUpdates.ownerDriverLicenseNumber = licenseNumber;
         if (updates.licenseState !== undefined) partnershipUpdates.ownerDriverLicenseState = updates.licenseState;
         if (updates.licenseClass !== undefined) partnershipUpdates.ownerDriverLicenseClass = updates.licenseClass;
-        if (updates.licenseExpiration !== undefined) partnershipUpdates.ownerDriverLicenseExpiration = updates.licenseExpiration;
+        // The partnership's CDL mirror is document-owned once any CDL
+        // document exists (broker's, shared, or this driver's) — then only
+        // recomputePartnershipDocuments writes it.
+        if (
+          updates.licenseExpiration !== undefined &&
+          !(await partnershipMirrorIsDocumentOwned(ctx, partnership, 'ownerDriverLicenseExpiration'))
+        ) {
+          partnershipUpdates.ownerDriverLicenseExpiration = updates.licenseExpiration;
+        }
         
         // Only patch if there are actual partnership field updates
         if (Object.keys(partnershipUpdates).length > 1) {

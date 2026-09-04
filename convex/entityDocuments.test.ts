@@ -1210,6 +1210,22 @@ describe('second-review follow-ups', () => {
     ).rejects.toThrow(/File is empty/);
   });
 
+  it('a driver-side licenseExpiration edit does not overwrite a document-owned partnership mirror', async () => {
+    const t = setup();
+    const { orgId, partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const driverId = await t.run((ctx) => insertDriver(ctx, orgId as string));
+    await t.run((ctx) => ctx.db.patch(orgId, { isOwnerOperator: true, ownerDriverId: driverId }));
+    // Broker's own owner-driver CDL document owns the mirror.
+    await uploadFor(t, BROKER_USER, 'carrier', partnershipId, 'owner_driver_cdl', { expirationDate: '2032-01-01' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2032-01-01');
+
+    // The owner-driver (no CDL document of their own) edits the legacy field.
+    const asOwnerOrg = { ...CARRIER_ADMIN, org_id: orgId as string, permissions: [...permissionsForLevel('fleet', 'edit')] };
+    await t.withIdentity(asOwnerOrg as never).mutation(api.drivers.update, { id: driverId, licenseExpiration: '2026-01-01' });
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.licenseExpiration).toBe('2026-01-01');
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2032-01-01');
+  });
+
   it('startOffboarding is idempotent: a repeat call neither re-notifies nor re-audits', async () => {
     const t = setup();
     const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
