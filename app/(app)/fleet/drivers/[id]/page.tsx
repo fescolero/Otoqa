@@ -19,6 +19,7 @@ import {
   type AttentionItem,
   Avatar,
   Chip,
+  type ChipStatus,
   ColumnsButton,
   type ColumnDef,
   CommentsThread,
@@ -906,6 +907,17 @@ export default function DriverDetailPage() {
   ];
 
   type RecentTripRow = AssignedLoad & { id: string };
+  // Load status → chip preset. Completed/Delivered share the green the
+  // rest of the app uses for finished work; Canceled/Expired go grey.
+  const LOAD_STATUS_TO_CHIP: Record<string, ChipStatus> = {
+    'Open': 'open',
+    'Assigned': 'assigned',
+    'In Transit': 'active',
+    'Delivered': 'delivered',
+    'Completed': 'delivered',
+    'Canceled': 'cancelled',
+    'Expired': 'cancelled',
+  };
   const recentTripsCols: DSMiniColumn<RecentTripRow>[] = [
     { key: 'orderNumber', label: 'Trip', width: '1fr',
       render: (r) => <span className="num text-[var(--accent)] font-medium">{r.orderNumber}</span> },
@@ -915,7 +927,7 @@ export default function DriverDetailPage() {
     { key: 'firstStopDate', label: 'Date', width: '110px',
       render: (r) => <span className="num">{r.firstStopDate ?? '—'}</span> },
     { key: 'status', label: 'Status', width: '110px',
-      render: (r) => <Chip status={r.status === 'In Transit' ? 'active' : r.status === 'Delivered' ? 'delivered' : 'assigned'} label={r.status} /> },
+      render: (r) => <Chip status={LOAD_STATUS_TO_CHIP[r.status] ?? 'assigned'} label={r.status} /> },
     { key: 'onTime', label: 'On-time', width: '110px',
       render: (r) => <OnTimeChip onTime={r.onTime} /> },
   ];
