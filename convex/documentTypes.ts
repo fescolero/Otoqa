@@ -12,6 +12,7 @@
 
 import { ConvexError, v } from 'convex/values';
 import { internal } from './_generated/api';
+import type { Doc } from './_generated/dataModel';
 import { mutation, query } from './_generated/server';
 import { assertOrgPermission, requireCallerOrgId } from './lib/auth';
 import { logAudit } from './lib/audit';
@@ -84,15 +85,15 @@ export const upsertSystemOverride = mutation({
 
     const now = Date.now();
     const existing = await findRow(ctx, orgId, args.key);
-    const patch = {
-      name: args.name?.trim(),
-      expires: args.expires,
-      issueDateRequired: args.issueDateRequired,
-      uploadRequired: args.uploadRequired,
-      sharedByDefault: sys.entity === 'organization' ? args.sharedByDefault : undefined,
-      sortOrder: args.sortOrder,
-      updatedAt: now,
-    };
+    // Only the provided fields — Convex treats an explicit `undefined` as
+    // "remove", which would wipe overrides a partial call did not mention.
+    const patch: Partial<Doc<'documentTypes'>> = { updatedAt: now };
+    if (args.name !== undefined) patch.name = args.name.trim();
+    if (args.expires !== undefined) patch.expires = args.expires;
+    if (args.issueDateRequired !== undefined) patch.issueDateRequired = args.issueDateRequired;
+    if (args.uploadRequired !== undefined) patch.uploadRequired = args.uploadRequired;
+    if (args.sharedByDefault !== undefined && sys.entity === 'organization') patch.sharedByDefault = args.sharedByDefault;
+    if (args.sortOrder !== undefined) patch.sortOrder = args.sortOrder;
     if (existing) {
       if (existing.isCustom) throw new ConvexError('Key collides with a custom type');
       await ctx.db.patch(existing._id, patch);
@@ -105,6 +106,7 @@ export const upsertSystemOverride = mutation({
         ...patch,
         createdBy: who.userId,
         createdAt: now,
+        updatedAt: now,
       });
     }
 
@@ -200,12 +202,15 @@ export const updateCustomType = mutation({
     if (args.name !== undefined && !args.name.trim()) throw new ConvexError('Name is required');
     const { key: _key, ...rest } = args;
     void _key;
-    await ctx.db.patch(row._id, {
-      ...rest,
-      name: rest.name?.trim(),
-      sharedByDefault: row.entity === 'organization' ? rest.sharedByDefault : undefined,
-      updatedAt: Date.now(),
-    });
+    const patch: Partial<Doc<'documentTypes'>> = { updatedAt: Date.now() };
+    if (rest.name !== undefined) patch.name = rest.name.trim();
+    if (rest.expires !== undefined) patch.expires = rest.expires;
+    if (rest.issueDateRequired !== undefined) patch.issueDateRequired = rest.issueDateRequired;
+    if (rest.uploadRequired !== undefined) patch.uploadRequired = rest.uploadRequired;
+    if (rest.singleton !== undefined) patch.singleton = rest.singleton;
+    if (rest.sharedByDefault !== undefined && row.entity === 'organization') patch.sharedByDefault = rest.sharedByDefault;
+    if (rest.sortOrder !== undefined) patch.sortOrder = rest.sortOrder;
+    await ctx.db.patch(row._id, patch);
     await logAudit(ctx, {
       organizationId: orgId,
       entityType: 'organization',

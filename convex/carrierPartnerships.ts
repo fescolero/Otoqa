@@ -3,7 +3,7 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
-import { recomputePartnershipDocuments } from './entityDocuments';
+import { recomputePartnershipDocuments, stampNewDriverSummary } from './entityDocuments';
 import {
   scheduleCreateClerkUserForDriver,
   scheduleSyncCarrierOwnerToClerk,
@@ -815,6 +815,7 @@ export const update = mutation({
               createdAt: now,
               updatedAt: now,
             });
+            await stampNewDriverSummary(ctx, carrierOrgId, driverId); // documents summary (spec §2)
 
             // Link driver to organization
             await ctx.db.patch(carrierOrgId, {
@@ -1097,6 +1098,7 @@ export const updateStatus = mutation({
               createdAt: now,
               updatedAt: now,
             });
+            await stampNewDriverSummary(ctx, newCarrierOrgId, driverId); // documents summary (spec §2)
 
             // Link driver to organization as owner-operator
             await ctx.db.patch(newCarrierOrgId, {
@@ -1322,6 +1324,7 @@ export const createOwnerDriverRecord = mutation({
         createdAt: now,
         updatedAt: now,
       });
+      await stampNewDriverSummary(ctx, partnership.carrierOrgId as Id<'organizations'>, driverId); // documents summary (spec §2)
 
       // Provision Clerk mobile auth for the owner-operator driver so the
       // repaired record can actually sign in to the mobile app.

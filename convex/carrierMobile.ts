@@ -10,6 +10,7 @@ import {
 } from './clerkSyncScheduler';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 import { logAudit } from './lib/audit';
+import { stampNewDriverSummary } from './entityDocuments';
 
 /**
  * Carrier Mobile API
@@ -1279,6 +1280,7 @@ export const createDriver = mutation({
       isDeleted: false,
       clerkSyncStatus: 'pending',
     });
+    await stampNewDriverSummary(ctx, args.carrierOrgId, driverId); // documents summary (spec §2)
 
     // Log the creation
     await logAudit(ctx, {
@@ -1652,6 +1654,7 @@ export const createOwnerDriver = mutation({
       isDeleted: false,
       clerkSyncStatus: 'pending',
     });
+    await stampNewDriverSummary(ctx, args.carrierOrgId, driverId); // documents summary (spec §2)
 
     // Link driver to organization as owner-driver
     await ctx.db.patch(args.carrierOrgId as Id<'organizations'>, {

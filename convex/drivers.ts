@@ -4,6 +4,7 @@ import { Id } from './_generated/dataModel';
 import { countDriverAttention } from './_helpers/documentStatus';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
+import { stampNewDriverSummary } from './entityDocuments';
 import {
   scheduleCreateClerkUserForDriver,
   scheduleUpdateClerkUserPhone,
@@ -216,6 +217,7 @@ export const create = mutation({
       createdAt: now,
       updatedAt: now,
     });
+    await stampNewDriverSummary(ctx, args.organizationId, driverId); // documents summary (spec §2)
 
     // Insert sensitive data into drivers_sensitive_info table
     await ctx.db.insert('drivers_sensitive_info', {

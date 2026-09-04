@@ -62,10 +62,10 @@ export const cancelUpload = action({
 });
 
 export const getDownloadUrl = action({
-  args: { docId: v.id('entityDocuments'), download: v.optional(v.boolean()) },
-  returns: v.object({ url: v.string(), expiresAt: v.number() }),
-  handler: async (ctx, args): Promise<{ url: string; expiresAt: number }> =>
-    signedDownloadUrl(ctx, args.docId, args.download),
+  args: { docId: v.id('entityDocuments') },
+  returns: v.object({ url: v.string(), downloadUrl: v.string(), expiresAt: v.number() }),
+  handler: async (ctx, args): Promise<{ url: string; downloadUrl: string; expiresAt: number }> =>
+    signedDownloadUrl(ctx, args.docId),
 });
 
 /**
@@ -77,7 +77,12 @@ export const getDownloadUrl = action({
  * is purged.
  */
 export const saveSharedCopy = action({
-  args: { partnershipId: v.id('carrierPartnerships'), sharedDocId: v.id('entityDocuments') },
+  args: {
+    partnershipId: v.id('carrierPartnerships'),
+    sharedDocId: v.id('entityDocuments'),
+    issueDate: v.optional(v.string()),
+    expirationDate: v.optional(v.string()),
+  },
   returns: v.object({ docId: v.id('entityDocuments') }),
   handler: async (ctx, args): Promise<{ docId: Id<'entityDocuments'> }> => {
     const src: {
@@ -92,6 +97,8 @@ export const saveSharedCopy = action({
     } = await ctx.runQuery(internal.entityDocuments.getSharedForCopy, {
       partnershipId: args.partnershipId,
       sharedDocId: args.sharedDocId,
+      issueDate: args.issueDate,
+      expirationDate: args.expirationDate,
     });
 
     const pending: { docId: Id<'entityDocuments'>; key: string; orgId: string; contentType: string } =

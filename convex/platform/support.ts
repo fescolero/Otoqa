@@ -543,15 +543,18 @@ export const startOffboarding = mutation({
     if (!org) throw new ConvexError('Organization not found');
     if (org.purgedAt) throw new ConvexError('Organization was already purged');
     const now = Date.now();
-    const purgeAt = org.offboardingStartedAt && org.purgeAt ? org.purgeAt : now + OFFBOARDING_RETENTION_MS;
-    if (!org.offboardingStartedAt) {
-      await ctx.db.patch(args.organizationId, {
-        offboardingStartedAt: now,
-        offboardingReason: args.reason,
-        purgeAt,
-        updatedAt: now,
-      });
+    // Idempotent: already offboarding → nothing to change and nobody to
+    // re-notify (repeat calls must not spam partnership activity).
+    if (org.offboardingStartedAt && org.purgeAt) {
+      return { purgeAt: org.purgeAt, notifiedPartnerships: 0 };
     }
+    const purgeAt = now + OFFBOARDING_RETENTION_MS;
+    await ctx.db.patch(args.organizationId, {
+      offboardingStartedAt: now,
+      offboardingReason: args.reason,
+      purgeAt,
+      updatedAt: now,
+    });
     // Notify linked brokers through their partnership's activity trail.
     let notified = 0;
     for (const p of await partnershipsLinkedToOrg(ctx, org)) {

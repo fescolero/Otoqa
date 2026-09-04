@@ -382,6 +382,54 @@ export const getLoadDocumentUploadUrl = action({
 });
 
 /**
+ * DEPRECATED — POD presigns now go through getLoadDocumentUploadUrl with
+ * type 'POD' + stopId. Kept as a thin wrapper so driver-app builds still
+ * in the field keep working (they call this by name); it produces the same
+ * org-prefixed key layout as the unified path. Remove only after the
+ * driverAppConfig minSupportedBuild is raised past the last build that
+ * calls it.
+ */
+export const getPODUploadUrl = action({
+  args: {
+    loadId: v.string(),
+    stopId: v.string(),
+    filename: v.string(),
+    driverId: v.optional(v.string()),
+    capturedAt: v.optional(v.number()),
+    capturedLat: v.optional(v.number()),
+    capturedLng: v.optional(v.number()),
+  },
+  returns: v.object({
+    uploadUrl: v.string(),
+    fileUrl: v.string(),
+    key: v.string(),
+    metadataHeaders: v.record(v.string(), v.string()),
+  }),
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new ConvexError('Not authenticated');
+
+    const orgSegment = await resolveOrgSegment(ctx, args.loadId);
+    const key = buildLoadDocumentKey(orgSegment, args.loadId, 'POD', args.filename);
+    const metadata: Record<string, string> = {
+      'org-id': orgSegment,
+      'load-id': args.loadId,
+      'stop-id': args.stopId,
+      'doc-type': 'POD',
+      'uploaded-via': 'driver-mobile',
+    };
+    if (args.driverId) metadata['driver-id'] = args.driverId;
+    if (args.capturedAt) metadata['captured-at'] = String(args.capturedAt);
+    if (typeof args.capturedLat === 'number') metadata['captured-lat'] = args.capturedLat.toFixed(6);
+    if (typeof args.capturedLng === 'number') metadata['captured-lng'] = args.capturedLng.toFixed(6);
+
+    const uploadUrl = await presignPutWithMetadata({ key, contentType: 'image/jpeg', metadata });
+    const fileUrl = buildFileUrl(key, process.env.R2_ACCOUNT_ID, process.env.S3_BUCKET ?? '');
+    return { uploadUrl, fileUrl, key, metadataHeaders: metadataToHeaders(metadata) };
+  },
+});
+
+/**
  * Short-lived signed GET URL for a load document stored in R2.
  *
  * This is the read path that lets the bucket stay private: consumers

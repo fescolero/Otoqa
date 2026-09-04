@@ -59,8 +59,8 @@ export const cancelUpload = action({
 });
 
 export const getDownloadUrl = action({
-  args: { docId: v.id('entityDocuments'), download: v.optional(v.boolean()) },
-  returns: v.object({ url: v.string(), expiresAt: v.number() }),
-  handler: async (ctx, args): Promise<{ url: string; expiresAt: number }> =>
-    signedDownloadUrl(ctx, args.docId, args.download),
+  args: { docId: v.id('entityDocuments') },
+  returns: v.object({ url: v.string(), downloadUrl: v.string(), expiresAt: v.number() }),
+  handler: async (ctx, args): Promise<{ url: string; downloadUrl: string; expiresAt: number }> =>
+    signedDownloadUrl(ctx, args.docId),
 });

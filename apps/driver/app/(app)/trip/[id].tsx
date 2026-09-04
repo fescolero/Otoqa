@@ -446,8 +446,14 @@ export default function TripDetailScreen() {
 
     if (!result.canceled && result.assets?.[0]?.uri) {
       const asset = result.assets[0];
-      setPhotoUri(await prepareImageForUpload(asset.uri, asset.width, asset.height, asset.mimeType));
-      posthog?.capture('capture_photo_taken', { loadId: id, success: true });
+      try {
+        setPhotoUri(await prepareImageForUpload(asset.uri, asset.width, asset.height, asset.mimeType));
+        posthog?.capture('capture_photo_taken', { loadId: id, success: true });
+      } catch {
+        // Non-JPEG source that could not be converted (spec §1) — never
+        // upload it as-is; ask for another shot.
+        Alert.alert('Photo not usable', 'That photo could not be prepared for upload. Please take it again.');
+      }
     }
   };
 
@@ -476,12 +482,18 @@ export default function TripDetailScreen() {
     if (cameraResult.canceled || !cameraResult.assets?.[0]?.uri) return;
 
     const capturedAsset = cameraResult.assets[0];
-    const capturedUri = await prepareImageForUpload(
-      capturedAsset.uri,
-      capturedAsset.width,
-      capturedAsset.height,
-      capturedAsset.mimeType,
-    );
+    let capturedUri: string;
+    try {
+      capturedUri = await prepareImageForUpload(
+        capturedAsset.uri,
+        capturedAsset.width,
+        capturedAsset.height,
+        capturedAsset.mimeType,
+      );
+    } catch {
+      Alert.alert('Photo not usable', 'That photo could not be prepared for upload. Please take it again.');
+      return;
+    }
     setRecentUploads((prev) => [{ type: kind, status: 'uploading' }, ...prev]);
 
     try {
@@ -531,7 +543,11 @@ export default function TripDetailScreen() {
     });
     if (!cameraResult.canceled && cameraResult.assets?.[0]?.uri) {
       const asset = cameraResult.assets[0];
-      setAccidentPhotoUri(await prepareImageForUpload(asset.uri, asset.width, asset.height, asset.mimeType));
+      try {
+        setAccidentPhotoUri(await prepareImageForUpload(asset.uri, asset.width, asset.height, asset.mimeType));
+      } catch {
+        Alert.alert('Photo not usable', 'That photo could not be prepared for upload. Please take it again.');
+      }
     }
   };
 

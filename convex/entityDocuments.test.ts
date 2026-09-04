@@ -915,6 +915,10 @@ describe('purge robustness (review findings)', () => {
       });
     });
 
+    // Purge steps only act on an org that is due; put it in that state.
+    const now = Date.now();
+    await t.run((ctx) => ctx.db.patch(orgId, { offboardingStartedAt: now - 20 * 86400000, purgeAt: now - 1000 }));
+
     const legacy = await t.query(internal.entityDocuments.legacyLoadKeysForOrg, { organizationId: orgId });
     expect(legacy.keys).toEqual(['pod-photos/legacy-1.jpg']); // in-prefix key is covered by the prefix delete
     expect(legacy.nextCursor).toBeNull();
@@ -924,5 +928,138 @@ describe('purge robustness (review findings)', () => {
     expect(await t.run((ctx) => ctx.storage.getUrl(storageId))).toBeNull();
     // Rows gone → nothing left to list; a re-run is a no-op.
     expect((await t.query(internal.entityDocuments.legacyLoadKeysForOrg, { organizationId: orgId })).keys).toEqual([]);
+  });
+});
+
+describe('second-review follow-ups', () => {
+  const savedEnv: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    vi.useFakeTimers(); // catalog mutations schedule recomputes
+    savedEnv.STAFF_ISSUER = process.env.STAFF_ISSUER;
+    savedEnv.STAFF_EMAIL_ALLOWLIST = process.env.STAFF_EMAIL_ALLOWLIST;
+    process.env.STAFF_ISSUER = STAFF_ISSUER;
+    process.env.STAFF_EMAIL_ALLOWLIST = 'ops@otoqa.com';
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env.STAFF_ISSUER = savedEnv.STAFF_ISSUER;
+    process.env.STAFF_EMAIL_ALLOWLIST = savedEnv.STAFF_EMAIL_ALLOWLIST;
+  });
+
+  it('a cancel that lands mid-purge stops every later step and never stamps the org', async () => {
+    const t = setup();
+    const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    const now = Date.now();
+    await t.run((ctx) => ctx.db.patch(orgId, { offboardingStartedAt: now - 20 * 86400000, purgeAt: now - 1000 }));
+    expect(await t.query(internal.entityDocuments.isStillDueForPurge, { organizationId: orgId, now })).toBe(true);
+
+    // Staff cancels after dueForPurge already listed the org.
+    await t.withIdentity(STAFF as never).mutation(api.platform.support.cancelOffboarding, { organizationId: orgId, reason: 'Retained' });
+
+    expect(await t.query(internal.entityDocuments.isStillDueForPurge, { organizationId: orgId, now: Date.now() })).toBe(false);
+    expect((await t.query(internal.entityDocuments.legacyLoadKeysForOrg, { organizationId: orgId })).keys).toEqual([]);
+    expect(await t.mutation(internal.entityDocuments.purgeOrgRows, { organizationId: orgId })).toEqual({ deleted: 0, done: true });
+    expect(await t.mutation(internal.entityDocuments.markPurged, { organizationId: orgId })).toBe(false);
+
+    const org = await t.run((ctx) => ctx.db.get(orgId));
+    expect(org?.purgedAt).toBeUndefined();
+    expect(org?.isDeleted).toBeFalsy();
+    expect(await t.run((ctx) => ctx.db.query('entityDocuments').collect())).toHaveLength(1); // untouched
+  });
+
+  it("markPurged recomputes linked brokers' partnership summaries", async () => {
+    const t = setup();
+    const { orgId, partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    let p = await t.run((ctx) => ctx.db.get(partnershipId));
+    expect(p?.missingDocTypeKeys).not.toContain('coi'); // satisfied by the shared row
+
+    const now = Date.now();
+    await t.run((ctx) => ctx.db.patch(orgId, { offboardingStartedAt: now - 20 * 86400000, purgeAt: now - 1000 }));
+    let done = false;
+    while (!done) done = (await t.mutation(internal.entityDocuments.purgeOrgRows, { organizationId: orgId })).done;
+    expect(await t.mutation(internal.entityDocuments.markPurged, { organizationId: orgId })).toBe(true);
+
+    p = await t.run((ctx) => ctx.db.get(partnershipId));
+    expect(p?.missingDocTypeKeys).toContain('coi'); // no longer satisfied once the carrier is gone
+  });
+
+  it('startOffboarding is idempotent: a repeat call neither re-notifies nor re-audits', async () => {
+    const t = setup();
+    const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const asStaff = t.withIdentity(STAFF as never);
+    const first = await asStaff.mutation(api.platform.support.startOffboarding, { organizationId: orgId, reason: 'Churn' });
+    const second = await asStaff.mutation(api.platform.support.startOffboarding, { organizationId: orgId, reason: 'Churn again' });
+    expect(second.purgeAt).toBe(first.purgeAt);
+    expect(second.notifiedPartnerships).toBe(0);
+    const notices = await t.run(async (ctx) =>
+      (await ctx.db.query('auditLog').collect()).filter((a) => a.description?.includes('is leaving Otoqa')),
+    );
+    expect(notices).toHaveLength(1);
+    const platform = await t.run(async (ctx) =>
+      (await ctx.db.query('platformAuditLog').collect()).filter((a) => a.action === 'org_offboarding_started'),
+    );
+    expect(platform).toHaveLength(1);
+  });
+
+  it('upsertSystemOverride patches only the provided fields', async () => {
+    const t = setup();
+    await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    const asAdmin = t.withIdentity(CARRIER_ADMIN as never);
+    await asAdmin.mutation(api.documentTypes.upsertSystemOverride, { key: 'org_coi', name: 'Insurance certificate', sortOrder: 5 });
+    await asAdmin.mutation(api.documentTypes.upsertSystemOverride, { key: 'org_coi', sharedByDefault: false });
+    const catalog = await asAdmin.query(api.documentTypes.effectiveCatalog, { entity: 'organization' });
+    const coi = catalog.find((c) => c.key === 'org_coi')!;
+    expect(coi.name).toBe('Insurance certificate'); // survived the partial update
+    expect(coi.sortOrder).toBe(5);
+    expect(coi.sharedByDefault).toBe(false);
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+  });
+
+  it("Save a copy validates the broker's date requirements before any copy, and accepts overrides", async () => {
+    const t = setup();
+    const { orgId, partnershipId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: true }));
+    const asCarrier = t.withIdentity(CARRIER_ADMIN as never);
+    // Carrier relaxes W-9 to not require an issue date and uploads one without.
+    await asCarrier.mutation(api.documentTypes.upsertSystemOverride, { key: 'org_w9', issueDateRequired: false });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const sharedDocId = await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_w9', {});
+    await t.withIdentity(STAFF as never).mutation(api.platform.support.startOffboarding, { organizationId: orgId, reason: 'Churn' });
+
+    const asBroker = t.withIdentity(BROKER_USER as never);
+    await expect(
+      asBroker.query(internal.entityDocuments.getSharedForCopy, { partnershipId, sharedDocId }),
+    ).rejects.toThrow(/needs an issue date/);
+    const ok = await asBroker.query(internal.entityDocuments.getSharedForCopy, {
+      partnershipId,
+      sharedDocId,
+      issueDate: '2026-03-03',
+    });
+    expect(ok.issueDate).toBe('2026-03-03');
+    expect(ok.expirationDate).toBeUndefined(); // w9 does not expire on the broker side
+  });
+
+  it('drivers.create stamps the missing-documents summary immediately', async () => {
+    const t = setup();
+    const asEditor = t.withIdentity({ ...EDITOR, permissions: [...permissionsForLevel('fleet', 'manage')] } as never);
+    const driverId = await asEditor.mutation(api.drivers.create, {
+      firstName: 'New',
+      lastName: 'Driver',
+      email: 'n@t.co',
+      phone: '+15550001111',
+      licenseNumber: 'X1',
+      licenseState: 'CA',
+      licenseExpiration: '2030-01-01',
+      licenseClass: 'A',
+      hireDate: '2026-01-01',
+      employmentStatus: 'Active',
+      employmentType: 'Full-time',
+      organizationId: ORG_A,
+      createdBy: EDITOR.subject,
+    });
+    const d = await t.run((ctx) => ctx.db.get(driverId as Id<'drivers'>));
+    expect(d?.missingDocTypeKeys).toBeDefined();
+    expect(d?.missingDocTypeKeys).toContain('cdl');
   });
 });

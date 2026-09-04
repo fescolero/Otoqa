@@ -126,16 +126,23 @@ export async function cancelEntityUpload(ctx: ActionCtx, docId: Id<'entityDocume
   return null;
 }
 
-/** Short-lived signed GET; `download` forces attachment disposition. */
+/**
+ * Short-lived signed GETs for one document: an inline `url` for previews
+ * and a `downloadUrl` with attachment disposition — one access check,
+ * two presigns, so a row click costs a single action.
+ */
 export async function signedDownloadUrl(
   ctx: ActionCtx,
   docId: Id<'entityDocuments'>,
-  download?: boolean,
-): Promise<{ url: string; expiresAt: number }> {
+): Promise<{ url: string; downloadUrl: string; expiresAt: number }> {
   const doc: { key: string; fileName?: string; contentType?: string } | null = await ctx.runQuery(
     internal.entityDocuments.getForAccess,
     { docId },
   );
   if (!doc) throw new ConvexError('Document not found');
-  return presignGet({ key: doc.key, downloadAs: download ? doc.fileName ?? 'document' : undefined });
+  const [view, dl] = await Promise.all([
+    presignGet({ key: doc.key }),
+    presignGet({ key: doc.key, downloadAs: doc.fileName ?? 'document' }),
+  ]);
+  return { url: view.url, downloadUrl: dl.url, expiresAt: Math.min(view.expiresAt, dl.expiresAt) };
 }

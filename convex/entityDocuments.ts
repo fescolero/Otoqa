@@ -476,6 +476,16 @@ async function recomputeLinkedPartnerships(ctx: MutationCtx, orgWorkosId: string
   }
 }
 
+/** Stamp `missingDocTypeKeys` on a freshly created driver so list pages
+ *  never fall back to the code default for it. Call right after insert. */
+export async function stampNewDriverSummary(
+  ctx: MutationCtx,
+  orgId: string,
+  driverId: Id<'drivers'>,
+): Promise<void> {
+  await recomputeEntitySummary(ctx, orgId, 'driver', driverId);
+}
+
 /** Rewrite the parent's time-independent summary (+ carrier mirrors). */
 export async function recomputeEntitySummary(
   ctx: MutationCtx,
@@ -977,7 +987,14 @@ export const listForEntity = query({
  * offboarding window, only for a document the broker can already read.
  */
 export const getSharedForCopy = internalQuery({
-  args: { partnershipId: v.id('carrierPartnerships'), sharedDocId: v.id('entityDocuments') },
+  args: {
+    partnershipId: v.id('carrierPartnerships'),
+    sharedDocId: v.id('entityDocuments'),
+    /** Dates the broker supplies when the carrier's copy lacks one the
+     *  broker's own type requires. */
+    issueDate: v.optional(v.string()),
+    expirationDate: v.optional(v.string()),
+  },
   returns: v.object({
     srcKey: v.string(),
     fileName: v.string(),
@@ -1003,13 +1020,28 @@ export const getSharedForCopy = internalQuery({
     const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
     const type = catalog.find((t) => t.key === doc.typeKey);
     if (!type?.partnerTypeKey || !isSharedByRule(doc, type)) throw new ConvexError('Document is not shared with you');
+
+    // The copy activates under the BROKER's carrier type, whose flags may
+    // be stricter than the carrier's — fail here, before any CopyObject,
+    // with something the broker can act on.
+    const brokerCatalog = await loadEffectiveCatalog(ctx, p.brokerOrgId, 'carrier');
+    const brokerType = brokerCatalog.find((t) => t.key === type.partnerTypeKey);
+    if (!brokerType || brokerType.hidden) throw new ConvexError(`${type.name} is hidden in your Settings › Documents`);
+    const issueDate = args.issueDate ?? doc.issueDate;
+    const expirationDate = args.expirationDate ?? doc.expirationDate;
+    if (brokerType.expires && !expirationDate) {
+      throw new ConvexError(`${brokerType.name} needs an expiration date and the shared copy has none — enter one to save it`);
+    }
+    if (brokerType.issueDateRequired && !issueDate) {
+      throw new ConvexError(`${brokerType.name} needs an issue date and the shared copy has none — enter one to save it`);
+    }
     return {
       srcKey: doc.externalKey,
       fileName: doc.fileName ?? 'document',
       contentType: doc.contentType,
       sizeBytes: doc.sizeBytes ?? 1,
-      issueDate: doc.issueDate,
-      expirationDate: doc.expirationDate,
+      issueDate,
+      expirationDate: brokerType.expires ? expirationDate : undefined,
       partnerTypeKey: type.partnerTypeKey,
       carrierName: org.name,
     };
@@ -1046,12 +1078,24 @@ const PURGE_BATCH = 200;
  * unreferenced bytes. Paged. Entity documents never need this — their
  * keys are always built under the prefix.
  */
+/** True only while the org is due AND still offboarding — a staff cancel
+ *  that lands mid-run must stop every later step (spec §7). */
+function stillDueForPurge(org: Doc<'organizations'> | null, now: number): org is Doc<'organizations'> {
+  return !!org && isOffboarding(org) && org.purgeAt !== undefined && org.purgeAt <= now;
+}
+
+export const isStillDueForPurge = internalQuery({
+  args: { organizationId: v.id('organizations'), now: v.number() },
+  returns: v.boolean(),
+  handler: async (ctx, args) => stillDueForPurge(await ctx.db.get(args.organizationId), args.now),
+});
+
 export const legacyLoadKeysForOrg = internalQuery({
   args: { organizationId: v.id('organizations'), cursor: v.optional(v.string()) },
   returns: v.object({ keys: v.array(v.string()), nextCursor: v.union(v.string(), v.null()) }),
   handler: async (ctx, args) => {
     const org = await ctx.db.get(args.organizationId);
-    if (!org?.workosOrgId) return { keys: [], nextCursor: null };
+    if (!org?.workosOrgId || !stillDueForPurge(org, Date.now())) return { keys: [], nextCursor: null };
     const prefix = `orgs/${org.workosOrgId}/`;
     const page = await ctx.db
       .query('loadDocuments')
@@ -1076,7 +1120,8 @@ export const purgeOrgRows = internalMutation({
   returns: v.object({ deleted: v.number(), done: v.boolean() }),
   handler: async (ctx, args) => {
     const org = await ctx.db.get(args.organizationId);
-    if (!org?.workosOrgId) return { deleted: 0, done: true };
+    // Cancelled mid-run → stop touching rows (done=true ends the loop).
+    if (!org?.workosOrgId || !stillDueForPurge(org, Date.now())) return { deleted: 0, done: true };
     const orgId = org.workosOrgId;
     let deleted = 0;
 
@@ -1115,11 +1160,13 @@ export const purgeOrgRows = internalMutation({
 
 export const markPurged = internalMutation({
   args: { organizationId: v.id('organizations') },
-  returns: v.null(),
+  returns: v.boolean(),
   handler: async (ctx, args) => {
     const org = await ctx.db.get(args.organizationId);
-    if (!org || org.purgedAt) return null;
+    if (!org || org.purgedAt) return false;
     const now = Date.now();
+    // A cancel that landed mid-run wins: never stamp an org staff kept.
+    if (!stillDueForPurge(org, now)) return false;
     await ctx.db.patch(args.organizationId, {
       purgedAt: now,
       purgeAt: undefined, // leave the by_purgeAt range for orgs still due
@@ -1138,7 +1185,11 @@ export const markPurged = internalMutation({
       after: JSON.stringify({ purgedAt: now }),
       reason: org.offboardingReason ?? 'Offboarding window ended',
     });
-    return null;
+    // The carrier's shared documents just vanished for every linked
+    // broker — rewrite their partnership summaries/mirrors now rather than
+    // on the next unrelated document event.
+    if (org.workosOrgId) await recomputeLinkedPartnerships(ctx, org.workosOrgId);
+    return true;
   },
 });
 

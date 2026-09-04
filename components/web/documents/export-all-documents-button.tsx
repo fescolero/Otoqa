@@ -78,8 +78,8 @@ export function ExportAllDocumentsButton({ orgLabel }: { orgLabel?: string }) {
       for (const d of entityDocs) {
         const path = `${d.entity}/${safe(d.entityName)}/${d.status === 'archived' ? 'archived/' : ''}${safe(d.typeKey)}-${safe(d.fileName, 'file')}`;
         try {
-          const { url } = await entityDownload({ docId: d.docId, download: true });
-          await add(path, url);
+          const { downloadUrl } = await entityDownload({ docId: d.docId });
+          await add(path, downloadUrl);
           manifest.push([path, 'entity', d.entity, d.entityName, d.typeKey, d.status, d.issueDate ?? '', d.expirationDate ?? '', new Date(d.uploadedAt).toISOString()]);
         } catch (e) {
           failed++;

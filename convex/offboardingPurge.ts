@@ -37,6 +37,14 @@ export const purgeDueOrganizations = internalAction({
     let rowsDeleted = 0;
 
     for (const org of due) {
+      // Re-check right before touching anything: a cancel that landed after
+      // dueForPurge listed this org must win.
+      const stillDue: boolean = await ctx.runQuery(internal.entityDocuments.isStillDueForPurge, {
+        organizationId: org.organizationId,
+        now: Date.now(),
+      });
+      if (!stillDue) continue;
+
       // 1. Bucket prefix.
       if (org.workosOrgId) {
         const prefix = `orgs/${org.workosOrgId}/`;
@@ -71,10 +79,16 @@ export const purgeDueOrganizations = internalAction({
         done = r.done;
       }
 
-      // 4. Stamp.
-      await ctx.runMutation(internal.entityDocuments.markPurged, { organizationId: org.organizationId });
-      purged++;
-      console.log(`[offboardingPurge] purged ${org.name} (${org.workosOrgId ?? org.organizationId})`);
+      // 4. Stamp — a no-op (false) if staff cancelled while we were running.
+      const stamped: boolean = await ctx.runMutation(internal.entityDocuments.markPurged, {
+        organizationId: org.organizationId,
+      });
+      if (stamped) {
+        purged++;
+        console.log(`[offboardingPurge] purged ${org.name} (${org.workosOrgId ?? org.organizationId})`);
+      } else {
+        console.warn(`[offboardingPurge] ${org.name} was cancelled mid-run; not stamped`);
+      }
     }
 
     return { purged, objectsDeleted, rowsDeleted };

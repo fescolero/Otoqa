@@ -152,13 +152,10 @@ export function EntityDocumentsTab({ entity, entityId, entityName }: EntityDocum
     };
     setPreview(record);
     try {
-      const [view, dl] = await Promise.all([
-        download({ docId: doc._id }),
-        download({ docId: doc._id, download: true }),
-      ]);
+      const signed = await download({ docId: doc._id });
       setPreview((cur) =>
         cur?.id === doc._id
-          ? { ...cur, preview: { ...cur.preview, url: view.url }, openUrl: view.url, downloadUrl: dl.url }
+          ? { ...cur, preview: { ...cur.preview, url: signed.url }, openUrl: signed.url, downloadUrl: signed.downloadUrl }
           : cur,
       );
     } catch (e) {
