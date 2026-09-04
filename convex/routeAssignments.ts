@@ -8,6 +8,7 @@ import { matchRouteAssignment, overlappingDays, effectiveRangesOverlap, DAY_NAME
 import { assertValidAssignAheadDays, shiftServiceDate } from './lib/assignHorizon';
 import type { Doc } from './_generated/dataModel';
 import { assessRuleLoads } from './routeRotation';
+import { unassignLoadResources } from './dispatchLegs';
 import { internal } from './_generated/api';
 
 /**
@@ -1175,6 +1176,32 @@ export const remove = mutation({
       throw new ConvexError('Not authorized for this organization');
     }
 
+    // The loads this rule placed would be orphaned by the delete — their
+    // provenance would point at nothing, so no later re-sync could reach
+    // them. Release the upcoming, not-started ones now (no opt-out) and
+    // queue the ordinary assignment decision on each, so whichever rule
+    // covers them next takes them, or they wait Open for a dispatcher.
+    const assessed = await assessRuleLoads(ctx, assignment);
+    let released = 0;
+    for (const a of assessed) {
+      const stays = !a.verdict.eligible && a.verdict.reason !== 'IN_SYNC';
+      if (stays) continue;
+      const r = await unassignLoadResources(
+        ctx,
+        a.load._id,
+        { userId, userName, userEmail },
+        `route rule "${assignment.name ?? assignment.hcr}" deleted; released for re-assignment`,
+        false,
+      );
+      if (r.status !== 'SUCCESS') continue;
+      released++;
+      await ctx.scheduler.runAfter(0, internal.autoAssignment.autoAssignLoad, {
+        loadId: a.load._id,
+        userId,
+        userName: userName ?? 'Route re-sync',
+      });
+    }
+
     await ctx.db.delete(args.id);
 
     await logAudit(ctx, {
@@ -1186,7 +1213,9 @@ export const remove = mutation({
       performedBy: userId,
       performedByName: userName,
       performedByEmail: userEmail,
-      description: `Deleted route assignment for HCR ${assignment.hcr}${assignment.tripNumber ? ` / Trip ${assignment.tripNumber}` : ''}`,
+      description:
+        `Deleted route assignment for HCR ${assignment.hcr}${assignment.tripNumber ? ` / Trip ${assignment.tripNumber}` : ''}` +
+        (released > 0 ? ` — released ${released} upcoming load${released === 1 ? '' : 's'} it had assigned` : ''),
       changesBefore: JSON.stringify(assignment),
     });
 

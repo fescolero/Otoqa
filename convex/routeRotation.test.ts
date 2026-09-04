@@ -450,4 +450,34 @@ describe('rotation on rule edit', () => {
     const rule = await t.run((ctx) => ctx.db.get(w.routeId));
     expect(rule?.lastRotation?.byReason).toContainEqual({ reason: 'NO_MATCH', count: 2 });
   });
+
+  it('deleting a rule releases the upcoming loads it placed, and another rule can take them', async () => {
+    const t = setup();
+    const w = await buildWorld(t);
+
+    await w.asUser.mutation(api.routeAssignments.remove, { id: w.routeId });
+    await drain(t);
+
+    // Upcoming, not-started loads are Open again, without the opt-out flag;
+    // the started one and the past one stay where they were.
+    for (const id of [w.robotNear, w.robotFar]) {
+      const load = await t.run((ctx) => ctx.db.get(id));
+      expect(load?.status).toBe('Open');
+      expect(load?.autoAssignedRouteId).toBeUndefined();
+      expect(load?.autoAssignOptOut).toBeUndefined();
+    }
+    expect((await loadState(t, w.active)).driver).toBe(w.driverA);
+    expect((await loadState(t, w.past)).driver).toBe(w.driverA);
+    expect((await loadState(t, w.human)).driver).toBe(w.driverA);
+
+    // A rule for Sam on the same HCR now claims them on the next sweep.
+    const rule2 = await t.run((ctx) =>
+      ctx.db.insert('routeAssignments', {
+        workosOrgId: ORG, hcr: HCR, driverId: w.driverB, priority: 1, isActive: true,
+        name: 'Sam 917DK', createdBy: USER, createdAt: Date.now(), updatedAt: Date.now(),
+      }));
+    const r = await t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: w.robotNear, userId: 'system' });
+    expect(r.action).toBe('ASSIGNED_DRIVER');
+    expect((await loadState(t, w.robotNear))).toMatchObject({ driver: w.driverB, route: rule2 });
+  });
 });
