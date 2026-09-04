@@ -12,6 +12,11 @@
  *
  * `untracked` rows render the placeholder copy "Not tracked yet" with a
  * muted chip. Used for fields the backend doesn't currently store.
+ *
+ * Rows are sorted by urgency (expired → expiring → warning → valid → the
+ * rest) so what needs action is on top, and only the first `maxVisible`
+ * show by default with a "Show N more" toggle beneath — the card sits
+ * beside the Now card and must not tower over it.
  */
 
 'use client';
@@ -32,13 +37,48 @@ export interface ComplianceItem {
 
 interface ComplianceMicroBarsProps {
   items: ComplianceItem[];
+  /** Rows shown before the "Show N more" toggle. `Infinity` shows all. */
+  maxVisible?: number;
   className?: string;
 }
 
-export function ComplianceMicroBars({ items, className }: ComplianceMicroBarsProps) {
+export const DEFAULT_COMPLIANCE_MAX_VISIBLE = 4;
+
+/** Lower sorts first. Statuses outside the compliance set (and untracked
+ *  rows) sink to the bottom in their original order. */
+const STATUS_RANK: Partial<Record<ChipStatus, number>> = {
+  expired: 0,
+  danger: 0,
+  expiring: 1,
+  warning: 1,
+  valid: 2,
+  active: 2,
+  na: 3,
+};
+
+function rankOf(it: ComplianceItem): number {
+  if (it.untracked) return 4;
+  return STATUS_RANK[it.status ?? 'na'] ?? 3;
+}
+
+export function sortComplianceItems(items: readonly ComplianceItem[]): ComplianceItem[] {
+  // Array.prototype.sort is stable, so ties keep the caller's order.
+  return items.slice().sort((a, b) => rankOf(a) - rankOf(b));
+}
+
+export function ComplianceMicroBars({
+  items,
+  maxVisible = DEFAULT_COMPLIANCE_MAX_VISIBLE,
+  className,
+}: ComplianceMicroBarsProps) {
+  const [expanded, setExpanded] = React.useState(false);
+  const sorted = React.useMemo(() => sortComplianceItems(items), [items]);
+  const hidden = Math.max(0, sorted.length - maxVisible);
+  const visible = expanded || hidden === 0 ? sorted : sorted.slice(0, maxVisible);
+
   return (
     <div className={cn('flex flex-col gap-2', className)}>
-      {items.map((it, i) => (
+      {visible.map((it, i) => (
         <div
           key={i}
           className="grid items-center gap-2"
@@ -66,6 +106,16 @@ export function ComplianceMicroBars({ items, className }: ComplianceMicroBarsPro
           <Chip status={it.untracked ? 'na' : (it.status ?? 'na')} label={it.untracked ? 'Not tracked' : undefined} />
         </div>
       ))}
+      {hidden > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          className="focus-ring self-start mt-1 text-[12px] font-medium text-[var(--accent)] hover:underline bg-transparent border-0 p-0 cursor-pointer"
+        >
+          {expanded ? 'Show less' : `Show ${hidden} more`}
+        </button>
+      )}
     </div>
   );
 }
