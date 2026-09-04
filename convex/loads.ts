@@ -7,6 +7,7 @@ import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
 import { paginationOptsValidator } from 'convex/server';
 import { parseStopDateTime, syncLegsAffectedByStop } from './_helpers/timeUtils';
+import { onTimePercent } from './_helpers/onTime';
 import { updateLoadCount } from './stats_helpers';
 import { recordLoadWritten } from './platformUsageHelpers';
 import { readScopedCounts, READ_FROM_CACHE_FLAG } from './loadStatusCounts';
@@ -2772,7 +2773,15 @@ export const getDriverYearStats = query({
     yearStartMs: v.number(),
     yearEndMs: v.number(),
   },
-  returns: v.object({ loads: v.number(), miles: v.number() }),
+  returns: v.object({
+    loads: v.number(),
+    miles: v.number(),
+    /** Delivery stops with a window and an arrival record (denominator). */
+    deliveriesEvaluated: v.number(),
+    deliveriesOnTime: v.number(),
+    /** 0–100, or null when nothing this year was evaluable. */
+    onTimePct: v.union(v.number(), v.null()),
+  }),
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
     const driver = await ctx.db.get(args.driverId);
@@ -2791,11 +2800,24 @@ export const getDriverYearStats = query({
 
     const loadIds = new Set<string>();
     let miles = 0;
+    let deliveriesEvaluated = 0;
+    let deliveriesOnTime = 0;
     for (const leg of legs) {
       loadIds.add(leg.loadId);
       miles += leg.legLoadedMiles ?? 0;
+      // Stamped at completion (lib/legOnTime.ts); undefined on legs that
+      // predate the stamp until migration 017 runs — those simply don't
+      // count toward the on-time denominator.
+      deliveriesEvaluated += leg.deliveriesEvaluated ?? 0;
+      deliveriesOnTime += leg.deliveriesOnTime ?? 0;
     }
-    return { loads: loadIds.size, miles: Math.round(miles) };
+    return {
+      loads: loadIds.size,
+      miles: Math.round(miles),
+      deliveriesEvaluated,
+      deliveriesOnTime,
+      onTimePct: onTimePercent(deliveriesEvaluated, deliveriesOnTime),
+    };
   },
 });
 

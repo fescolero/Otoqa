@@ -930,7 +930,7 @@ export default function DriverDetailPage() {
           { label: 'Loads YTD',    value: yearStats ? yearStats.loads.toLocaleString('en-US') : '—' },
           { label: 'Miles YTD',    value: yearStats ? yearStats.miles.toLocaleString('en-US') : '—' },
           { label: 'Score',        value: '—' },
-          { label: 'On-time',      value: '—' },
+          { label: 'On-time',      value: yearStats?.onTimePct != null ? `${yearStats.onTimePct}%` : '—' },
         ]}
       />
 

@@ -108,6 +108,7 @@ async function insertFixtures(ctx: MutationCtx) {
     scheduledStartMs: number,
     legLoadedMiles: number,
     sequence = 1,
+    onTime?: { deliveriesEvaluated: number; deliveriesOnTime: number },
   ) =>
     ctx.db.insert('dispatchLegs', {
       loadId: l.loadId,
@@ -122,16 +123,18 @@ async function insertFixtures(ctx: MutationCtx) {
       workosOrgId: ORG,
       createdAt: now,
       updatedAt: now,
+      ...(onTime ?? {}),
     });
 
   // Split load: two completed legs this year → counts once, miles sum.
+  // (on-time stamps are what completeLeg / migration 017 write)
   const split = await mkLoad('SPLIT');
-  await mkLeg(split, 'COMPLETED', YEAR_START + 10 * DAY, 100, 1);
-  await mkLeg(split, 'COMPLETED', YEAR_START + 11 * DAY, 50.4, 2);
-  // Plain completed load this year.
-  await mkLeg(await mkLoad('PLAIN'), 'COMPLETED', YEAR_START + 40 * DAY, 300);
-  // Completed last year → excluded.
-  await mkLeg(await mkLoad('LAST-YEAR'), 'COMPLETED', YEAR_START - 5 * DAY, 999);
+  await mkLeg(split, 'COMPLETED', YEAR_START + 10 * DAY, 100, 1, { deliveriesEvaluated: 0, deliveriesOnTime: 0 });
+  await mkLeg(split, 'COMPLETED', YEAR_START + 11 * DAY, 50.4, 2, { deliveriesEvaluated: 1, deliveriesOnTime: 1 });
+  // Plain completed load this year, two deliveries, one late.
+  await mkLeg(await mkLoad('PLAIN'), 'COMPLETED', YEAR_START + 40 * DAY, 300, 1, { deliveriesEvaluated: 2, deliveriesOnTime: 1 });
+  // Completed last year → excluded (would drag the % down if counted).
+  await mkLeg(await mkLoad('LAST-YEAR'), 'COMPLETED', YEAR_START - 5 * DAY, 999, 1, { deliveriesEvaluated: 5, deliveriesOnTime: 0 });
   // Scheduled exactly at next year's start → excluded (half-open range).
   await mkLeg(await mkLoad('NEXT-YEAR'), 'COMPLETED', YEAR_END, 999);
   // Still running this year → excluded.
@@ -141,13 +144,13 @@ async function insertFixtures(ctx: MutationCtx) {
 }
 
 describe('loads.getDriverYearStats', () => {
-  it('counts distinct completed loads and rounds summed loaded miles inside the year', async () => {
+  it('counts distinct completed loads, sums miles, and rolls up on-time stamps inside the year', async () => {
     const t = convexTest(schema);
     const { driverId } = await t.run(insertFixtures);
     const stats = await t
       .withIdentity(staff as never)
       .query(api.loads.getDriverYearStats, { driverId, yearStartMs: YEAR_START, yearEndMs: YEAR_END });
-    expect(stats).toEqual({ loads: 2, miles: 450 });
+    expect(stats).toEqual({ loads: 2, miles: 450, deliveriesEvaluated: 3, deliveriesOnTime: 2, onTimePct: 67 });
   });
 
   it('returns zeros for a year with no completed legs', async () => {
@@ -156,7 +159,7 @@ describe('loads.getDriverYearStats', () => {
     const stats = await t
       .withIdentity(staff as never)
       .query(api.loads.getDriverYearStats, { driverId, yearStartMs: YEAR_END + 400 * DAY, yearEndMs: YEAR_END + 800 * DAY });
-    expect(stats).toEqual({ loads: 0, miles: 0 });
+    expect(stats).toEqual({ loads: 0, miles: 0, deliveriesEvaluated: 0, deliveriesOnTime: 0, onTimePct: null });
   });
 
   it('refuses a driver from another organization', async () => {

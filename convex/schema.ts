@@ -2355,6 +2355,13 @@ export default defineSchema({
     scheduledStartMs: v.optional(v.float64()),
     scheduledEndMs: v.optional(v.float64()),
 
+    // On-time stamp, written when the leg completes (_helpers/onTime.ts):
+    // delivery stops on this leg that had a window AND an arrival record,
+    // and how many arrived within window end + grace. Undefined on legs
+    // completed before the stamp existed until migration 017 backfills.
+    deliveriesEvaluated: v.optional(v.float64()),
+    deliveriesOnTime: v.optional(v.float64()),
+
     // PAY ENGINE — latest-wins coalesce key for calculatePayForLeg.
     // Upstream sites that schedule a pay-engine recalc (legacy
     // calculateDriverPay/calculateCarrierPay + the manual recalculate

@@ -23,6 +23,7 @@ import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from '
 import { logAudit } from './lib/audit';
 import { transferFrontierToDriver } from './loadTrackingState';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
+import { computeLegOnTime } from './lib/legOnTime';
 import { getLoadFacets } from './lib/loadFacets';
 
 /**
@@ -1835,11 +1836,13 @@ export const completeLeg = internalMutation({
     if (!leg) throw new ConvexError('Leg not found');
     if (leg.status === 'COMPLETED') return null; // idempotent
 
+    const onTime = await computeLegOnTime(ctx, leg);
     await ctx.db.patch(args.legId, {
       status: 'COMPLETED',
       endedAt: args.endedAt,
       endReason: args.endReason,
       updatedAt: args.endedAt,
+      ...onTime,
     });
     // Completion is a pricing event (completed-work gate in
     // calculatePayForLeg): schedule the recalc that writes the leg's items.
@@ -1931,12 +1934,14 @@ export const handoffLoad = mutation({
       if (frontierStop) newLegStartStopId = frontierStop._id;
     }
 
-    // Complete the old leg.
+    // Complete the old leg (stamping on-time for the deliveries it made).
+    const oldLegOnTime = await computeLegOnTime(ctx, oldLeg);
     await ctx.db.patch(oldLeg._id, {
       status: 'COMPLETED',
       endedAt: now,
       endReason: 'handoff',
       updatedAt: now,
+      ...oldLegOnTime,
     });
     // Completion is a pricing event (completed-work gate): re-price the
     // from-driver's finished portion.
