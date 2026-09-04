@@ -14,7 +14,7 @@ import {
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { keyFromExternalUrl, metadataToHeaders } from './lib/r2';
+import { isStoredContentType, keyFromExternalUrl, metadataToHeaders, sanitizeFilename } from './lib/r2';
 import type { Id } from './_generated/dataModel';
 
 // ============================================
@@ -103,7 +103,7 @@ export function buildLoadDocumentKey(
 ): string {
   const timestamp = Date.now();
   const randomSuffix = Math.random().toString(36).substring(2, 8);
-  const sanitizedFilename = filename.replace(/[^a-zA-Z0-9.-]/g, '_') || 'photo.jpg';
+  const sanitizedFilename = sanitizeFilename(filename, 'photo.jpg');
   const loadSegment = loadId || 'unknown';
   return `orgs/${orgSegment}/loads/${loadSegment}/${docType}/${timestamp}-${randomSuffix}-${sanitizedFilename}`;
 }
@@ -333,6 +333,14 @@ export const getLoadDocumentUploadUrl = action({
       throw new ConvexError('Not authenticated');
     }
 
+    // The bucket holds PDF/JPEG/PNG/WebP only (documents-storage-spec.md
+    // §1); the driver app converts before presign, so anything else is a
+    // client bug, not a format to store.
+    const contentType = (args.contentType ?? 'image/jpeg').toLowerCase();
+    if (!isStoredContentType(contentType)) {
+      throw new ConvexError('Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.');
+    }
+
     // Org comes from the load row, never from the client — the key's
     // org prefix is what per-customer export/deletion trusts.
     const orgSegment = await resolveOrgSegment(ctx, args.loadId);
@@ -366,11 +374,7 @@ export const getLoadDocumentUploadUrl = action({
 
     // Signed x-amz-meta-* headers (never hoisted to the query string) —
     // the one presign contract every document path shares.
-    const uploadUrl = await presignPutWithMetadata({
-      key,
-      contentType: args.contentType ?? 'image/jpeg',
-      metadata,
-    });
+    const uploadUrl = await presignPutWithMetadata({ key, contentType, metadata });
     const metadataHeaders = metadataToHeaders(metadata);
 
     // presignPutWithMetadata already validated the env; the legacy

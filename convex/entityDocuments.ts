@@ -47,7 +47,13 @@ import {
 } from './lib/documentCatalog';
 import type { DocumentEntity } from './lib/documentTypeDefaults';
 import { CARRIER_MIRROR_TO_TYPE_KEY, DRIVER_MIRROR_TO_TYPE_KEY } from './lib/documentTypeDefaults';
-import { isOffboarding, orgByAnyId, partnershipSharesDocuments, partnershipsLinkedToOrg } from './lib/orgLookup';
+import {
+  isOffboarding,
+  orgByAnyId,
+  orgIdShapes,
+  partnershipSharesDocuments,
+  partnershipsLinkedToOrg,
+} from './lib/orgLookup';
 import { logPlatformAudit } from './lib/platformAudit';
 import {
   buildEntityDocumentKey,
@@ -248,7 +254,8 @@ export async function canAccessDocument(
     // listForEntity would say; anyone else falls through to the sharing path.
     if (isPermissionDenied(e)) throw e;
   }
-  if (intent !== 'view' || doc.entity !== 'organization' || doc.status !== 'active') return false;
+  const shareable = doc.entity === 'organization' || (doc.entity === 'driver' && doc.typeKey === 'cdl');
+  if (intent !== 'view' || !shareable || doc.status !== 'active') return false;
 
   const callerOrgId = await getCallerOrgId(ctx);
   if (!callerOrgId || callerOrgId === doc.workosOrgId) return false;
@@ -263,6 +270,7 @@ export async function canAccessDocument(
     (p) => p.brokerOrgId === callerOrgId && partnershipSharesDocuments(p),
   );
   if (!linked) return false;
+  if (doc.entity === 'driver') return isOwnerOperatorCdlOf(doc, carrierOrg);
   const catalog = await loadEffectiveCatalog(ctx, doc.workosOrgId, 'organization');
   return isSharedByRule(doc, catalog.find((t) => t.key === doc.typeKey));
 }
@@ -348,23 +356,73 @@ interface SharedDoc extends PublicDoc {
  *  satisfies — identical for every partnership of that org, so callers
  *  that fan out over partnerships compute it once. */
 export async function sharedDocsFromOrg(ctx: Ctx, org: Doc<'organizations'>): Promise<SharedDoc[]> {
-  if (!org.workosOrgId || org.isDeleted) return [];
-  const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
-  const rows = await activeDocsFor(ctx, org.workosOrgId, 'organization', org.workosOrgId);
+  if (org.isDeleted) return [];
   const out: SharedDoc[] = [];
-  for (const row of rows) {
-    const type = catalog.find((t) => t.key === row.typeKey);
-    if (!type?.partnerTypeKey || !isSharedByRule(row, type)) continue;
+  const sharedFromOrgId = org.workosOrgId ?? (org._id as string);
+  if (org.workosOrgId) {
+    const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
+    const rows = await activeDocsFor(ctx, org.workosOrgId, 'organization', org.workosOrgId);
+    for (const row of rows) {
+      const type = catalog.find((t) => t.key === row.typeKey);
+      if (!type?.partnerTypeKey || !isSharedByRule(row, type)) continue;
+      out.push({
+        ...toPublic(row, type),
+        sharedFromOrgId,
+        sharedFromOrgName: org.name,
+        partnerTypeKey: type.partnerTypeKey,
+        typeName: type.name,
+        raw: row,
+      });
+    }
+  }
+  // An owner-operator's own CDL document is what brokers keep as the
+  // partnership's Owner-driver CDL — shared like a company document, so
+  // the mirror, the Missing summary, the listing and Save a copy all see
+  // the same row (spec §6.3). A driver row keeps whatever org id shape it
+  // was created with; the driver's own id resolves the documents.
+  const ownerCdl = await ownerOperatorCdl(ctx, org);
+  if (ownerCdl) {
     out.push({
-      ...toPublic(row, type),
-      sharedFromOrgId: org.workosOrgId,
+      ...toPublic(ownerCdl.row, undefined),
+      sharedFromOrgId,
       sharedFromOrgName: org.name,
-      partnerTypeKey: type.partnerTypeKey,
-      typeName: type.name,
-      raw: row,
+      partnerTypeKey: OWNER_DRIVER_CDL_TYPE_KEY,
+      typeName: ownerCdl.typeName,
+      raw: ownerCdl.row,
     });
   }
   return out;
+}
+
+const OWNER_DRIVER_CDL_TYPE_KEY = CARRIER_MIRROR_TO_TYPE_KEY.ownerDriverLicenseExpiration;
+
+/** The org's owner-driver's active CDL document, when the org is an
+ *  owner-operator and the document is not withheld. */
+async function ownerOperatorCdl(
+  ctx: Ctx,
+  org: Doc<'organizations'>,
+): Promise<{ row: Doc<'entityDocuments'>; typeName: string } | null> {
+  if (!org.isOwnerOperator || !org.ownerDriverId) return null;
+  const driver = await ctx.db.get(org.ownerDriverId);
+  if (!driver || driver.isDeleted) return null;
+  const cdl = (await activeDocsFor(ctx, driver.organizationId, 'driver', driver._id))
+    .filter((d) => d.typeKey === 'cdl' && d.shared !== false)
+    .sort((a, b) => (b.activatedAt ?? b.uploadedAt) - (a.activatedAt ?? a.uploadedAt))[0];
+  if (!cdl) return null;
+  const catalog = await loadEffectiveCatalog(ctx, driver.organizationId, 'driver');
+  return { row: cdl, typeName: catalog.find((t) => t.key === 'cdl')?.name ?? 'CDL' };
+}
+
+/** Is this document the owner-operator CDL that `org` shares? */
+function isOwnerOperatorCdlOf(doc: Doc<'entityDocuments'>, org: Doc<'organizations'>): boolean {
+  return (
+    doc.entity === 'driver' &&
+    doc.typeKey === 'cdl' &&
+    doc.status === 'active' &&
+    doc.shared !== false &&
+    !!org.isOwnerOperator &&
+    org.ownerDriverId === doc.entityId
+  );
 }
 
 /** The linked carrier org's shared documents as seen from ONE partnership
@@ -439,9 +497,6 @@ export async function recomputePartnershipDocuments(
   const linkedOrg =
     linkedOrgIn !== undefined ? linkedOrgIn : p.carrierOrgId ? await orgByAnyId(ctx, p.carrierOrgId) : null;
   const shared = sharedIn ?? (await sharedDocsForPartnership(ctx, p, linkedOrg));
-  // The linked owner-operator's own CDL document (its stamped expiry) is a
-  // third candidate for ownerDriverLicenseExpiration, never a second writer.
-  const ownerCdlExpiry = await linkedOwnerCdlExpiry(ctx, p, linkedOrg);
 
   const missing = computeMissingTypeKeys(catalog, [
     ...own.map((d) => ({ typeKey: d.typeKey, hasFile: !!d.externalKey })),
@@ -456,12 +511,7 @@ export async function recomputePartnershipDocuments(
     const eff = pickEffectiveDocument<{ expirationDate?: string }>(
       type,
       own.filter((d) => d.typeKey === type.key).map((d) => ({ expirationDate: d.expirationDate })),
-      [
-        ...shared.filter((s) => s.partnerTypeKey === type.key).map((s) => ({ expirationDate: s.expirationDate })),
-        ...(type.mirrorField === 'ownerDriverLicenseExpiration' && ownerCdlExpiry
-          ? [{ expirationDate: ownerCdlExpiry }]
-          : []),
-      ],
+      shared.filter((s) => s.partnerTypeKey === type.key).map((s) => ({ expirationDate: s.expirationDate })),
     );
     if (!eff?.doc.expirationDate) continue; // nothing effective → keep stale
     const field = type.mirrorField as 'insuranceExpiration' | 'ownerDriverLicenseExpiration';
@@ -471,23 +521,6 @@ export async function recomputePartnershipDocuments(
   if (Object.keys(patch).length > 0) {
     await ctx.db.patch(p._id, { ...patch, updatedAt: Date.now() });
   }
-}
-
-/** The linked carrier's owner-driver CDL expiry as stamped from THEIR
- *  documents (drivers.docExpirations.cdl) — undefined when the link does
- *  not share, the org is not an owner-operator, or no CDL document exists.
- *  A hand-entered legacy licenseExpiration is not a document and is not
- *  a candidate. */
-async function linkedOwnerCdlExpiry(
-  ctx: Ctx,
-  p: Doc<'carrierPartnerships'>,
-  org: Doc<'organizations'> | null,
-): Promise<string | undefined> {
-  if (!org || org.isDeleted || !org.isOwnerOperator || !org.ownerDriverId) return undefined;
-  if (!partnershipSharesDocuments(p)) return undefined;
-  const driver = await ctx.db.get(org.ownerDriverId);
-  if (!driver || driver.isDeleted) return undefined;
-  return driver.docExpirations?.cdl;
 }
 
 /** Resummarize every partnership linked to a carrier org after anything
@@ -643,7 +676,6 @@ async function documentOwnedMirrorTypes(
       const org =
         linkedOrgIn !== undefined ? linkedOrgIn : p.carrierOrgId ? await orgByAnyId(ctx, p.carrierOrgId) : null;
       for (const sd of await sharedDocsForPartnership(ctx, p, org, fromOrgIn)) covered.add(sd.partnerTypeKey);
-      if (await linkedOwnerCdlExpiry(ctx, p, org)) covered.add(CARRIER_MIRROR_TO_TYPE_KEY.ownerDriverLicenseExpiration);
     }
   }
   return covered;
@@ -847,6 +879,9 @@ export const finalize = internalMutation({
     const who = await assertEntityAccess(ctx, doc.entity, doc.entityId, 'edit');
     if (doc.status === 'active') return { status: 'active' as const };
     if (doc.status === 'archived') throw new ConvexError('Document was already archived');
+    // Same rule as createPending — the record may have been deleted while
+    // the PUT was in flight.
+    if (who.owner.deleted) throw new ConvexError('Cannot add documents to a deleted record');
     const { type, catalog } = await requireType(ctx, who.orgId, doc.entity, doc.typeKey);
     await activate(ctx, {
       doc,
@@ -1170,20 +1205,29 @@ export const getSharedForCopy = internalQuery({
     if (!org?.workosOrgId) throw new ConvexError('Carrier organization not found');
     if (!isOffboarding(org)) throw new ConvexError('Save a copy is only available while the carrier is offboarding');
     const doc = await ctx.db.get(args.sharedDocId);
-    if (!doc || doc.entity !== 'organization' || doc.workosOrgId !== org.workosOrgId || doc.status !== 'active') {
-      throw new ConvexError('Document not found');
+    if (!doc || doc.status !== 'active') throw new ConvexError('Document not found');
+    // Either a shared company document or the owner-operator's CDL.
+    let partnerTypeKey: string;
+    let typeName: string;
+    if (isOwnerOperatorCdlOf(doc, org)) {
+      partnerTypeKey = OWNER_DRIVER_CDL_TYPE_KEY;
+      typeName = (await ownerOperatorCdl(ctx, org))?.typeName ?? 'CDL';
+    } else {
+      if (doc.entity !== 'organization' || doc.workosOrgId !== org.workosOrgId) throw new ConvexError('Document not found');
+      const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
+      const type = catalog.find((t) => t.key === doc.typeKey);
+      if (!type?.partnerTypeKey || !isSharedByRule(doc, type)) throw new ConvexError('Document is not shared with you');
+      partnerTypeKey = type.partnerTypeKey;
+      typeName = type.name;
     }
     if (!doc.externalKey || !doc.contentType) throw new ConvexError('This document has no file to copy');
-    const catalog = await loadEffectiveCatalog(ctx, org.workosOrgId, 'organization');
-    const type = catalog.find((t) => t.key === doc.typeKey);
-    if (!type?.partnerTypeKey || !isSharedByRule(doc, type)) throw new ConvexError('Document is not shared with you');
 
     // The copy activates under the BROKER's carrier type, whose flags may
     // be stricter than the carrier's — fail here, before any CopyObject,
     // with something the broker can act on.
     const brokerCatalog = await loadEffectiveCatalog(ctx, p.brokerOrgId, 'carrier');
-    const brokerType = brokerCatalog.find((t) => t.key === type.partnerTypeKey);
-    if (!brokerType || brokerType.hidden) throw new ConvexError(`${type.name} is hidden in your Settings › Documents`);
+    const brokerType = brokerCatalog.find((t) => t.key === partnerTypeKey);
+    if (!brokerType || brokerType.hidden) throw new ConvexError(`${typeName} is hidden in your Settings › Documents`);
     const issueDate = args.issueDate ?? doc.issueDate;
     const expirationDate = args.expirationDate ?? doc.expirationDate;
     if (brokerType.expires && !expirationDate) {
@@ -1199,7 +1243,7 @@ export const getSharedForCopy = internalQuery({
       sizeBytes: doc.sizeBytes ?? 1,
       issueDate,
       expirationDate: brokerType.expires ? expirationDate : undefined,
-      partnerTypeKey: type.partnerTypeKey,
+      partnerTypeKey,
       carrierName: org.name,
     };
   },
@@ -1210,7 +1254,13 @@ export const getSharedForCopy = internalQuery({
 export const dueForPurge = internalQuery({
   args: { now: v.number() },
   returns: v.array(
-    v.object({ organizationId: v.id('organizations'), workosOrgId: v.optional(v.string()), name: v.string() }),
+    v.object({
+      organizationId: v.id('organizations'),
+      workosOrgId: v.optional(v.string()),
+      name: v.string(),
+      /** Every id shape the org's rows and keys may be filed under. */
+      orgIds: v.array(v.string()),
+    }),
   ),
   handler: async (ctx, args) => {
     // Convex orders `undefined` before every number, so a bare `lte` would
@@ -1221,7 +1271,7 @@ export const dueForPurge = internalQuery({
       .take(25);
     return rows
       .filter((o) => o.purgeAt !== undefined && o.offboardingStartedAt && !o.purgedAt)
-      .map((o) => ({ organizationId: o._id, workosOrgId: o.workosOrgId, name: o.name }));
+      .map((o) => ({ organizationId: o._id, workosOrgId: o.workosOrgId, name: o.name, orgIds: orgIdShapes(o) }));
   },
 });
 
@@ -1254,18 +1304,37 @@ export const legacyLoadKeysForOrg = internalQuery({
   returns: v.object({ keys: v.array(v.string()), nextCursor: v.union(v.string(), v.null()) }),
   handler: async (ctx, args) => {
     const org = await ctx.db.get(args.organizationId);
-    if (!org?.workosOrgId || !stillDueForPurge(org, Date.now())) return { keys: [], nextCursor: null };
-    const prefix = `orgs/${org.workosOrgId}/`;
-    const page = await ctx.db
-      .query('loadDocuments')
-      .withIndex('by_org', (q) => q.eq('workosOrgId', org.workosOrgId!))
-      .paginate({ cursor: args.cursor ?? null, numItems: 500 });
+    if (!org || !stillDueForPurge(org, Date.now())) return { keys: [], nextCursor: null };
+    // Rows may be filed under any of the org's id shapes; the cursor walks
+    // them in order as `{ i, c }`.
+    const shapes = orgIdShapes(org);
+    const prefixes = shapes.map((id) => `orgs/${id}/`);
+    let pos: { i: number; c: string | null } = args.cursor ? JSON.parse(args.cursor) : { i: 0, c: null };
     const keys: string[] = [];
-    for (const d of page.page) {
-      const key = d.externalKey ?? (d.externalUrl ? keyFromExternalUrl(d.externalUrl) : null);
-      if (key && !key.startsWith(prefix)) keys.push(key);
+    // Walk shapes until a page yields keys or every shape is exhausted, so
+    // an org with nothing legacy answers with a null cursor in one call.
+    while (pos.i < shapes.length) {
+      const page = await ctx.db
+        .query('loadDocuments')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', shapes[pos.i]))
+        .paginate({ cursor: pos.c, numItems: 500 });
+      for (const d of page.page) {
+        const key = d.externalKey ?? (d.externalUrl ? keyFromExternalUrl(d.externalUrl) : null);
+        if (key && !prefixes.some((p) => key.startsWith(p))) keys.push(key);
+      }
+      pos = page.isDone ? { i: pos.i + 1, c: null } : { i: pos.i, c: page.continueCursor };
+      if (keys.length > 0) break;
     }
-    return { keys, nextCursor: page.isDone ? null : page.continueCursor };
+    // A null cursor means "nothing more": skip id shapes with no rows at all.
+    while (pos.c === null && pos.i < shapes.length) {
+      const any = await ctx.db
+        .query('loadDocuments')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', shapes[pos.i]))
+        .first();
+      if (any) break;
+      pos = { i: pos.i + 1, c: null };
+    }
+    return { keys, nextCursor: pos.i < shapes.length ? JSON.stringify(pos) : null };
   },
 });
 
@@ -1279,41 +1348,45 @@ export const purgeOrgRows = internalMutation({
   returns: v.object({ deleted: v.number(), done: v.boolean() }),
   handler: async (ctx, args) => {
     const org = await ctx.db.get(args.organizationId);
-    // Cancelled mid-run → stop touching rows (done=true ends the loop).
-    if (!org?.workosOrgId || !stillDueForPurge(org, Date.now())) return { deleted: 0, done: true };
-    const orgId = org.workosOrgId;
+    // No longer due → stop touching rows (done=true ends the loop).
+    if (!org || !stillDueForPurge(org, Date.now())) return { deleted: 0, done: true };
     let deleted = 0;
 
-    const docs = await ctx.db
-      .query('entityDocuments')
-      .withIndex('by_entity', (q) => q.eq('workosOrgId', orgId))
-      .take(PURGE_BATCH);
-    for (const d of docs) {
-      await ctx.db.delete(d._id);
-      deleted++;
-    }
-    if (deleted >= PURGE_BATCH) return { deleted, done: false };
+    // Rows may be filed under any of the org's id shapes (owner-operator
+    // drivers and partnership-created carrier orgs use the Convex id).
+    for (const orgId of orgIdShapes(org)) {
+      const docs = await ctx.db
+        .query('entityDocuments')
+        .withIndex('by_entity', (q) => q.eq('workosOrgId', orgId))
+        .take(PURGE_BATCH - deleted);
+      for (const d of docs) {
+        await ctx.db.delete(d._id);
+        deleted++;
+      }
+      if (deleted >= PURGE_BATCH) return { deleted, done: false };
 
-    const types = await ctx.db
-      .query('documentTypes')
-      .withIndex('by_org', (q) => q.eq('workosOrgId', orgId))
-      .take(PURGE_BATCH - deleted);
-    for (const t of types) {
-      await ctx.db.delete(t._id);
-      deleted++;
-    }
-    if (deleted >= PURGE_BATCH) return { deleted, done: false };
+      const types = await ctx.db
+        .query('documentTypes')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', orgId))
+        .take(PURGE_BATCH - deleted);
+      for (const t of types) {
+        await ctx.db.delete(t._id);
+        deleted++;
+      }
+      if (deleted >= PURGE_BATCH) return { deleted, done: false };
 
-    const loadDocs = await ctx.db
-      .query('loadDocuments')
-      .withIndex('by_org', (q) => q.eq('workosOrgId', orgId))
-      .take(PURGE_BATCH - deleted);
-    for (const d of loadDocs) {
-      if (d.storageId) await ctx.storage.delete(d.storageId);
-      await ctx.db.delete(d._id);
-      deleted++;
+      const loadDocs = await ctx.db
+        .query('loadDocuments')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', orgId))
+        .take(PURGE_BATCH - deleted);
+      for (const d of loadDocs) {
+        if (d.storageId) await ctx.storage.delete(d.storageId);
+        await ctx.db.delete(d._id);
+        deleted++;
+      }
+      if (deleted >= PURGE_BATCH) return { deleted, done: false };
     }
-    return { deleted, done: deleted < PURGE_BATCH };
+    return { deleted, done: true };
   },
 });
 

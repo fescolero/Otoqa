@@ -1101,6 +1101,13 @@ describe('second-review follow-ups', () => {
     const asOwnerOrg = { ...CARRIER_ADMIN, org_id: orgId as string, permissions: [...permissionsForLevel('fleet', 'edit')] };
     await uploadFor(t, asOwnerOrg, 'driver', driverId, 'cdl', { expirationDate: '2031-07-07' });
     expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2031-07-07');
+    // …as a shared document: it satisfies the type, is listed, and is readable by the broker.
+    const p1 = await t.run((ctx) => ctx.db.get(partnershipId));
+    expect(p1?.missingDocTypeKeys).not.toContain('owner_driver_cdl');
+    const brokerList = await t.withIdentity(BROKER_USER as never).query(api.entityDocuments.listForEntity, { entity: 'carrier', entityId: partnershipId });
+    const sharedCdl = brokerList.shared.find((d) => d.partnerTypeKey === 'owner_driver_cdl');
+    expect(sharedCdl?.expirationDate).toBe('2031-07-07');
+    expect(await t.withIdentity(BROKER_USER as never).query(internal.entityDocuments.getForAccess, { docId: sharedCdl!._id })).not.toBeNull();
 
     // The broker's own owner_driver_cdl document competes: latest expiry wins, one writer.
     await uploadFor(t, BROKER_USER, 'carrier', partnershipId, 'owner_driver_cdl', { expirationDate: '2032-01-01' });
@@ -1234,6 +1241,35 @@ describe('second-review follow-ups', () => {
     await expect(t.withIdentity(noFleet as never).query(internal.entityDocuments.getForAccess, { docId })).rejects.toThrow(
       /fleet:view/,
     );
+  });
+
+  it('the purge covers rows filed under the Convex org id (owner-operator drivers)', async () => {
+    const t = setup();
+    const { orgId } = await t.run((ctx) => insertCarrierWorld(ctx, { linked: false }));
+    const driverId = await t.run((ctx) => insertDriver(ctx, orgId as string));
+    const asOwnerOrg = { ...CARRIER_ADMIN, org_id: orgId as string, permissions: [...permissionsForLevel('fleet', 'edit')] };
+    await uploadFor(t, asOwnerOrg, 'driver', driverId, 'cdl', { expirationDate: '2031-01-01' });
+    await uploadFor(t, CARRIER_ADMIN, 'organization', CARRIER_ORG, 'org_coi', { expirationDate: '2031-01-01' });
+    const now = Date.now();
+    await t.run((ctx) => ctx.db.patch(orgId, { offboardingStartedAt: now - 20 * 86400000, purgeAt: now - 1000 }));
+    const due = await t.query(internal.entityDocuments.dueForPurge, { now });
+    expect(due[0].orgIds).toEqual(expect.arrayContaining([CARRIER_ORG, orgId as string]));
+    let done = false;
+    while (!done) done = (await t.mutation(internal.entityDocuments.purgeOrgRows, { organizationId: orgId })).done;
+    expect(await t.run((ctx) => ctx.db.query('entityDocuments').collect())).toHaveLength(0);
+  });
+
+  it('finalize refuses a record deleted while the upload was in flight', async () => {
+    const t = setup();
+    const driverId = await t.run((ctx) => insertDriver(ctx));
+    const as = t.withIdentity(EDITOR as never);
+    const pending = await as.mutation(internal.entityDocuments.createPending, {
+      entity: 'driver', entityId: driverId, typeKey: 'cdl', fileName: 'cdl.pdf', contentType: 'application/pdf', sizeBytes: 10,
+    });
+    await t.run((ctx) => ctx.db.patch(driverId, { isDeleted: true }));
+    await expect(
+      as.mutation(internal.entityDocuments.finalize, { docId: pending.docId, verified: { contentType: 'application/pdf', sizeBytes: 10 }, expirationDate: '2031-01-01' }),
+    ).rejects.toThrow(/deleted record/);
   });
 
   it('startOffboarding is idempotent: a repeat call neither re-notifies nor re-audits', async () => {

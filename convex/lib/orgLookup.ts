@@ -27,6 +27,14 @@ export async function orgByAnyId(ctx: Ctx, id: string | undefined): Promise<Doc<
   return nid ? ctx.db.get(nid) : null;
 }
 
+/** Every id an org's rows and R2 keys may be filed under: documents are
+ *  keyed by whatever `organizationId` the owning row carries (WorkOS id
+ *  normally; the Convex id for owner-operator drivers and carrier orgs
+ *  created from a partnership; the Clerk id historically). */
+export function orgIdShapes(org: Doc<'organizations'>): string[] {
+  return [...new Set([org.workosOrgId, org.clerkOrgId, org._id as string].filter((x): x is string => !!x))];
+}
+
 /** Every partnership whose carrier side is this org, across the id shapes. */
 export async function partnershipsLinkedToOrg(
   ctx: Ctx,
