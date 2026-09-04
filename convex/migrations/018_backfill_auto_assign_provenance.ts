@@ -4,6 +4,8 @@ import { internal } from '../_generated/api';
 import type { FunctionReference } from 'convex/server';
 import { getLoadFacets } from '../lib/loadFacets';
 import { matchRouteAssignment } from '../lib/routeMatch';
+import { unassignLoadResources } from '../dispatchLegs';
+import { serviceDateOf } from '../lib/assignHorizon';
 
 /**
  * Migration: stamp `autoAssignedRouteId` / `autoAssignedAt` onto Assigned
@@ -38,10 +40,22 @@ import { matchRouteAssignment } from '../lib/routeMatch';
  * Idempotent: loads that already carry provenance are skipped. Scope to
  * one org with `workosOrgId` when rolling out gradually.
  *
+ * `releaseUnclaimed`: a robot-assigned load that NO active rule claims
+ * (listed under noRuleLoads) is sitting on a driver for no reason the
+ * rules can state. If the answer is "nobody should hold it yet", this
+ * returns it to Open — the same cascade a dispatcher's unassign runs
+ * (legs cleared, system payables removed, audit row), but WITHOUT the
+ * autoAssignOptOut flag, so a rule added later can claim it. Only
+ * upcoming loads with no leg started are released; past or in-motion
+ * ones are left alone and still listed. If the answer is instead "driver
+ * X runs it", add that rule and re-run the backfill: the load is then
+ * stamped and a re-sync moves it.
+ *
  * Run:
  *   npx convex run migrations/018_backfill_auto_assign_provenance:startBackfill
  *   npx convex run migrations/018_backfill_auto_assign_provenance:startBackfill '{"workosOrgId":"org_…"}'
  *   npx convex run migrations/018_backfill_auto_assign_provenance:startBackfill '{"dryRun":true}'
+ *   npx convex run migrations/018_backfill_auto_assign_provenance:startBackfill '{"releaseUnclaimed":true}'
  */
 
 const BATCH_SIZE = 50;
@@ -66,6 +80,7 @@ const countsValidator = v.object({
   skippedHuman: v.number(),
   skippedNoAudit: v.number(),
   skippedNoRule: v.number(),
+  released: v.number(),
 });
 
 /**
@@ -82,6 +97,8 @@ const noRuleLoadValidator = v.object({
   trip: v.optional(v.string()),
   serviceDate: v.optional(v.string()),
   reason: v.string(),
+  // With releaseUnclaimed: 'RELEASED', or why not ('PAST', 'IN_MOTION').
+  outcome: v.optional(v.string()),
 });
 const MAX_LISTED = 200;
 
@@ -90,6 +107,7 @@ export const backfillBatch = internalMutation({
     cursor: v.optional(v.string()),
     workosOrgId: v.optional(v.string()),
     dryRun: v.optional(v.boolean()),
+    releaseUnclaimed: v.optional(v.boolean()),
   },
   returns: v.object({
     ...countsValidator.fields,
@@ -107,14 +125,48 @@ export const backfillBatch = internalMutation({
           .query('loadInformation')
           .paginate({ cursor: args.cursor ?? null, numItems: BATCH_SIZE });
 
-    const counts = { scanned: 0, stamped: 0, skippedHuman: 0, skippedNoAudit: 0, skippedNoRule: 0 };
+    const counts = { scanned: 0, stamped: 0, skippedHuman: 0, skippedNoAudit: 0, skippedNoRule: 0, released: 0 };
     const noRuleLoads: Array<{
       orderNumber: string;
       hcr?: string;
       trip?: string;
       serviceDate?: string;
       reason: string;
+      outcome?: string;
     }> = [];
+    const today = serviceDateOf(Date.now());
+
+    // Return an unclaimed load to Open, if it is safe to: upcoming and not
+    // started. Without the opt-out flag, so a rule added later can claim it.
+    const release = async (
+      load: (typeof result.page)[number],
+      entry: (typeof noRuleLoads)[number],
+    ) => {
+      if (!args.releaseUnclaimed) return;
+      if (!load.firstStopDate || load.firstStopDate < today) {
+        entry.outcome = 'PAST';
+        return;
+      }
+      const legs = await ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_load', (q) => q.eq('loadId', load._id))
+        .collect();
+      if (legs.some((l) => l.status === 'ACTIVE' || l.status === 'COMPLETED')) {
+        entry.outcome = 'IN_MOTION';
+        return;
+      }
+      if (!args.dryRun) {
+        await unassignLoadResources(
+          ctx,
+          load._id,
+          { userId: 'system', userName: 'Provenance backfill' },
+          'auto-assigned before service days existed; no active rule claims this load',
+          false,
+        );
+      }
+      entry.outcome = 'RELEASED';
+      counts.released++;
+    };
 
     for (const load of result.page) {
       if (load.status !== 'Assigned') continue;
@@ -153,7 +205,9 @@ export const backfillBatch = internalMutation({
       const facets = await getLoadFacets(ctx, load._id);
       if (!facets.hcr) {
         counts.skippedNoRule++;
-        noRuleLoads.push({ orderNumber: load.orderNumber, serviceDate: load.firstStopDate, reason: 'NO_HCR' });
+        const entry = { orderNumber: load.orderNumber, serviceDate: load.firstStopDate, reason: 'NO_HCR' };
+        noRuleLoads.push(entry);
+        await release(load, entry);
         continue;
       }
       const match = await matchRouteAssignment(ctx, {
@@ -164,7 +218,7 @@ export const backfillBatch = internalMutation({
       });
       if (!match.route) {
         counts.skippedNoRule++;
-        noRuleLoads.push({
+        const entry = {
           orderNumber: load.orderNumber,
           hcr: facets.hcr,
           trip: facets.trip,
@@ -175,7 +229,9 @@ export const backfillBatch = internalMutation({
               : match.declinedBecause === 'NO_SERVICE_DATE'
                 ? 'NO_DATE'
                 : 'NO_RULE',
-        });
+        };
+        noRuleLoads.push(entry);
+        await release(load, entry);
         continue;
       }
 
@@ -198,17 +254,22 @@ export const backfillBatch = internalMutation({
 });
 
 export const startBackfill = internalAction({
-  args: { workosOrgId: v.optional(v.string()), dryRun: v.optional(v.boolean()) },
+  args: {
+    workosOrgId: v.optional(v.string()),
+    dryRun: v.optional(v.boolean()),
+    releaseUnclaimed: v.optional(v.boolean()),
+  },
   returns: v.object({ ...countsValidator.fields, noRuleLoads: v.array(noRuleLoadValidator) }),
   handler: async (ctx, args) => {
     let cursor: string | null = null;
-    const totals = { scanned: 0, stamped: 0, skippedHuman: 0, skippedNoAudit: 0, skippedNoRule: 0 };
+    const totals = { scanned: 0, stamped: 0, skippedHuman: 0, skippedNoAudit: 0, skippedNoRule: 0, released: 0 };
     const noRuleLoads: Array<{
       orderNumber: string;
       hcr?: string;
       trip?: string;
       serviceDate?: string;
       reason: string;
+      outcome?: string;
     }> = [];
     let iterations = 0;
     const MAX_ITERATIONS = 20_000;
@@ -220,12 +281,14 @@ export const startBackfill = internalAction({
         cursor: cursor ?? undefined,
         workosOrgId: args.workosOrgId,
         dryRun: args.dryRun,
+        releaseUnclaimed: args.releaseUnclaimed,
       });
       totals.scanned += batch.scanned;
       totals.stamped += batch.stamped;
       totals.skippedHuman += batch.skippedHuman;
       totals.skippedNoAudit += batch.skippedNoAudit;
       totals.skippedNoRule += batch.skippedNoRule;
+      totals.released += batch.released;
       for (const l of batch.noRuleLoads) {
         if (noRuleLoads.length < MAX_LISTED) noRuleLoads.push(l);
       }
@@ -235,7 +298,8 @@ export const startBackfill = internalAction({
 
     console.log(
       `[backfillAutoAssignProvenance]${args.dryRun ? ' DRY RUN' : ''} scanned=${totals.scanned} stamped=${totals.stamped} ` +
-        `skippedHuman=${totals.skippedHuman} skippedNoAudit=${totals.skippedNoAudit} skippedNoRule=${totals.skippedNoRule}`,
+        `skippedHuman=${totals.skippedHuman} skippedNoAudit=${totals.skippedNoAudit} skippedNoRule=${totals.skippedNoRule}` +
+        (args.releaseUnclaimed ? ` released=${totals.released}` : ''),
     );
     // One line per unclaimed load so the list is readable in the CLI and
     // in the Convex logs, sorted by HCR / trip / date.
@@ -247,7 +311,8 @@ export const startBackfill = internalAction({
     for (const l of noRuleLoads) {
       console.log(
         `[backfillAutoAssignProvenance] no rule: ${l.orderNumber} HCR ${l.hcr ?? '—'}` +
-          `${l.trip ? ` / Trip ${l.trip}` : ''} on ${l.serviceDate ?? 'no date'} — ${l.reason}`,
+          `${l.trip ? ` / Trip ${l.trip}` : ''} on ${l.serviceDate ?? 'no date'} — ${l.reason}` +
+          (l.outcome ? ` → ${l.outcome}` : ''),
       );
     }
     return { ...totals, noRuleLoads };

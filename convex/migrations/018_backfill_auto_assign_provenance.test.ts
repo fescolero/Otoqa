@@ -155,4 +155,46 @@ describe('018 — backfill auto-assignment provenance', () => {
       { orderNumber: 'ORD-R', hcr: HCR, trip: undefined, serviceDate: '2026-10-05', reason: 'NO_RULE' },
     ]);
   });
+
+  it('releaseUnclaimed returns an unclaimed upcoming load to Open without the opt-out flag', async () => {
+    const w = await world();
+    await w.t.run((ctx) => ctx.db.patch(w.routeId, { isActive: false }));
+
+    // Dry run reports the outcome without writing.
+    const dry = await w.t.action(migration.startBackfill, { dryRun: true, releaseUnclaimed: true });
+    expect(dry.released).toBe(1);
+    expect((await w.t.run((ctx) => ctx.db.get(w.robot)))?.status).toBe('Assigned');
+
+    const totals = await w.t.action(migration.startBackfill, { releaseUnclaimed: true });
+    expect(totals.released).toBe(1);
+    expect(totals.noRuleLoads[0]?.outcome).toBe('RELEASED');
+
+    const robot = await w.t.run((ctx) => ctx.db.get(w.robot));
+    expect(robot?.status).toBe('Open');
+    expect(robot?.primaryDriverId).toBeUndefined();
+    expect(robot?.autoAssignOptOut).toBeUndefined(); // a rule added later may claim it
+    // The dispatcher's load is untouched.
+    expect((await w.t.run((ctx) => ctx.db.get(w.human)))?.status).toBe('Assigned');
+
+    // Reactivate the rule: the sweep takes the released load again.
+    await w.t.run((ctx) => ctx.db.patch(w.routeId, { isActive: true }));
+    const r = await w.t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: w.robot, userId: 'system' });
+    expect(r.action).toBe('ASSIGNED_DRIVER');
+  });
+
+  it('releaseUnclaimed leaves past and in-motion loads alone', async () => {
+    const w = await world();
+    await w.t.run(async (ctx) => {
+      await ctx.db.patch(w.routeId, { isActive: false });
+      const legs = await ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_load', (q) => q.eq('loadId', w.robot))
+        .collect();
+      for (const leg of legs) await ctx.db.patch(leg._id, { status: 'ACTIVE' });
+    });
+    const totals = await w.t.action(migration.startBackfill, { releaseUnclaimed: true });
+    expect(totals.released).toBe(0);
+    expect(totals.noRuleLoads[0]?.outcome).toBe('IN_MOTION');
+    expect((await w.t.run((ctx) => ctx.db.get(w.robot)))?.status).toBe('Assigned');
+  });
 });
