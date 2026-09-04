@@ -1101,6 +1101,16 @@ describe('second-review follow-ups', () => {
     const asOwnerOrg = { ...CARRIER_ADMIN, org_id: orgId as string, permissions: [...permissionsForLevel('fleet', 'edit')] };
     await uploadFor(t, asOwnerOrg, 'driver', driverId, 'cdl', { expirationDate: '2031-07-07' });
     expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2031-07-07');
+
+    // The broker's own owner_driver_cdl document competes: latest expiry wins, one writer.
+    await uploadFor(t, BROKER_USER, 'carrier', partnershipId, 'owner_driver_cdl', { expirationDate: '2032-01-01' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2032-01-01');
+    await uploadFor(t, asOwnerOrg, 'driver', driverId, 'cdl', { expirationDate: '2031-09-09' });
+    expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.ownerDriverLicenseExpiration).toBe('2032-01-01');
+    // …and the partnership mirror is locked while any of those documents exists.
+    await expect(
+      t.withIdentity(BROKER_USER as never).mutation(api.carrierPartnerships.update, { partnershipId, ownerDriverLicenseExpiration: '2040-01-01' }),
+    ).rejects.toThrow(/replace the document/);
   });
 
   it('a soft-deleted carrier shares nothing on the read path either', async () => {
@@ -1175,6 +1185,29 @@ describe('second-review follow-ups', () => {
     expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.missingDocTypeKeys).toContain('coi');
     await asStaff.mutation(api.platform.support.restoreOrg, { organizationId: orgId, reason: 'Test' });
     expect((await t.run((ctx) => ctx.db.get(partnershipId)))?.missingDocTypeKeys).not.toContain('coi');
+  });
+
+  it('a type flipped to Expires after a dated-less upload is "Needs date" on the list too', async () => {
+    const t = setup();
+    const driverId = await t.run((ctx) => insertDriver(ctx));
+    const asAdmin = t.withIdentity(ADMIN as never);
+    await asAdmin.mutation(api.documentTypes.upsertSystemOverride, { key: 'medical', expires: false });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    await uploadFor(t, ADMIN, 'driver', driverId, 'medical', {});
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.needsDateTypeKeys).toEqual([]);
+    await asAdmin.mutation(api.documentTypes.upsertSystemOverride, { key: 'medical', expires: true });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect((await t.run((ctx) => ctx.db.get(driverId)))?.needsDateTypeKeys).toEqual(['medical']);
+  });
+
+  it('an empty file is refused as empty, not as too large', async () => {
+    const t = setup();
+    const driverId = await t.run((ctx) => insertDriver(ctx));
+    await expect(
+      t.withIdentity(EDITOR as never).mutation(internal.entityDocuments.createPending, {
+        entity: 'driver', entityId: driverId, typeKey: 'cdl', fileName: 'cdl.pdf', contentType: 'application/pdf', sizeBytes: 0,
+      }),
+    ).rejects.toThrow(/File is empty/);
   });
 
   it('startOffboarding is idempotent: a repeat call neither re-notifies nor re-audits', async () => {

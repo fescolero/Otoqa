@@ -56,6 +56,7 @@ export interface DriverRow {
   /** typeKey → effective expiration for expiring types with an active
    *  document (written with the summary; covers non-mirrored types). */
   docExpirations?: Record<string, string>;
+  needsDateTypeKeys?: string[];
   hireDate?: string;
   employmentStatus?: string;
   employmentType?: string;

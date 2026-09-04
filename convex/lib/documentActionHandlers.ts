@@ -117,11 +117,9 @@ export async function finalizeEntityUpload(ctx: ActionCtx, args: FinalizeArgs): 
 
   const check = await verifyStoredObject(pending.key, pending.declaredContentType);
   if (!check.ok) {
-    // A rejected object is gone; drop its row too. A missing one keeps the
-    // pending row so the client can retry the PUT (the sweep is the backstop).
-    if (check.reason === 'rejected') {
-      await ctx.runMutation(internal.entityDocuments.discardPending, { docId: args.docId });
-    }
+    // Rejected (object deleted) or missing (nothing landed): either way the
+    // client starts over from presign, so the pending row goes now.
+    await ctx.runMutation(internal.entityDocuments.discardPending, { docId: args.docId });
     throw new ConvexError(check.message);
   }
 

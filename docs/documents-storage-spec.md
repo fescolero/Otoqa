@@ -381,9 +381,14 @@ The Documents tab badge and the attention item counts become live.
   and `carrierPartnerships.update` refuse a direct edit of that mirror
   (`assertMirrorsEditable`): replace the document instead. Rows with no
   document keep the field editable.
-- `drivers.docExpirations` (typeKey → date) is stamped with the summary
-  so list-row attention covers expiring types that have no mirror field
-  (hazmat, custom types); `countDriverAttention` reads it over the mirrors.
+- `drivers.docExpirations` (typeKey → date) and `drivers.needsDateTypeKeys`
+  are stamped with the summary so list-row attention covers expiring types
+  that have no mirror field (hazmat, custom types) and "Needs date" rows;
+  `countDriverAttention` reads them over the mirrors.
+- `carrierPartnerships.ownerDriverLicenseExpiration` has one writer:
+  `recomputePartnershipDocuments`, which picks the latest expiry among the
+  broker's own `owner_driver_cdl` document, a carrier-shared one, and the
+  linked owner-operator's own CDL document (`drivers.docExpirations.cdl`).
 
 - For a type present from both sources, the effective status uses the
   **latest expiry** across the broker's active row and the carrier's shared

@@ -45,11 +45,14 @@ const docType = v.union(
  * the bytes behind a recorded document (that is `remove`, audited).
  */
 async function keyAlreadyRecorded(ctx: QueryCtx, loadId: Id<'loadInformation'>, key: string): Promise<boolean> {
-  const rows = await ctx.db
+  // Indexed: web keys are always stored in externalKey. Legacy rows that
+  // only carry externalUrl live under pod-photos/ or load-documents/, which
+  // can never equal an orgs/{org}/loads/… key, so they need no scan.
+  const row = await ctx.db
     .query('loadDocuments')
-    .withIndex('by_load', (q) => q.eq('loadId', loadId))
-    .collect();
-  return rows.some((r) => (r.externalKey ?? (r.externalUrl ? keyFromExternalUrl(r.externalUrl) : null)) === key);
+    .withIndex('by_externalKey', (q) => q.eq('externalKey', key))
+    .first();
+  return !!row && row.loadId === loadId;
 }
 
 /**

@@ -134,6 +134,24 @@ export function computeMissingTypeKeys(
 }
 
 /**
+ * Time-independent "needs date" summary: visible expiring types whose
+ * active document(s) carry no expiration date (a flag flipped to Expires
+ * after the upload). Stored beside `missingDocTypeKeys` for list rows.
+ */
+export function computeNeedsDateTypeKeys(
+  types: readonly Pick<EffectiveDocumentType, 'key' | 'expires' | 'hidden'>[],
+  activeDocs: readonly { typeKey: string; expirationDate?: string }[],
+): string[] {
+  const dated = new Set<string>();
+  const present = new Set<string>();
+  for (const d of activeDocs) {
+    present.add(d.typeKey);
+    if (d.expirationDate) dated.add(d.typeKey);
+  }
+  return types.filter((t) => t.expires && !t.hidden && present.has(t.key) && !dated.has(t.key)).map((t) => t.key);
+}
+
+/**
  * Attention count for a driver LIST row, without reading documents:
  * every missing type counts once, plus every mirrored date that is
  * expired/expiring for a type that is NOT already missing (a Missing type
@@ -150,6 +168,9 @@ export interface DriverAttentionInput {
    *  active document (written with the summary). Covers types that have
    *  no mirror field (hazmat, custom types). */
   docExpirations?: Record<string, string> | null;
+  /** Expiring types whose active document has no date (written with the
+   *  summary) — "Needs date" on the tab, attention here. */
+  needsDateTypeKeys?: string[] | null;
   licenseExpiration?: string;
   medicalExpiration?: string;
   badgeExpiration?: string;
@@ -182,6 +203,9 @@ export function countDriverAttention(
   // drop out here exactly as they do from a stamped summary.
   const missing = new Set(driverMissingKeys(row).filter((k) => !hiddenTypeKeys?.has(k)));
   let count = missing.size;
+  for (const k of row.needsDateTypeKeys ?? []) {
+    if (!missing.has(k) && !hiddenTypeKeys?.has(k)) count++;
+  }
   // One date per type: the mirror fields (legacy rows) overlaid by the
   // per-type summary, which is written from the same documents and also
   // covers the types that have no mirror.

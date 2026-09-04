@@ -21,8 +21,7 @@ import { action } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
 import {
-  MAX_DOCUMENT_BYTES,
-  isStoredContentType,
+  declaredFileProblem,
   metadataToHeaders,
   sanitizeFilename,
   webLoadDocTypeValidator as webDocType,
@@ -48,12 +47,8 @@ export const getUploadUrl = action({
     args,
   ): Promise<{ key: string; uploadUrl: string; metadataHeaders: Record<string, string> }> => {
     const contentType = args.contentType.toLowerCase();
-    if (!isStoredContentType(contentType)) {
-      throw new ConvexError('Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.');
-    }
-    if (args.sizeBytes <= 0 || args.sizeBytes > MAX_DOCUMENT_BYTES) {
-      throw new ConvexError('File is too large (25 MB max).');
-    }
+    const problem = declaredFileProblem(contentType, args.sizeBytes);
+    if (problem) throw new ConvexError(problem);
     // Org comes from the load row (never the client); loads:edit enforced.
     const load: { orgId: string } = await ctx.runQuery(internal.loadDocuments.resolveLoadForWebUpload, {
       loadId: args.loadId,

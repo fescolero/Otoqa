@@ -178,7 +178,7 @@ export const create = mutation({
     licenseNumber: v.string(),
     // License Information (non-sensitive)
     licenseState: v.string(),
-    licenseExpiration: v.string(),
+    licenseExpiration: v.optional(v.string()), // the CDL document sets the mirror (spec §5.4)
     licenseClass: v.string(),
     gender: v.optional(v.string()),
     // Medical

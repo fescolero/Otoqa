@@ -44,15 +44,15 @@ import { CARRIER_MIRROR_TO_TYPE_KEY, DRIVER_MIRROR_TO_TYPE_KEY } from './lib/doc
 import { isOffboarding, orgByAnyId, partnershipSharesDocuments, partnershipsLinkedToOrg } from './lib/orgLookup';
 import { logPlatformAudit } from './lib/platformAudit';
 import {
-  MAX_DOCUMENT_BYTES,
   buildEntityDocumentKey,
-  isStoredContentType,
+  declaredFileProblem,
   keyFromExternalUrl,
   sanitizeFilename,
 } from './lib/r2';
 import { parseDateString } from './_helpers/dateUtils';
 import {
   computeMissingTypeKeys,
+  computeNeedsDateTypeKeys,
   pickEffectiveDocument,
   type EffectiveDocumentType,
 } from './_helpers/documentStatus';
@@ -417,27 +417,9 @@ async function writeDriverMirror(
   if (driver[field] === expirationDate) return;
   await ctx.db.patch(id, { [field]: expirationDate, updatedAt: Date.now() });
   if (field === 'licenseExpiration') {
-    await syncOwnerDriverLicense(ctx, driver, expirationDate);
   }
 }
 
-/**
- * Owner-operator drivers mirror their CDL expiry onto every partnership
- * that lists them as owner-driver (same rule drivers.update applies).
- */
-async function syncOwnerDriverLicense(
-  ctx: MutationCtx,
-  driver: Doc<'drivers'>,
-  licenseExpiration: string | undefined,
-): Promise<void> {
-  // Owner-operator drivers store the organizations _id (not the WorkOS
-  // id) in organizationId — resolve across every shape, as drivers.update does.
-  const org = await orgByAnyId(ctx, driver.organizationId);
-  if (!org || !org.isOwnerOperator || org.ownerDriverId !== driver._id) return;
-  for (const p of await partnershipsLinkedToOrg(ctx, org)) {
-    await ctx.db.patch(p._id, { ownerDriverLicenseExpiration: licenseExpiration, updatedAt: Date.now() });
-  }
-}
 
 function sameRecord(a: Record<string, string> | undefined, b: Record<string, string>): boolean {
   if (!a) return false; // unstamped → stamp (even an empty map marks it computed)
@@ -464,12 +446,18 @@ export async function recomputePartnershipDocuments(
   partnershipId: Id<'carrierPartnerships'>,
   catalogIn?: EffectiveDocumentType[],
   sharedIn?: SharedDoc[],
+  linkedOrgIn?: Doc<'organizations'> | null,
 ): Promise<void> {
   const p = await ctx.db.get(partnershipId);
   if (!p) return;
   const catalog = catalogIn ?? (await loadEffectiveCatalog(ctx, p.brokerOrgId, 'carrier'));
   const own = await activeDocsFor(ctx, p.brokerOrgId, 'carrier', p._id);
-  const shared = sharedIn ?? (await sharedDocsForPartnership(ctx, p));
+  const linkedOrg =
+    linkedOrgIn !== undefined ? linkedOrgIn : p.carrierOrgId ? await orgByAnyId(ctx, p.carrierOrgId) : null;
+  const shared = sharedIn ?? (await sharedDocsForPartnership(ctx, p, linkedOrg));
+  // The linked owner-operator's own CDL document (its stamped expiry) is a
+  // third candidate for ownerDriverLicenseExpiration, never a second writer.
+  const ownerCdlExpiry = await linkedOwnerCdlExpiry(ctx, p, linkedOrg);
 
   const missing = computeMissingTypeKeys(catalog, [
     ...own.map((d) => ({ typeKey: d.typeKey, hasFile: !!d.externalKey })),
@@ -484,7 +472,12 @@ export async function recomputePartnershipDocuments(
     const eff = pickEffectiveDocument<{ expirationDate?: string }>(
       type,
       own.filter((d) => d.typeKey === type.key).map((d) => ({ expirationDate: d.expirationDate })),
-      shared.filter((s) => s.partnerTypeKey === type.key).map((s) => ({ expirationDate: s.expirationDate })),
+      [
+        ...shared.filter((s) => s.partnerTypeKey === type.key).map((s) => ({ expirationDate: s.expirationDate })),
+        ...(type.mirrorField === 'ownerDriverLicenseExpiration' && ownerCdlExpiry
+          ? [{ expirationDate: ownerCdlExpiry }]
+          : []),
+      ],
     );
     if (!eff?.doc.expirationDate) continue; // nothing effective → keep stale
     const field = type.mirrorField as 'insuranceExpiration' | 'ownerDriverLicenseExpiration';
@@ -494,6 +487,23 @@ export async function recomputePartnershipDocuments(
   if (Object.keys(patch).length > 0) {
     await ctx.db.patch(p._id, { ...patch, updatedAt: Date.now() });
   }
+}
+
+/** The linked carrier's owner-driver CDL expiry as stamped from THEIR
+ *  documents (drivers.docExpirations.cdl) — undefined when the link does
+ *  not share, the org is not an owner-operator, or no CDL document exists.
+ *  A hand-entered legacy licenseExpiration is not a document and is not
+ *  a candidate. */
+async function linkedOwnerCdlExpiry(
+  ctx: Ctx,
+  p: Doc<'carrierPartnerships'>,
+  org: Doc<'organizations'> | null,
+): Promise<string | undefined> {
+  if (!org || org.isDeleted || !org.isOwnerOperator || !org.ownerDriverId) return undefined;
+  if (!partnershipSharesDocuments(p)) return undefined;
+  const driver = await ctx.db.get(org.ownerDriverId);
+  if (!driver || driver.isDeleted) return undefined;
+  return driver.docExpirations?.cdl;
 }
 
 /** Resummarize every partnership linked to a carrier org after anything
@@ -511,7 +521,7 @@ export async function recomputeLinkedPartnerships(ctx: MutationCtx, orgAnyId: st
       catalog = await loadEffectiveCatalog(ctx, p.brokerOrgId, 'carrier');
       catalogs.set(p.brokerOrgId, catalog);
     }
-    await recomputePartnershipDocuments(ctx, p._id, catalog, partnershipSharesDocuments(p) ? fromOrg : []);
+    await recomputePartnershipDocuments(ctx, p._id, catalog, partnershipSharesDocuments(p) ? fromOrg : [], org);
   }
 }
 
@@ -558,10 +568,22 @@ export async function recomputeEntitySummary(
       if (!id) return;
       const driver = await ctx.db.get(id);
       if (!driver) return;
+      const needsDate = computeNeedsDateTypeKeys(
+        types,
+        active.map((d) => ({ typeKey: d.typeKey, expirationDate: d.expirationDate })),
+      );
       const patch: Partial<Doc<'drivers'>> = {};
       if (!sameKeys(driver.missingDocTypeKeys, missing)) patch.missingDocTypeKeys = missing;
       if (!sameRecord(driver.docExpirations, docExpirations)) patch.docExpirations = docExpirations;
+      if (!sameKeys(driver.needsDateTypeKeys, needsDate)) patch.needsDateTypeKeys = needsDate;
       if (Object.keys(patch).length > 0) await ctx.db.patch(id, patch);
+      // An owner-operator's CDL is a candidate for every linked
+      // partnership's ownerDriverLicenseExpiration (latest expiry wins with
+      // the broker's own owner_driver_cdl document) — one writer, here.
+      const org = await orgByAnyId(ctx, driver.organizationId);
+      if (org?.isOwnerOperator && org.ownerDriverId === driver._id) {
+        await recomputeLinkedPartnerships(ctx, org._id as string);
+      }
       return;
     }
     case 'carrier': {
@@ -605,7 +627,11 @@ export async function assertMirrorsEditable(
   if (entity === 'carrier') {
     const pid = ctx.db.normalizeId('carrierPartnerships', entityId);
     const p = pid ? await ctx.db.get(pid) : null;
-    if (p) for (const sd of await sharedDocsForPartnership(ctx, p)) covered.add(sd.partnerTypeKey);
+    if (p) {
+      const org = p.carrierOrgId ? await orgByAnyId(ctx, p.carrierOrgId) : null;
+      for (const sd of await sharedDocsForPartnership(ctx, p, org)) covered.add(sd.partnerTypeKey);
+      if (await linkedOwnerCdlExpiry(ctx, p, org)) covered.add(CARRIER_MIRROR_TO_TYPE_KEY.ownerDriverLicenseExpiration);
+    }
   }
   for (const field of touched) {
     const typeKey = mirrorToType[field];
@@ -724,12 +750,8 @@ export const createPending = internalMutation({
     if (who.owner.deleted) throw new ConvexError('Cannot add documents to a deleted record');
     await requireType(ctx, who.orgId, args.entity, args.typeKey);
     const contentType = args.contentType.toLowerCase();
-    if (!isStoredContentType(contentType)) {
-      throw new ConvexError('Unsupported file type. Upload a PDF, JPEG, PNG, or WebP.');
-    }
-    if (args.sizeBytes <= 0 || args.sizeBytes > MAX_DOCUMENT_BYTES) {
-      throw new ConvexError('File is too large (25 MB max).');
-    }
+    const problem = declaredFileProblem(contentType, args.sizeBytes);
+    if (problem) throw new ConvexError(problem);
     const fileName = sanitizeFilename(args.fileName);
     const now = Date.now();
     const docId = await ctx.db.insert('entityDocuments', {
