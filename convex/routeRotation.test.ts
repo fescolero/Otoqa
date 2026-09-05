@@ -531,4 +531,28 @@ describe('rotation on rule edit', () => {
     const held = rule?.lastRotation?.heldLoads?.find((h) => h.reason === 'OVERLAP_CONFLICT');
     expect(held?.detail).toMatch(/Load #ORD-CLASH — not placed by a rule/);
   });
+
+  it('re-sync all skips the closing sweep when no horizon is set, and runs it bounded when one is', async () => {
+    const t = setup();
+    const w = await buildWorld(t);
+    // An Open load far out, matching Dana's rule.
+    const far = await t.run((ctx) => seedLoad(ctx, w.customerId, 'FAR', daysFromNow(30)));
+
+    // No horizon: the sweep is skipped, the far load stays Open.
+    await w.asUser.mutation(api.routeAssignments.rotateAllLoads, { workosOrgId: ORG });
+    await drain(t);
+    expect((await loadState(t, far)).status).toBe('Open');
+    let settings = await w.asUser.query(api.routeAssignments.getSettings, { workosOrgId: ORG });
+    expect(settings?.lastBulkRotation?.sweepAssigned ?? 0).toBe(0);
+
+    // Horizon of 1 day: the sweep runs, but the far load is still not due.
+    await w.asUser.mutation(api.routeAssignments.updateSettings, {
+      workosOrgId: ORG, assignAheadDays: 1, updatedBy: USER,
+    });
+    await w.asUser.mutation(api.routeAssignments.rotateAllLoads, { workosOrgId: ORG });
+    await drain(t);
+    expect((await loadState(t, far)).status).toBe('Open');
+    settings = await w.asUser.query(api.routeAssignments.getSettings, { workosOrgId: ORG });
+    expect(settings?.lastBulkRotation?.sweepAssigned).toBe(0);
+  });
 });

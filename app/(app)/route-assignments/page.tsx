@@ -769,6 +769,37 @@ export default function RouteAssignmentsPage() {
           }
         />
 
+        {/* No-horizon warning: without one, auto-assignment assigns every
+            matching Open load however far out, and a re-sync's closing
+            sweep is skipped. This is the setting the whole day-before
+            model rests on, so its absence is said in red. */}
+        {autoAssignSettings && autoAssignSettings.enabled && autoAssignSettings.assignAheadDays === undefined && (
+          <div
+            className="shrink-0 flex items-center gap-2.5 px-6 py-2.5 border-b border-[var(--border-hairline)]"
+            style={{ background: 'rgba(239,68,68,0.08)' }}
+          >
+            <span
+              aria-hidden
+              className="inline-flex items-center justify-center rounded-md shrink-0"
+              style={{ width: 24, height: 24, background: 'rgba(239,68,68,0.18)', color: '#B43030' }}
+            >
+              <WIcon name="warn-tri" size={13} />
+            </span>
+            <div className="text-[12.5px] text-foreground">
+              <strong className="font-semibold">No assignment horizon is set.</strong>{' '}
+              <span className="text-[var(--text-secondary)]">
+                Auto-assignment will place every matching Open load however far out its pickup
+                is. Set the horizon (recommended: 1 day, meaning 24 hours before pickup) in
+                Auto-Assignment settings and save.
+              </span>
+            </div>
+            <div className="flex-1" />
+            <WBtn size="sm" onClick={() => (window.location.href = '/org-settings')}>
+              Open settings
+            </WBtn>
+          </div>
+        )}
+
         {/* Opted-out banner: a hand-unassigned load is excluded from
             auto-assignment on purpose (R11). After a board is cleared by
             hand, that purpose is usually the opposite. */}
@@ -1127,6 +1158,24 @@ export default function RouteAssignmentsPage() {
               sweep. Loads that have started, are past pickup, or were placed by a dispatcher are
               never touched. A load no rule claims, or whose assignee is already booked, stays
               Open for dispatch and is reported here when the run finishes.
+              {autoAssignSettings?.assignAheadDays !== undefined ? (
+                <>
+                  {' '}
+                  <strong>
+                    Horizon: {autoAssignSettings.assignAheadDays * 24} hours before pickup
+                  </strong>{' '}
+                  — only loads due within that window are assigned; the rest stay Open until they
+                  come due.
+                </>
+              ) : (
+                <>
+                  {' '}
+                  <strong style={{ color: '#B43030' }}>
+                    No assignment horizon is set, so the closing sweep will be skipped.
+                  </strong>{' '}
+                  Set it in Auto-Assignment settings first.
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

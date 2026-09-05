@@ -425,6 +425,13 @@ export const autoAssignPendingLoads = internalAction({
           ? horizonPrefilterDate(settings.assignAheadDays)
           : undefined,
     });
+    console.log(
+      `[auto-assign] org ${args.workosOrgId}: horizon ${
+        settings.assignAheadDays !== undefined
+          ? `${settings.assignAheadDays * 24}h before pickup`
+          : 'NONE — every matching Open load is eligible'
+      }, ${openLoads.length} Open load${openLoads.length === 1 ? '' : 's'} to check`,
+    );
 
     const results: AutoAssignResult[] = [];
 

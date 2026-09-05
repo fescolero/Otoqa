@@ -598,17 +598,31 @@ export const runOrgRotation = internalAction({
     // by this run or an earlier one) gets the assignment decision again
     // with the blockers gone. Respects the horizon and every other rule
     // the hourly sweep does; a load not due yet stays Open until it is.
+    //
+    // ONLY with a horizon. Without one, "due" means every matching Open
+    // load in the org, and a re-sync would silently turn into the mass
+    // assignment the horizon exists to prevent. The hourly sweep still
+    // runs for such an org; this button just does not pull it forward.
     let sweepAssigned = 0;
-    try {
-      const sweep = await ctx.runAction(internal.autoAssignment.autoAssignPendingLoads, {
-        workosOrgId: args.workosOrgId,
-      });
-      sweepAssigned = sweep.assigned;
-      console.log(
-        `[rotation] org ${args.workosOrgId}: closing sweep checked ${sweep.processed}, assigned ${sweep.assigned}`,
+    const settings = await ctx.runQuery(internal.autoAssignment.getAutoAssignmentSettings, {
+      workosOrgId: args.workosOrgId,
+    });
+    if (settings?.assignAheadDays === undefined) {
+      console.warn(
+        `[rotation] org ${args.workosOrgId}: no assignment horizon set — closing sweep skipped (it would assign every matching Open load)`,
       );
-    } catch (err) {
-      console.error(`[rotation] org ${args.workosOrgId}: closing sweep failed:`, err);
+    } else {
+      try {
+        const sweep = await ctx.runAction(internal.autoAssignment.autoAssignPendingLoads, {
+          workosOrgId: args.workosOrgId,
+        });
+        sweepAssigned = sweep.assigned;
+        console.log(
+          `[rotation] org ${args.workosOrgId}: closing sweep (horizon ${settings.assignAheadDays * 24}h) checked ${sweep.processed}, assigned ${sweep.assigned}`,
+        );
+      } catch (err) {
+        console.error(`[rotation] org ${args.workosOrgId}: closing sweep failed:`, err);
+      }
     }
 
     await ctx.runMutation(internal.routeRotation.recordBulkRotation, {
