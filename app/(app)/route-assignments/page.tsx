@@ -336,6 +336,7 @@ export default function RouteAssignmentsPage() {
   >(null);
   const [deleting, setDeleting] = useState<CombinedAssignment | null>(null);
   const [confirmBulkResync, setConfirmBulkResync] = useState(false);
+  const [confirmReenable, setConfirmReenable] = useState(false);
 
   // ── data ─────────────────────────────────────────────────────────────
   const routeAssignments = useQuery(
@@ -365,12 +366,20 @@ export default function RouteAssignmentsPage() {
     api.routeAssignments.getSettings,
     organizationId ? { workosOrgId: organizationId } : 'skip',
   );
+  // Loads a person unassigned by hand are excluded from auto-assignment
+  // until someone says otherwise. A cleared board is the common case
+  // where "otherwise" is what was meant.
+  const optedOutCount = useQuery(
+    api.routeAssignments.countOptedOutOpenLoads,
+    organizationId ? { workosOrgId: organizationId } : 'skip',
+  );
 
   // Mutations
   const toggleRouteActive = useMutation(api.routeAssignments.toggleActive);
   const deleteRouteAssignment = useMutation(api.routeAssignments.remove);
   const rotateRouteLoads = useMutation(api.routeAssignments.rotateLoads);
   const rotateAllLoads = useMutation(api.routeAssignments.rotateAllLoads);
+  const reenableAutoAssign = useMutation(api.routeAssignments.reenableAutoAssignForOpenLoads);
   const toggleTemplateActive = useMutation(api.recurringLoads.toggleActive);
   const deleteTemplate = useMutation(api.recurringLoads.remove);
 
@@ -705,6 +714,17 @@ export default function RouteAssignmentsPage() {
     }
   };
 
+  const handleReenable = async () => {
+    if (!organizationId) return;
+    setConfirmReenable(false);
+    try {
+      const n = await reenableAutoAssign({ workosOrgId: organizationId });
+      toast.success(`Auto-assignment re-enabled for ${n} load${n === 1 ? '' : 's'}; running the sweep`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to re-enable auto-assignment');
+    }
+  };
+
   // ── delete confirm ──────────────────────────────────────────────────
   const handleDelete = async () => {
     if (!deleting) return;
@@ -748,6 +768,38 @@ export default function RouteAssignmentsPage() {
             </>
           }
         />
+
+        {/* Opted-out banner: a hand-unassigned load is excluded from
+            auto-assignment on purpose (R11). After a board is cleared by
+            hand, that purpose is usually the opposite. */}
+        {optedOutCount !== undefined && optedOutCount > 0 && (
+          <div
+            className="shrink-0 flex items-center gap-2.5 px-6 py-2.5 border-b border-[var(--border-hairline)]"
+            style={{ background: 'rgba(245,158,11,0.08)' }}
+          >
+            <span
+              aria-hidden
+              className="inline-flex items-center justify-center rounded-md shrink-0"
+              style={{ width: 24, height: 24, background: 'rgba(245,158,11,0.18)', color: '#A66800' }}
+            >
+              <WIcon name="circle-alert" size={13} />
+            </span>
+            <div className="text-[12.5px] text-foreground">
+              <strong className="font-semibold">
+                {optedOutCount} upcoming Open load{optedOutCount === 1 ? ' is' : 's are'} excluded from
+                auto-assignment.
+              </strong>{' '}
+              <span className="text-[var(--text-secondary)]">
+                Unassigning a load by hand excludes it so the rules can&apos;t hand it straight
+                back. If the board was cleared to let the rules start over, re-enable them.
+              </span>
+            </div>
+            <div className="flex-1" />
+            <WBtn size="sm" leading="refresh" onClick={() => setConfirmReenable(true)}>
+              Re-enable auto-assignment
+            </WBtn>
+          </div>
+        )}
 
         {/* Out-of-sync banner: rules whose upcoming auto-assigned loads
             still sit on a previous assignee. Appears after a rotation is
@@ -1042,6 +1094,23 @@ export default function RouteAssignmentsPage() {
             >
               Delete
             </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={confirmReenable} onOpenChange={setConfirmReenable}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Re-enable auto-assignment for {optedOutCount ?? 0} loads?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Every upcoming Open load that was unassigned by hand goes back in front of the
+              rules, and the assignment sweep runs right away. Loads due within the horizon are
+              assigned now; the rest when they come due. Each change is recorded on the load.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleReenable}>Re-enable</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

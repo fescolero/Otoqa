@@ -9,6 +9,7 @@ import { assertValidAssignAheadDays, shiftServiceDate } from './lib/assignHorizo
 import type { Doc } from './_generated/dataModel';
 import { assessRuleLoads } from './routeRotation';
 import { unassignLoadResources } from './dispatchLegs';
+import { serviceDateOf } from './lib/assignHorizon';
 import { internal } from './_generated/api';
 
 /**
@@ -955,6 +956,75 @@ export const previewOrgRotation = query({
       rules: byRule.filter((r) => r.outOfSync > 0).length,
       byRule,
     };
+  },
+});
+
+/**
+ * Upcoming Open loads a person unassigned by hand. Those carry
+ * autoAssignOptOut (R11), so the sweep will never take them — which is
+ * right for one load a dispatcher pulled on purpose, and wrong for a
+ * board someone cleared to let the rules start over. The page shows the
+ * count with a one-click re-enable.
+ */
+export const countOptedOutOpenLoads = query({
+  args: { workosOrgId: v.string() },
+  returns: v.number(),
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const today = serviceDateOf(Date.now());
+    const loads = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_org_status_first_stop', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('status', 'Open').gte('firstStopDate', today),
+      )
+      .collect();
+    return loads.filter((l) => l.autoAssignOptOut === true).length;
+  },
+});
+
+/**
+ * Put every upcoming Open load back in front of auto-assignment, then run
+ * the sweep. Audited per load, same as loads.setAutoAssignOptOut.
+ */
+export const reenableAutoAssignForOpenLoads = mutation({
+  args: { workosOrgId: v.string() },
+  returns: v.number(),
+  handler: async (ctx, args) => {
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const today = serviceDateOf(Date.now());
+    const loads = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_org_status_first_stop', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('status', 'Open').gte('firstStopDate', today),
+      )
+      .collect();
+    const now = Date.now();
+    let cleared = 0;
+    for (const load of loads) {
+      if (load.autoAssignOptOut !== true) continue;
+      await ctx.db.patch(load._id, { autoAssignOptOut: undefined, updatedAt: now });
+      await logAudit(ctx, {
+        organizationId: args.workosOrgId,
+        entityType: 'load',
+        entityId: load._id,
+        entityName: load.internalId,
+        action: 'updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Re-enabled auto-assignment for load ${load.internalId} (bulk, from the auto-assignments page)`,
+        changedFields: ['autoAssignOptOut'],
+        changesBefore: JSON.stringify({ autoAssignOptOut: true }),
+        changesAfter: JSON.stringify({ autoAssignOptOut: undefined }),
+      });
+      cleared++;
+    }
+    if (cleared > 0) {
+      await ctx.scheduler.runAfter(0, internal.autoAssignment.autoAssignPendingLoads, {
+        workosOrgId: args.workosOrgId,
+      });
+    }
+    return cleared;
   },
 });
 
