@@ -789,12 +789,12 @@ export default function RouteAssignmentsPage() {
               <strong className="font-semibold">No assignment horizon is set.</strong>{' '}
               <span className="text-[var(--text-secondary)]">
                 Auto-assignment will place every matching Open load however far out its pickup
-                is. Set the horizon (recommended: 1 day, meaning 24 hours before pickup) in
-                Auto-Assignment settings and save.
+                is. Set the horizon (recommended: 1 day, meaning 24 hours before pickup) under
+                Settings → Auto-assignment and save.
               </span>
             </div>
             <div className="flex-1" />
-            <WBtn size="sm" onClick={() => (window.location.href = '/org-settings')}>
+            <WBtn size="sm" onClick={() => (window.location.href = '/settings/auto-assignment')}>
               Open settings
             </WBtn>
           </div>

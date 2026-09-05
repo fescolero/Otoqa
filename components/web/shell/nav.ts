@@ -106,6 +106,7 @@ export const NAV: NavSection[] = [
       { id: 'company-docs', label: 'Company file',    href: '/settings/company-documents' },
       { id: 'team',         label: 'Team & roles',    href: '/settings/team', area: 'team' },
       { id: 'pay-profiles', label: 'Pay profiles',    href: '/org-settings/pay-profiles', area: 'accounting' },
+      { id: 'auto-assign',  label: 'Auto-assignment', href: '/settings/auto-assignment', area: 'loads' },
       { id: 'integrations', label: 'Integrations',    href: '/settings/integrations' },
       { id: 'billing',      label: 'Billing & usage', href: '/settings/billing' },
     ],
