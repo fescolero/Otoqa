@@ -52,7 +52,7 @@ interface OrgSettingsTabsProps {
   user: User;
 }
 
-export function OrgSettingsTabs({ organization }: OrgSettingsTabsProps) {
+export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
   const [fourKitesModalOpen, setFourKitesModalOpen] = useState(false);
   const [fourKitesConfigureOpen, setFourKitesConfigureOpen] = useState(false);
   const [disconnectDialogOpen, setDisconnectDialogOpen] = useState(false);
