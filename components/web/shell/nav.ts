@@ -108,6 +108,7 @@ export const NAV: NavSection[] = [
       { id: 'pay-profiles', label: 'Pay profiles',    href: '/org-settings/pay-profiles', area: 'accounting' },
       { id: 'auto-assign',  label: 'Auto-assignment', href: '/settings/auto-assignment', area: 'loads' },
       { id: 'integrations', label: 'Integrations',    href: '/settings/integrations' },
+      { id: 'api-partners', label: 'API partners',    href: '/settings/api-partners' },
       { id: 'billing',      label: 'Billing & usage', href: '/settings/billing' },
     ],
   },
