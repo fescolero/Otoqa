@@ -5,7 +5,8 @@ import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
 import { matchRouteAssignment } from './lib/routeMatch';
-import { horizonEndDate, isBeyondHorizon } from './lib/assignHorizon';
+import { horizonPrefilterDate, isBeyondHorizon, isBeyondHorizonAt } from './lib/assignHorizon';
+import { parseStopDateTime } from './_helpers/timeUtils';
 import { logAudit } from './lib/audit';
 import type { OverlapInfo } from './_helpers/timeUtils';
 
@@ -73,6 +74,18 @@ export const getAutoAssignmentSettings = internalQuery({
   },
 });
 
+/** The first stop's scheduled pickup instant, or null when it has none. */
+async function firstStopDueAt(ctx: MutationCtx, loadId: Id<'loadInformation'>): Promise<number | null> {
+  const stops = await ctx.db
+    .query('loadStops')
+    .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .collect();
+  if (stops.length === 0) return null;
+  stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+  const first = stops.find((s) => s.sequenceNumber === 1) ?? stops[0];
+  return parseStopDateTime(first.windowBeginDate, first.windowBeginTime);
+}
+
 /**
  * The assignment decision, shared by the scheduled sweep (autoAssignLoad)
  * and the on-create trigger (triggerAutoAssignmentForLoad).
@@ -121,16 +134,26 @@ async function decideAndAssign(
   }
 
   // Not yet due. Not a decline — the sweep re-evaluates every cycle and
-  // takes the load the day it crosses the horizon. Checked before the
-  // facet read because it is the cheapest test and, with a horizon set,
-  // the most common outcome for a freshly imported schedule.
-  if (isBeyondHorizon(load.firstStopDate, settings.assignAheadDays)) {
-    return {
-      success: false,
-      loadId,
-      action: 'BEYOND_HORIZON',
-      message: `Load runs on ${load.firstStopDate}, more than ${settings.assignAheadDays} day${settings.assignAheadDays === 1 ? '' : 's'} out — will be assigned once it comes due`,
-    };
+  // takes the load once it comes inside the horizon. Measured from the
+  // first stop's scheduled time (N days = N × 24 h before pickup); the
+  // calendar date is the fallback when the stop has no parseable time.
+  // Checked before the facet read because it is the cheapest test and,
+  // with a horizon set, the most common outcome for a fresh schedule.
+  if (settings.assignAheadDays !== undefined) {
+    const dueAt = await firstStopDueAt(ctx, loadId);
+    const beyond =
+      dueAt !== null
+        ? isBeyondHorizonAt(dueAt, settings.assignAheadDays)
+        : isBeyondHorizon(load.firstStopDate, settings.assignAheadDays);
+    if (beyond) {
+      const when = dueAt !== null ? new Date(dueAt).toISOString() : load.firstStopDate;
+      return {
+        success: false,
+        loadId,
+        action: 'BEYOND_HORIZON',
+        message: `Pickup is ${when}, more than ${settings.assignAheadDays * 24} hours out — will be assigned once it comes due`,
+      };
+    }
   }
 
   // Read facets from tags. Skip if no HCR.
@@ -393,11 +416,13 @@ export const autoAssignPendingLoads = internalAction({
 
     // 2. Get all Open loads that have HCR — bounded to the horizon when
     // one is set, so a month of imported schedule is not re-read hourly.
+    // The date range is a coarse prefilter (with a day of slack); the
+    // precise time-based check happens per load in decideAndAssign.
     const openLoads = await ctx.runQuery(internal.autoAssignment.getOpenLoadsWithHcr, {
       workosOrgId: args.workosOrgId,
       maxFirstStopDate:
         settings.assignAheadDays !== undefined
-          ? horizonEndDate(settings.assignAheadDays)
+          ? horizonPrefilterDate(settings.assignAheadDays)
           : undefined,
     });
 

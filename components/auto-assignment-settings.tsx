@@ -241,10 +241,10 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
               style={{ background: 'var(--bg-sidebar-active)' }}
             >
               <div className="space-y-0.5">
-                <div className="text-sm font-medium">Recommended: assign the day before pickup</div>
+                <div className="text-sm font-medium">Recommended: assign 24 hours before pickup</div>
                 <p className="text-sm text-muted-foreground">
-                  Off on import, scheduled run on, horizon of 1 day. Rule changes then affect at
-                  most one load per rule.
+                  Off on import, scheduled run on, horizon of 1 day (24 hours before the scheduled
+                  pickup time). Rule changes then affect at most a day&apos;s loads per rule.
                 </p>
               </div>
               <Button
@@ -276,9 +276,9 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
                       </TooltipTrigger>
                       <TooltipContent className="max-w-xs">
                         <p>
-                          Only assign loads whose pickup date is within this many days. Loads
-                          further out stay Open and are picked up by the scheduled run once they
-                          come due. Leave blank for no limit.
+                          Only assign a load within this many days (× 24 hours) of its scheduled
+                          pickup time. Loads further out stay Open and are picked up by the
+                          scheduled run once they come due. Leave blank for no limit.
                         </p>
                       </TooltipContent>
                     </Tooltip>
@@ -286,7 +286,7 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
                 </div>
                 <p className="text-sm text-muted-foreground">
                   {scheduledEnabled
-                    ? 'Assign loads up to this many days before pickup'
+                    ? 'Assign each load this many × 24 hours before its scheduled pickup'
                     : 'Requires Scheduled Processing — the scheduled run assigns deferred loads'}
                 </p>
               </div>

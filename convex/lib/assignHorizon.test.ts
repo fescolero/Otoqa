@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   assertValidAssignAheadDays,
   horizonEndDate,
+  horizonPrefilterDate,
   isBeyondHorizon,
+  isBeyondHorizonAt,
   serviceDateOf,
 } from './assignHorizon';
 
@@ -51,5 +53,24 @@ describe('assignHorizon', () => {
     expect(() => assertValidAssignAheadDays(-1)).toThrow();
     expect(() => assertValidAssignAheadDays(1.5)).toThrow();
     expect(() => assertValidAssignAheadDays(366)).toThrow();
+  });
+
+  describe('time-based (scheduled pickup instant)', () => {
+    const H = 60 * 60 * 1000;
+    it('one day means 24 hours before the pickup, whatever the calendar says', () => {
+      // 23 h out: due. 25 h out: not yet — even though it is "tomorrow".
+      expect(isBeyondHorizonAt(NOW + 23 * H, 1, NOW)).toBe(false);
+      expect(isBeyondHorizonAt(NOW + 25 * H, 1, NOW)).toBe(true);
+      // An overnight trip picking up at 11 PM tomorrow is due at 11 PM tonight.
+      expect(isBeyondHorizonAt(NOW + 35 * H, 1, NOW)).toBe(true);
+      expect(isBeyondHorizonAt(NOW + 35 * H, 1, NOW + 11 * H)).toBe(false);
+    });
+    it('no horizon, or a pickup already past, is never beyond', () => {
+      expect(isBeyondHorizonAt(NOW + 1000 * H, undefined, NOW)).toBe(false);
+      expect(isBeyondHorizonAt(NOW - 5 * H, 0, NOW)).toBe(false);
+    });
+    it('the sweep prefilter date carries a day of slack', () => {
+      expect(horizonPrefilterDate(1, NOW)).toBe('2026-09-06');
+    });
   });
 });

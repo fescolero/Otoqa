@@ -25,6 +25,8 @@ function daysFromNow(n: number): string {
   return serviceDateOf(Date.now() + n * DAY_MS);
 }
 
+const setup = () => convexTest(schema);
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function seedOrg(ctx: any, settings: { assignAheadDays?: number } = {}) {
   const now = Date.now();
@@ -53,7 +55,14 @@ async function seedOrg(ctx: any, settings: { assignAheadDays?: number } = {}) {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function seedLoad(ctx: any, customerId: Id<'customers'>, tag: string, serviceDate?: string) {
+async function seedLoad(
+  ctx: any,
+  customerId: Id<'customers'>,
+  tag: string,
+  serviceDate?: string,
+  /** Exact pickup instant for the first stop; default 08:00 -07:00 on serviceDate. */
+  pickupAtMs?: number,
+) {
   const now = Date.now();
   const loadId: Id<'loadInformation'> = await ctx.db.insert('loadInformation', {
     internalId: `LD-${tag}`, orderNumber: `ORD-${tag}`, status: 'Open',
@@ -72,7 +81,10 @@ async function seedLoad(ctx: any, customerId: Id<'customers'>, tag: string, serv
       ...(serviceDate
         ? {
             windowBeginDate: serviceDate,
-            windowBeginTime: `${serviceDate}T08:00:00-07:00`,
+            windowBeginTime:
+              pickupAtMs !== undefined && seq === 1
+                ? new Date(pickupAtMs).toISOString()
+                : `${serviceDate}T08:00:00-07:00`,
             windowEndDate: serviceDate,
             windowEndTime: `${serviceDate}T10:00:00-07:00`,
           }
@@ -113,6 +125,24 @@ describe('assignment horizon', () => {
     expect(nearLoad?.autoAssignedAt).toBeTypeOf('number');
   });
 
+  it('measures from the scheduled pickup time: 20 h out is due, 30 h out is not', async () => {
+    const t = setup();
+    const H = 60 * 60 * 1000;
+    const { soon, later } = await t.run(async (ctx) => {
+      const { customerId } = await seedOrg(ctx, { assignAheadDays: 1 });
+      const soonAt = Date.now() + 20 * H;
+      const laterAt = Date.now() + 30 * H;
+      return {
+        soon: await seedLoad(ctx, customerId, 'SOON', serviceDateOf(soonAt), soonAt),
+        later: await seedLoad(ctx, customerId, 'LATER', serviceDateOf(laterAt), laterAt),
+      };
+    });
+    expect((await t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: soon, userId: 'system' })).action)
+      .toBe('ASSIGNED_DRIVER');
+    expect((await t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: later, userId: 'system' })).action)
+      .toBe('BEYOND_HORIZON');
+  });
+
   it('on-create path defers the same way', async () => {
     const t = convexTest(schema);
     const farId = await t.run(async (ctx) => {
@@ -128,14 +158,22 @@ describe('assignment horizon', () => {
     expect(load?.status).toBe('Open');
   });
 
-  it('the last day inside the horizon is due', async () => {
-    const t = convexTest(schema);
-    const edgeId = await t.run(async (ctx) => {
+  it('the horizon edge is exact: 7 days is 168 hours before the scheduled pickup', async () => {
+    const t = setup();
+    const H = 60 * 60 * 1000;
+    const { inside, outside } = await t.run(async (ctx) => {
       const { customerId } = await seedOrg(ctx, { assignAheadDays: 7 });
-      return seedLoad(ctx, customerId, 'EDGE', daysFromNow(7));
+      const insideAt = Date.now() + 7 * DAY_MS - 1 * H;
+      const outsideAt = Date.now() + 7 * DAY_MS + 1 * H;
+      return {
+        inside: await seedLoad(ctx, customerId, 'IN', serviceDateOf(insideAt), insideAt),
+        outside: await seedLoad(ctx, customerId, 'OUT', serviceDateOf(outsideAt), outsideAt),
+      };
     });
-    const r = await t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: edgeId, userId: 'system' });
-    expect(r.action).toBe('ASSIGNED_DRIVER');
+    expect((await t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: inside, userId: 'system' })).action)
+      .toBe('ASSIGNED_DRIVER');
+    expect((await t.mutation(internal.autoAssignment.autoAssignLoad, { loadId: outside, userId: 'system' })).action)
+      .toBe('BEYOND_HORIZON');
   });
 
   it('no horizon configured → legacy behavior, a load a month out is assigned', async () => {

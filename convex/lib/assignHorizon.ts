@@ -22,10 +22,14 @@
  * load would never be assigned. routeAssignments.updateSettings refuses
  * that combination.
  *
- * "Today" is the UTC calendar date. firstStopDate is facility-local, so the
- * two can disagree by a few hours around midnight. The horizon is a coarse
- * knob measured in days; that slack is acceptable and deliberately not
- * corrected with a timezone field (see routeMatch.ts for why none exists).
+ * The horizon is measured from the load's SCHEDULED PICKUP TIME when the
+ * first stop has one: N days means N × 24 hours before that instant, on
+ * the clock, in whatever timezone the facility is in (the stop's
+ * windowBeginTime carries its own offset). A load picking up at 11 PM
+ * tomorrow is due 24 hours before 11 PM tomorrow, not at UTC midnight —
+ * dispatch runs overnight trips and a calendar date got that wrong. The
+ * calendar-date comparison below is the fallback for a load whose first
+ * stop has no parseable time.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -61,6 +65,30 @@ export function isBeyondHorizon(
   if (assignAheadDays === undefined) return false;
   if (!firstStopDate) return false;
   return firstStopDate > horizonEndDate(assignAheadDays, nowMs);
+}
+
+/**
+ * Time-based form: is the scheduled pickup further away than the horizon?
+ * `dueAtMs` is the first stop's windowBeginTime; N days = N × 24 h before
+ * it. A pickup already in the past is never beyond the horizon.
+ */
+export function isBeyondHorizonAt(
+  dueAtMs: number,
+  assignAheadDays: number | undefined,
+  nowMs = Date.now(),
+): boolean {
+  if (assignAheadDays === undefined) return false;
+  return dueAtMs - nowMs > assignAheadDays * DAY_MS;
+}
+
+/**
+ * Inclusive upper bound on firstStopDate for the sweep's index range: the
+ * calendar date of (now + horizon), plus one day of slack so a load whose
+ * local date rolls past the UTC date is still read — the precise
+ * time-based check runs on each load afterwards.
+ */
+export function horizonPrefilterDate(assignAheadDays: number, nowMs = Date.now()): string {
+  return serviceDateOf(nowMs + (assignAheadDays + 1) * DAY_MS);
 }
 
 export const MAX_ASSIGN_AHEAD_DAYS = 365;

@@ -241,9 +241,13 @@ so they stay in the range — matching `isBeyondHorizon`, which never defers a
 load it cannot place on the calendar. Undated loads are the route rules'
 problem (A.6), not the horizon's.
 
-"Today" is the UTC date. `firstStopDate` is facility-local, so the two can
-disagree by a few hours around midnight; for a knob measured in days that
-slack is acceptable and is not corrected with a timezone field (A.3).
+The horizon is measured from the **scheduled pickup instant** (the first
+stop's `windowBeginTime`, which carries the facility's own offset): N days
+is N × 24 hours before that, on the clock. Dispatch runs overnight trips,
+and a calendar-date comparison made a load picking up at 11 PM tomorrow
+"due" at UTC midnight. The date comparison survives only as the fallback
+for a first stop with no parseable time, and as the sweep's coarse index
+prefilter (with a day of slack) ahead of the per-load time check.
 
 ## C.2 Provenance — `autoAssignedRouteId` / `autoAssignedAt`
 
