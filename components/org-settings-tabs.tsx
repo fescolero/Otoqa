@@ -5,14 +5,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Plug,
   Truck,
-  Route,
   Key,
   Loader2,
   Copy,
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
-import { AutoAssignmentSettings } from '@/components/auto-assignment-settings';
 import { PartnerApiSettings } from '@/components/partner-api-settings';
 import { useEffect, useState } from 'react';
 // eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
@@ -54,7 +52,7 @@ interface OrgSettingsTabsProps {
   user: User;
 }
 
-export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
+export function OrgSettingsTabs({ organization }: OrgSettingsTabsProps) {
   const [fourKitesModalOpen, setFourKitesModalOpen] = useState(false);
   const [fourKitesConfigureOpen, setFourKitesConfigureOpen] = useState(false);
   const [disconnectDialogOpen, setDisconnectDialogOpen] = useState(false);
@@ -135,12 +133,8 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
   }, [manualSyncRequestedAt, fourKitesIntegration?.lastSyncStats.lastSyncTime]);
 
   return (
-    <Tabs defaultValue="automation" className="w-full">
-      <TabsList className="grid w-full md:w-[375px] grid-cols-3">
-        <TabsTrigger value="automation" className="flex items-center gap-2">
-          <Route className="h-4 w-4" />
-          <span className="hidden sm:inline">Automation</span>
-        </TabsTrigger>
+    <Tabs defaultValue="integrations" className="w-full">
+      <TabsList className="grid w-full md:w-[250px] grid-cols-2">
         <TabsTrigger value="integrations" className="flex items-center gap-2">
           <Plug className="h-4 w-4" />
           <span className="hidden sm:inline">Integrations</span>
@@ -151,12 +145,8 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
         </TabsTrigger>
       </TabsList>
 
-      {/* Automation Tab */}
-      <TabsContent value="automation" className="mt-6">
-        {organization?.id && (
-          <AutoAssignmentSettings organizationId={organization.id} userId={user.id} />
-        )}
-      </TabsContent>
+      {/* Auto-assignment settings moved to Settings → Auto-assignment
+          (/settings/auto-assignment). */}
 
       {/* Integrations Tab */}
       <TabsContent value="integrations" className="space-y-6 mt-6">
