@@ -9,6 +9,8 @@ import {
 } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc, TableNames } from './_generated/dataModel';
+import { loadProgressForLoad } from './lib/loadCompletion';
+import type { LoadProgress } from './_helpers/loadProgress';
 import {
   getLegTimeRange,
   doTimeRangesOverlap,
@@ -1579,6 +1581,27 @@ export const getDriverSchedule = query({
 // leg in an org whose time range intersects [startMs, endMs], enriched
 // with the order number and start/end stop city we need to render each
 // bar. The caller groups the result by driverId / carrierPartnershipId.
+/**
+ * What a Schedule bar says. Derived from the load's progress first; the
+ * leg row only decides between "not started" and "under way" and flags a
+ * leg that ended without the load being delivered (shift end, handoff).
+ */
+export type ScheduleDisplayStatus = 'open' | 'assigned' | 'in_transit' | 'completed' | 'ended';
+export function scheduleDisplayStatus(
+  leg: { status: Doc<'dispatchLegs'>['status'] },
+  progress: LoadProgress | null,
+): ScheduleDisplayStatus {
+  if (!progress) {
+    return leg.status === 'COMPLETED' ? 'completed' : leg.status === 'ACTIVE' ? 'in_transit' : 'assigned';
+  }
+  if (progress.status === 'delivered') return 'completed';
+  if (progress.status === 'canceled' || progress.status === 'expired') return 'ended';
+  if (leg.status === 'COMPLETED') return 'ended';
+  if (progress.status === 'in_transit' || leg.status === 'ACTIVE') return 'in_transit';
+  if (progress.status === 'open') return 'open';
+  return 'assigned';
+}
+
 export const getOrgSchedule = query({
   args: {
     workosOrgId: v.string(),
@@ -1619,11 +1642,26 @@ export const getOrgSchedule = query({
           getLoadFacets(ctx, leg.loadId),
         ]);
 
+        // The bar's status comes from the load's derived progress — the
+        // same object the load page renders — not from the leg row alone.
+        // A leg closed by a shift end or a handoff on a load that is not
+        // delivered reads as what it is: ended, load still open.
+        const progress = load ? await loadProgressForLoad(ctx, load) : null;
+        const displayStatus = scheduleDisplayStatus(leg, progress);
+        const startProgress = startStop
+          ? (progress?.stops.find((p) => p.sequenceNumber === startStop.sequenceNumber) ?? null)
+          : null;
+        const endProgress = endStop
+          ? (progress?.stops.find((p) => p.sequenceNumber === endStop.sequenceNumber) ?? null)
+          : null;
+
         return {
           _id: leg._id,
           driverId: leg.driverId ?? null,
           carrierPartnershipId: leg.carrierPartnershipId ?? null,
           status: leg.status,
+          endReason: leg.endReason ?? null,
+          displayStatus,
           startMs: start,
           endMs: end,
           startedAt: leg.startedAt ?? null,
@@ -1634,8 +1672,22 @@ export const getOrgSchedule = query({
                 orderNumber: load.orderNumber,
                 internalId: load.internalId,
                 status: load.status,
+                progress: progress
+                  ? {
+                      status: progress.status,
+                      label: progress.label,
+                      percent: progress.percent,
+                      stopsTotal: progress.stopsTotal,
+                      stopsClosed: progress.stopsClosed,
+                      evidence: progress.evidence,
+                      evidenceLabel: progress.evidenceLabel,
+                      completionSource: progress.completionSource,
+                    }
+                  : null,
               }
             : null,
+          startProgress,
+          endProgress,
           hcr: facets.hcr ?? null,
           tripNumber: facets.trip ?? null,
           startCity: startStop?.city ?? null,

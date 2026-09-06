@@ -43,21 +43,43 @@ interface TripBar {
   rowId: string;
   startMs: number;
   endMs: number;
-  status: 'completed' | 'in-transit' | 'assigned' | 'open';
+  // Server-derived (dispatchLegs.scheduleDisplayStatus): the load's
+  // progress decides, the leg row only refines. 'ended' = the leg closed
+  // (shift end, handoff) but the load is not delivered.
+  status: 'completed' | 'in-transit' | 'assigned' | 'open' | 'ended';
   orderNumber: string;
   hcr: string | null;
   tripNumber: string | null;
   from: string;
   to: string;
-  // Actual stop arrival / departure (ISO 8601, populated by the driver app's
-  // check-in flow). Surfaced in the drawer when a leg is delivered.
-  startCheckedInAt: string | null;
-  startCheckedOutAt: string | null;
-  endCheckedInAt: string | null;
-  endCheckedOutAt: string | null;
+  // Start / end stop progress from the same derivation the load page uses:
+  // arrival + departure with provenance (tap, GPS, synced late …).
+  startProgress: StopProgressView | null;
+  endProgress: StopProgressView | null;
+  // Load-level evidence summary for the drawer.
+  loadProgress: {
+    label: string;
+    percent: number;
+    stopsTotal: number;
+    stopsClosed: number;
+    evidence: string;
+    evidenceLabel: string;
+    completionSource: string | null;
+  } | null;
   loadId: Id<'loadInformation'> | null;
   conflict?: boolean;
 }
+
+// Mirror of the server's StopProgress (convex/_helpers/loadProgress).
+type StopEventView = { at: number; source: string; syncLagMs: number | null };
+type StopProgressView = {
+  sequenceNumber: number;
+  phase: 'pending' | 'arrived' | 'departed' | 'canceled';
+  arrival: StopEventView | null;
+  departure: StopEventView | null;
+  label: string;
+  supported: boolean;
+};
 
 const ROW_STATUS_DOT: Record<RowStatus, string> = {
   'on-duty': '#10B981',
@@ -75,6 +97,7 @@ const TRIP_STATUS = {
   'in-transit': { bg: 'var(--bar-intransit-bg)', bd: 'var(--bar-intransit-bd)', fg: 'var(--bar-intransit-fg)', label: 'In transit' },
   assigned: { bg: 'var(--bar-assigned-bg)', bd: 'var(--bar-assigned-bd)', fg: 'var(--bar-assigned-fg)', label: 'Assigned' },
   open: { bg: 'var(--bar-open-bg)', bd: 'var(--bar-open-bd)', fg: 'var(--bar-open-fg)', label: 'Open' },
+  ended: { bg: 'var(--bar-open-bg)', bd: 'var(--bar-open-bd)', fg: 'var(--bar-open-fg)', label: 'Ended · load open' },
 } as const;
 
 const cityState = (city: string | null, state: string | null) => {
@@ -84,11 +107,22 @@ const cityState = (city: string | null, state: string | null) => {
   return `${city}, ${state}`;
 };
 
-const mapLegStatus = (s: string): TripBar['status'] => {
-  if (s === 'COMPLETED') return 'completed';
-  if (s === 'ACTIVE') return 'in-transit';
-  if (s === 'PENDING') return 'assigned';
+const mapDisplayStatus = (s: string): TripBar['status'] => {
+  if (s === 'completed') return 'completed';
+  if (s === 'in_transit') return 'in-transit';
+  if (s === 'open') return 'open';
+  if (s === 'ended') return 'ended';
   return 'assigned';
+};
+
+// "Arrived 06:01 (GPS)" / "(synced 32m late)" — never let an inferred
+// time read like a tap.
+const EVENT_SOURCE_NOTE: Record<string, string> = {
+  manual: '',
+  manual_late_sync: 'synced late',
+  manual_late_tap: 'tapped late',
+  gps: 'GPS',
+  reported: 'reported',
 };
 
 // Start-of-day in local time, in ms.
@@ -259,16 +293,15 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
         rowId,
         startMs: leg.startMs,
         endMs: leg.endMs,
-        status: mapLegStatus(leg.status),
+        status: mapDisplayStatus(leg.displayStatus),
         orderNumber: leg.load?.orderNumber ?? leg.load?.internalId ?? '—',
         hcr: leg.hcr,
         tripNumber: leg.tripNumber,
         from: cityState(leg.startCity, leg.startState),
         to: cityState(leg.endCity, leg.endState),
-        startCheckedInAt: leg.startCheckedInAt,
-        startCheckedOutAt: leg.startCheckedOutAt,
-        endCheckedInAt: leg.endCheckedInAt,
-        endCheckedOutAt: leg.endCheckedOutAt,
+        startProgress: leg.startProgress,
+        endProgress: leg.endProgress,
+        loadProgress: leg.load?.progress ?? null,
         loadId: leg.load?._id ?? null,
       });
       m.set(rowId, list);
@@ -646,6 +679,7 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
         <LegendDot color={TRIP_STATUS['in-transit'].bg} bd={TRIP_STATUS['in-transit'].bd} label="In transit" />
         <LegendDot color={TRIP_STATUS['assigned'].bg} bd={TRIP_STATUS['assigned'].bd} label="Assigned" />
         <LegendDot color={TRIP_STATUS['completed'].bg} bd={TRIP_STATUS['completed'].bd} label="Completed" />
+        <LegendDot color={TRIP_STATUS['ended'].bg} bd={TRIP_STATUS['ended'].bd} label="Ended · load open" />
         <span className="inline-flex items-center gap-1.5">
           <span style={{ width: 14, height: 10, borderRadius: 3, background: '#FCE7E7', border: '1.5px solid #DC2626' }} />
           Conflict
@@ -961,7 +995,9 @@ function DetailDrawer({
     trip.loadId ? { loadId: trip.loadId } : 'skip',
   );
   const routeStops = loadStops && loadStops.length >= 2 ? loadStops : null;
-  const showActuals = trip.status === 'completed';
+  // Actuals show whenever the stop has an attributed event — a trip under
+  // way shows what has happened so far, not only after completion.
+  const showActuals = true;
   // Reassign is a driver-to-driver handoff, so it needs a driver row and a
   // load that isn't already delivered. Carrier bars and completed legs keep
   // the button visible but disabled.
@@ -1008,6 +1044,26 @@ function DetailDrawer({
         >
           {s.label}
         </span>
+        {trip.loadProgress && trip.loadProgress.stopsTotal > 0 && (
+          <span
+            title={trip.loadProgress.evidenceLabel}
+            style={{
+              fontSize: 11,
+              color:
+                trip.loadProgress.evidence === 'gps' || trip.loadProgress.evidence === 'mixed'
+                  ? '#A66800'
+                  : 'var(--text-tertiary)',
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            {trip.loadProgress.stopsClosed}/{trip.loadProgress.stopsTotal} stops
+            {trip.loadProgress.evidence === 'gps'
+              ? ' · GPS only'
+              : trip.loadProgress.evidence === 'mixed'
+                ? ' · some GPS'
+                : ''}
+          </span>
+        )}
         {trip.conflict && (
           <span
             className="inline-flex items-center gap-1"
@@ -1122,8 +1178,8 @@ function DetailDrawer({
                         : 'detour'
                   }
                   last={isLast}
-                  arrivedAt={showActuals ? stop.checkedInAt : null}
-                  departedAt={showActuals ? stop.checkedOutAt : null}
+                  arrival={showActuals ? (stop.progress?.arrival ?? null) : null}
+                  departure={showActuals ? (stop.progress?.departure ?? null) : null}
                 />
               </React.Fragment>
             );
@@ -1134,8 +1190,8 @@ function DetailDrawer({
               time={formatHHMM(trip.startMs)}
               city={trip.from}
               kind="pickup"
-              arrivedAt={showActuals ? trip.startCheckedInAt : null}
-              departedAt={showActuals ? trip.startCheckedOutAt : null}
+              arrival={showActuals ? (trip.startProgress?.arrival ?? null) : null}
+              departure={showActuals ? (trip.startProgress?.departure ?? null) : null}
             />
             <RouteConn duration={durHrs} />
             <RouteStop
@@ -1143,8 +1199,8 @@ function DetailDrawer({
               city={trip.to}
               kind="delivery"
               last
-              arrivedAt={showActuals ? trip.endCheckedInAt : null}
-              departedAt={showActuals ? trip.endCheckedOutAt : null}
+              arrival={showActuals ? (trip.endProgress?.arrival ?? null) : null}
+              departure={showActuals ? (trip.endProgress?.departure ?? null) : null}
             />
           </>
         )}
@@ -1280,18 +1336,23 @@ function RouteStop({
   city,
   kind,
   last,
-  arrivedAt,
-  departedAt,
+  arrival,
+  departure,
 }: {
   time: string;
   city: string;
   kind: 'pickup' | 'delivery' | 'detour';
   last?: boolean;
-  arrivedAt?: string | null;
-  departedAt?: string | null;
+  arrival?: StopEventView | null;
+  departure?: StopEventView | null;
 }) {
-  const arrived = formatISOHHMM(arrivedAt ?? null);
-  const departed = formatISOHHMM(departedAt ?? null);
+  const arrived = arrival ? formatHHMM(arrival.at) : null;
+  const departed = departure ? formatHHMM(departure.at) : null;
+  const note = (e: StopEventView | null | undefined) => {
+    if (!e) return null;
+    const n = EVENT_SOURCE_NOTE[e.source] ?? '';
+    return n ? <span style={{ marginLeft: 4, color: e.source === 'gps' || e.source === 'reported' ? '#A66800' : 'var(--text-tertiary)' }}>({n})</span> : null;
+  };
   const kindColor =
     kind === 'pickup' ? '#3B82F6' : kind === 'delivery' ? '#10B981' : '#9BA3B4';
   return (
@@ -1336,12 +1397,14 @@ function RouteStop({
             {arrived && (
               <span>
                 Arrived <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{arrived}</span>
+                {note(arrival)}
               </span>
             )}
             {arrived && departed && <span style={{ margin: '0 6px', color: 'var(--border-default)' }}>·</span>}
             {departed && (
               <span>
                 Departed <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{departed}</span>
+                {note(departure)}
               </span>
             )}
           </div>

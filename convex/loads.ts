@@ -14,6 +14,8 @@ import { readScopedCounts, READ_FROM_CACHE_FLAG } from './loadStatusCounts';
 import { scheduleLegPayRecalc, voidUnlockedLegPayItems } from './payEngine/legRecalc';
 import { deleteFrontierForLoad, releaseFrontierOnLoadComplete } from './loadTrackingState';
 import { getActiveFacilities, resolveStopFacilityLink } from './lib/facilityLink';
+import { loadCompletionSourceValidator, type LoadCompletionSource } from './_helpers/loadProgress';
+import { loadProgressForLoad, reconcileLoadCompletion } from './lib/loadCompletion';
 import {
   setLoadTag,
   removeAllTagsForLoad,
@@ -56,6 +58,8 @@ async function applyLoadStatusUpdate(
       | 'OTHER';
     cancellationNotes?: string;
     canceledBy?: string;
+    /** Who/what completed the load (status === 'Completed' only). */
+    completionSource?: LoadCompletionSource;
   },
 ) {
   const load = await ctx.db.get(args.loadId);
@@ -69,7 +73,21 @@ async function applyLoadStatusUpdate(
 
   if (args.status === 'Completed') {
     updates.trackingStatus = 'Completed';
-    updates.deliveredAt = now;
+    const source = args.completionSource ?? 'dispatcher';
+    if (load.status === 'Completed') {
+      // Re-completion (e.g. the driver's final check-out replaying after
+      // the geofence already completed the load): keep the original
+      // delivery time, and only let a driver tap upgrade the provenance —
+      // an inferred completion confirmed by the driver is now confirmed.
+      updates.deliveredAt = load.deliveredAt ?? now;
+      updates.completionSource =
+        source === 'driver_checkout' ? source : (load.completionSource ?? source);
+    } else {
+      updates.deliveredAt = now;
+      // Provenance of the completion — readers show inferred completions
+      // (geofence, shift end, reconcile) differently from a confirmed one.
+      updates.completionSource = source;
+    }
 
     // Release the geofence frontier. Normally the driver-checkout flow has
     // already done this (and re-bound the kept row to their session), in
@@ -1202,6 +1220,9 @@ export const getLoadStops = query({
       .collect();
     stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
 
+    const progress = await loadProgressForLoad(ctx, load, stops);
+    const bySeq = new Map(progress.stops.map((p) => [p.sequenceNumber, p]));
+
     return stops.map((s) => ({
       _id: s._id,
       sequenceNumber: s.sequenceNumber,
@@ -1211,6 +1232,8 @@ export const getLoadStops = query({
       windowBeginTime: s.windowBeginTime ?? null,
       checkedInAt: s.checkedInAt ?? null,
       checkedOutAt: s.checkedOutAt ?? null,
+      // Derived, provenance-carrying view of the same stop.
+      progress: bySeq.get(s.sequenceNumber) ?? null,
     }));
   },
 });
@@ -1265,11 +1288,17 @@ export const getLoad = query({
     // HCR / TRIP from facet tags (columns removed in Phase 5b).
     const facets = await getLoadFacets(ctx, load._id);
 
+    // The ONE derived status / percent / per-stop provenance every client
+    // renders (see _helpers/loadProgress). Web reads this instead of
+    // recomputing from raw stop fields.
+    const progress = await loadProgressForLoad(ctx, load, stops);
+
     return {
       ...load,
       parsedHcr: facets.hcr,
       parsedTripNumber: facets.trip,
       stops,
+      progress,
       // Enriched assignment data
       assignedDriver: primaryDriver
         ? {
@@ -1845,7 +1874,7 @@ export const updateLoadStatus = mutation({
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new ConvexError('Load not found');
     if (load.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
-    const result = await applyLoadStatusUpdate(ctx, args);
+    const result = await applyLoadStatusUpdate(ctx, { ...args, completionSource: 'dispatcher' });
 
     await updateLoadCount(ctx, result.load.workosOrgId, result.previousStatus, result.nextStatus);
 
@@ -1874,6 +1903,7 @@ export const updateLoadStatusInternal = internalMutation({
     cancellationReason: v.optional(cancellationReasonValidator),
     cancellationNotes: v.optional(v.string()),
     canceledBy: v.optional(v.string()),
+    completionSource: v.optional(loadCompletionSourceValidator),
   },
   handler: async (ctx, args) => {
     const result = await applyLoadStatusUpdate(ctx, args);
@@ -3523,5 +3553,52 @@ export const resolveReference = query({
     }
 
     return { status: 'not_found' };
+  },
+});
+
+// ✅ RECONCILE STUCK LOADS (hourly safety net)
+// Completes loads whose every counted stop is closed but whose row never
+// left Assigned — the write-time reconcile (lib/loadCompletion) covers new
+// events; this sweep catches loads stranded before it existed and any
+// path that still bypasses it. Same org fan-out as autoExpireStaleLoads.
+export const reconcileStuckLoads = internalMutation({
+  args: {
+    orgId: v.optional(v.string()),
+  },
+  returns: v.object({ scanned: v.number(), completed: v.number() }),
+  handler: async (ctx, args) => {
+    if (!args.orgId) {
+      const ORG_FAN_OUT_CAP = 1000;
+      const orgs = await ctx.db.query('organizations').take(ORG_FAN_OUT_CAP);
+      if (orgs.length >= ORG_FAN_OUT_CAP) {
+        console.warn(`[reconcileStuckLoads] ORG_FAN_OUT_CAP hit (${ORG_FAN_OUT_CAP}).`);
+      }
+      for (const org of orgs) {
+        if (!org.workosOrgId) continue;
+        await ctx.scheduler.runAfter(0, internal.loads.reconcileStuckLoads, { orgId: org.workosOrgId });
+      }
+      return { scanned: 0, completed: 0 };
+    }
+
+    const BATCH = 200;
+    let scanned = 0;
+    let completed = 0;
+    for (const trackingStatus of ['In Transit', 'Delayed'] as const) {
+      const candidates = await ctx.db
+        .query('loadInformation')
+        .withIndex('by_org_tracking_status', (q) =>
+          q.eq('workosOrgId', args.orgId!).eq('trackingStatus', trackingStatus),
+        )
+        .filter((q) => q.eq(q.field('status'), 'Assigned'))
+        .take(BATCH);
+      for (const load of candidates) {
+        scanned++;
+        if (await reconcileLoadCompletion(ctx, load._id, 'reconcile')) completed++;
+      }
+    }
+    if (completed > 0) {
+      console.log(`[reconcileStuckLoads] org=${args.orgId} scanned=${scanned} completed=${completed}`);
+    }
+    return { scanned, completed };
   },
 });

@@ -181,14 +181,20 @@ export default function HomeScreen() {
       return { activeLoad: null, scheduledLoads: [], completedLoads: [] };
     }
 
-    const isCompleted = (l: any) =>
-      l.status === 'Completed' || l.trackingStatus === 'Completed';
-    const isInProgress = (l: any) =>
-      !isCompleted(l) &&
-      (l.trackingStatus === 'In Transit' ||
-        l.trackingStatus === 'At Pickup' ||
-        l.trackingStatus === 'At Delivery' ||
-        l.status === 'In Progress');
+    // Buckets come from the server's derived status (getMyAssignedLoads
+    // .progress — convex/_helpers/loadProgress), the same source as the
+    // trip screen, the web load page and the dispatch Schedule. The raw
+    // status/trackingStatus fallback only serves cached rows written
+    // before `progress` existed.
+    const derivedStatus = (l: any): string =>
+      l.progress?.status ??
+      (l.status === 'Completed' || l.trackingStatus === 'Completed'
+        ? 'delivered'
+        : l.trackingStatus === 'In Transit'
+          ? 'in_transit'
+          : 'assigned');
+    const isCompleted = (l: any) => derivedStatus(l) === 'delivered';
+    const isInProgress = (l: any) => derivedStatus(l) === 'in_transit';
 
     const inProgress = loads.find(isInProgress) ?? null;
 
@@ -541,7 +547,7 @@ const ActiveLoadCard: React.FC<ActiveLoadCardProps> = ({ load, onPress }) => {
       <View style={styles.activeCardStripe} />
 
       <View style={styles.activeCardHeader}>
-        <StatusChip status={load.trackingStatus || load.status} />
+        <StatusChip status={load.progress?.status ?? load.trackingStatus ?? load.status} />
         <Icon name="chevron-right" size={18} color={palette.textTertiary} />
       </View>
 
@@ -645,9 +651,20 @@ const StopRow: React.FC<StopRowProps> = ({ kind, name, addr, time, done, active 
 // STATUS CHIP + TAG
 // ============================================================================
 
+// Accepts the derived status ('in_transit', 'delivered', …) or, for
+// pre-`progress` cache rows, the raw trackingStatus/status string.
+const STATUS_CHIP_LABEL: Record<string, string> = {
+  open: 'Open',
+  assigned: 'Assigned',
+  in_transit: 'In Transit',
+  delivered: 'Completed',
+  canceled: 'Cancelled',
+  expired: 'Expired',
+};
+
 const StatusChip: React.FC<{ status: string }> = ({ status }) => {
   const { palette, styles } = useDesignStyles();
-  const s = status || 'Pending';
+  const s = STATUS_CHIP_LABEL[status] ?? status ?? 'Pending';
   const tone = statusTone(s, palette);
   return (
     <View style={[styles.statusChip, { backgroundColor: tone.bg }]}>
@@ -662,8 +679,6 @@ const statusTone = (status: string, palette: Palette): { bg: string; fg: string 
     return { bg: 'rgba(46,92,255,0.16)', fg: palette.accent };
   if (status === 'Completed')
     return { bg: 'rgba(16,185,129,0.14)', fg: palette.success };
-  if (status === 'At Pickup' || status === 'At Delivery')
-    return { bg: 'rgba(124,58,237,0.14)', fg: '#A78BFA' };
   return { bg: 'rgba(255,255,255,0.06)', fg: palette.textSecondary };
 };
 

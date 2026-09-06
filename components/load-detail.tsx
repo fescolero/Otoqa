@@ -244,6 +244,15 @@ function PhotoLightbox({
   );
 }
 
+const COMPLETION_SOURCE_LABEL: Record<string, string> = {
+  driver_checkout: 'driver check-out',
+  geofence: 'geofence',
+  session_end: 'shift end',
+  dispatcher: 'dispatcher',
+  carrier: 'carrier',
+  reconcile: 'hourly reconcile',
+};
+
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
@@ -494,37 +503,22 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     finalDeliveryStop?.signatureImage ||
     loadDocsData?.some((d) => d.type === 'POD')
   );
+  // ── Status + progress: the server's derived view (convex/_helpers/
+  // loadProgress), shared verbatim with the driver app and the Schedule.
+  // Nothing on this page recomputes status or percent from raw stop
+  // fields any more — that is how the chip, the stop table and the
+  // Schedule came to disagree about the same load.
+  const progress = loadData.progress;
   const statusId = resolveStatusId('load', loadData.status);
-
-  // Friendlier chip label per design v3 — combines the DB status with
-  // tracking state so the eyebrow reads "In transit" while the truck is
-  // moving (DB status stays `Assigned`). Picker menu is unaffected.
-  const trackingLower = (loadData.trackingStatus || '').toLowerCase();
-  const isInTransitChip = trackingLower === 'in transit';
-  const isDelayedChip = trackingLower === 'delayed';
-  const statusChipLabel = (() => {
-    switch (loadData.status) {
-      case 'Open':
-        return 'Open · waiting for assignment';
-      case 'Assigned':
-        if (isInTransitChip) return 'In transit';
-        if (isDelayedChip) return 'Assigned · delayed';
-        return 'Assigned · pickup pending';
-      case 'Completed':
-        return 'Delivered';
-      case 'Canceled':
-        return 'Cancelled';
-      case 'Expired':
-        return 'Expired';
-      default:
-        return undefined;
-    }
-  })();
-
-  // ── Progress (% of stops checked in, used by Live tracking + last QuickStat) ─
-  const stopsCheckedIn = loadData.stops.filter((s) => !!(s as StopWithEvidence).checkedInAt).length;
-  const transitProgressPct =
-    loadData.stops.length > 0 ? Math.round((stopsCheckedIn / loadData.stops.length) * 100) : 0;
+  const isInTransitChip = progress.status === 'in_transit';
+  const isDelayedChip = progress.delayed;
+  // The picker chip shows the derived label. When the row lags the stops
+  // (delivered by evidence, still Assigned on the row) say so explicitly
+  // rather than pretending either side is wrong.
+  const rowLagsStops = progress.status === 'delivered' && loadData.status !== 'Completed';
+  const statusChipLabel = rowLagsStops ? 'Delivered · not closed' : progress.label;
+  const transitProgressPct = progress.percent;
+  const progressBySeq = new Map(progress.stops.map((p) => [p.sequenceNumber, p]));
 
   // Delivery on-time roll-up — the SAME rule the leg stamp and the driver
   // KPI use (convex/_helpers/onTime.ts), computed live from this load's
@@ -562,10 +556,10 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     if (loadData.status === 'Open') {
       return [...baseQuickStats, { label: 'Pickup', value: '—', delta: 'unscheduled', deltaTone: 'neutral' }];
     }
-    if (loadData.status === 'Assigned' && !isInTransitChip) {
+    if (progress.status === 'assigned') {
       return [...baseQuickStats, { label: 'Pickup', value: 'pre-trip', delta: 'awaiting', deltaTone: 'neutral' }];
     }
-    if (loadData.status === 'Completed') {
+    if (loadData.status === 'Completed' || rowLagsStops) {
       return [
         ...baseQuickStats,
         onTimeChip.status === 'na'
@@ -580,7 +574,12 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     }
     return [
       ...baseQuickStats,
-      { label: 'Status', value: `${transitProgressPct}%`, delta: 'in transit', deltaTone: 'up' },
+      {
+        label: 'Status',
+        value: `${transitProgressPct}%`,
+        delta: `${progress.stopsClosed}/${progress.stopsTotal} stops`,
+        deltaTone: progress.evidence === 'gps' || progress.evidence === 'mixed' ? 'neutral' : 'up',
+      },
     ];
   })();
 
@@ -721,7 +720,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
         detail: 'Based on HOS + location',
       });
     }
-  } else if (loadData.status === 'Assigned' && !isInTransitChip) {
+  } else if (progress.status === 'assigned') {
     attentionHeadline = <>Load {orderToken} is assigned and waiting for pickup.</>;
     attentionItems.push({
       tone: 'ok',
@@ -740,8 +739,29 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
         detail: 'Driver heading to origin',
       });
     }
-  } else if (isCompleted) {
-    attentionHeadline = <>Load {orderToken} delivered. Ready to invoice.</>;
+  } else if (isCompleted || rowLagsStops) {
+    attentionHeadline = rowLagsStops ? (
+      <>Load {orderToken} delivered by stop evidence, but the load is still open.</>
+    ) : (
+      <>Load {orderToken} delivered. Ready to invoice.</>
+    );
+    if (rowLagsStops) {
+      attentionItems.push({
+        tone: 'warn',
+        icon: 'alert',
+        tab: 'stops',
+        title: 'Every stop is closed; load not completed',
+        detail: `${progress.evidenceLabel}. Mark Delivered from the status picker, or wait for the hourly reconcile.`,
+      });
+    } else if (progress.evidence !== 'manual' && progress.evidence !== 'none') {
+      attentionItems.push({
+        tone: 'warn',
+        icon: 'alert',
+        tab: 'stops',
+        title: progress.evidence === 'gps' ? 'Completed from GPS only' : 'Some stops closed without a tap',
+        detail: `${progress.evidenceLabel}${progress.completionSource ? ` · completed by ${COMPLETION_SOURCE_LABEL[progress.completionSource]}` : ''}`,
+      });
+    }
     if (onTimeChip.status !== 'na') {
       const late = onTimeSummary.deliveriesEvaluated - onTimeSummary.deliveriesOnTime;
       attentionItems.push({
@@ -785,8 +805,17 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       icon: 'pulse',
       tab: 'overview',
       title: `In transit · ${transitProgressPct}% complete`,
-      detail: etaLabel !== '—' ? `ETA ${etaLabel}` : 'ETA pending',
+      detail: `${progress.stopsClosed} of ${progress.stopsTotal} stops closed${etaLabel !== '—' ? ` · ETA ${etaLabel}` : ''}`,
     });
+    if (progress.evidence === 'gps' || progress.evidence === 'mixed') {
+      attentionItems.push({
+        tone: 'warn',
+        icon: 'alert',
+        tab: 'stops',
+        title: 'Stops closed without a driver tap',
+        detail: progress.evidenceLabel,
+      });
+    }
     if (idleEventDetected) {
       attentionItems.push({
         tone: 'warn',
@@ -918,11 +947,25 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     DELIVERY: 'valid',
     DETOUR: 'pending',
   };
-  const STOP_STATUS_TO_CHIP: Record<string, ChipStatus> = {
-    Pending: 'pending',
-    'In Transit': 'active',
-    Completed: 'delivered',
-    Canceled: 'cancelled',
+  // Stop chip = the server's derived phase + provenance. "Delivered" is a
+  // tap; "Delivered · GPS" is the fence; "· synced late" / "· tapped late"
+  // are taps that arrived after the fence. Unsupported closures (GPS /
+  // reported) get the attention tint so they read as inferred, not
+  // confirmed.
+  const stopChip = (sequenceNumber: number, rawStatus: string | undefined) => {
+    const p = progressBySeq.get(sequenceNumber);
+    if (!p) return <Chip status={rawStatus === 'Canceled' ? 'cancelled' : 'pending'} />;
+    const chipStatus: ChipStatus =
+      p.phase === 'canceled'
+        ? 'cancelled'
+        : p.phase === 'pending'
+          ? 'pending'
+          : !p.supported
+            ? 'warning'
+            : p.phase === 'departed'
+              ? 'delivered'
+              : 'active';
+    return <Chip status={chipStatus} label={p.label} />;
   };
 
   // Inline Stops mini-card on the overview (the dedicated "Stops" tab keeps
@@ -987,9 +1030,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
             key: 'st',
             label: 'Status',
             width: '100px',
-            render: (r) => (
-              <Chip status={STOP_STATUS_TO_CHIP[r.status ?? 'Pending'] ?? 'inactive'} />
-            ),
+            render: (r) => stopChip(r.sequenceNumber, r.status),
           },
         ]}
         rows={stopRows}
@@ -1128,7 +1169,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       key: 'st',
       label: 'Status',
       width: '110px',
-      render: (r) => <Chip status={STOP_STATUS_TO_CHIP[r.status ?? 'Pending'] ?? 'inactive'} />,
+      render: (r) => stopChip(r.sequenceNumber, r.status),
     },
     {
       key: 'fence',
@@ -1384,25 +1425,50 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     when: string;
     tone?: 'warn';
   }> = [];
-  loadData.stops.forEach((s) => {
-    const sw = s as StopWithEvidence;
-    if (sw.checkedInAt) {
-      activityItems.push({
-        id: `in-${sw._id}`,
-        icon: 'truck',
-        text: `${sw.stopType === 'PICKUP' ? 'Picked up' : 'Arrived'} at stop ${sw.sequenceNumber} — ${sw.city ?? ''}`,
-        when: formatTime(sw.checkedInAt),
+  // Every attributed event, tap or fence, in time order — with the fence
+  // ones labeled so the trail never passes a GPS inference off as a tap.
+  const eventSuffix = (e: { source: string; syncLagMs: number | null }) => {
+    switch (e.source) {
+      case 'gps':
+        return ' (GPS, no tap)';
+      case 'manual_late_sync':
+        return e.syncLagMs !== null ? ` (synced ${formatLateDuration(e.syncLagMs)} late)` : ' (synced late)';
+      case 'manual_late_tap':
+        return ' (tapped after GPS)';
+      case 'reported':
+        return ' (reported)';
+      default:
+        return '';
+    }
+  };
+  const timedEvents: Array<{ at: number; item: (typeof activityItems)[number] }> = [];
+  progress.stops.forEach((p) => {
+    if (p.arrival) {
+      timedEvents.push({
+        at: p.arrival.at,
+        item: {
+          id: `in-${p.sequenceNumber}`,
+          icon: 'truck',
+          text: `${p.stopType === 'PICKUP' ? 'Picked up' : 'Arrived'} at stop ${p.sequenceNumber} — ${p.city ?? ''}${eventSuffix(p.arrival)}`,
+          when: formatTime(new Date(p.arrival.at).toISOString()),
+          tone: p.arrival.source === 'gps' || p.arrival.source === 'reported' ? 'warn' : undefined,
+        },
       });
     }
-    if (sw.checkedOutAt) {
-      activityItems.push({
-        id: `out-${sw._id}`,
-        icon: 'check',
-        text: `Departed stop ${sw.sequenceNumber}`,
-        when: formatTime(sw.checkedOutAt),
+    if (p.departure) {
+      timedEvents.push({
+        at: p.departure.at,
+        item: {
+          id: `out-${p.sequenceNumber}`,
+          icon: 'check',
+          text: `Departed stop ${p.sequenceNumber}${eventSuffix(p.departure)}`,
+          when: formatTime(new Date(p.departure.at).toISOString()),
+          tone: p.departure.source === 'gps' || p.departure.source === 'reported' ? 'warn' : undefined,
+        },
       });
     }
   });
+  timedEvents.sort((a, b) => a.at - b.at).forEach((e) => activityItems.push(e.item));
   if (activityItems.length === 0) {
     activityItems.push({
       id: 'created',
@@ -1428,8 +1494,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   // tab. See `LoadPayPlanCard` inside `overviewContent` above.
 
   // ── Status-aware right rail ──────────────────────────────────────────
-  const trackingStatus = (loadData.trackingStatus || '').toLowerCase();
-  const isInTransit = trackingStatus === 'in transit';
+  const isInTransit = progress.status === 'in_transit';
   let railCard: React.ReactNode = null;
   if (loadData.status === 'Open') {
     const win = origin
@@ -1503,13 +1568,15 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
         />
       </DSCard>
     );
-  } else if (isInTransit) {
+  } else if (isInTransit || rowLagsStops) {
+    // Most recent attributed event by time (not by stop order).
     const last = activityItems[activityItems.length - 1];
     railCard = (
-      <DSCard title="Trip in progress">
+      <DSCard title={rowLagsStops ? 'Delivered · not closed' : 'Trip in progress'}>
         <DSActivity
           items={[
-            { icon: 'truck', text: last?.text ?? 'In transit', when: last?.when ?? 'now' },
+            { icon: 'truck', text: last?.text ?? 'In transit', when: last?.when ?? 'now', tone: last?.tone },
+            { icon: 'pulse', text: progress.evidenceLabel, when: '' },
           ]}
         />
       </DSCard>
@@ -1524,6 +1591,12 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
               tone: 'ok',
               text: hasPOD ? 'POD on file' : 'POD pending',
               when: finalDeliveryStop?.checkedInAt ? formatTime(finalDeliveryStop.checkedInAt) : '',
+            },
+            {
+              icon: 'pulse',
+              tone: progress.evidence === 'manual' ? undefined : 'warn',
+              text: `${progress.evidenceLabel}${progress.completionSource ? ` · closed by ${COMPLETION_SOURCE_LABEL[progress.completionSource]}` : ''}`,
+              when: '',
             },
           ]}
         />

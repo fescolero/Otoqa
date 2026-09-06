@@ -103,7 +103,12 @@ export async function enqueueMutation(
   }
 ): Promise<string> {
   const id = uuidv4();
-  const driverTimestamp = new Date().toISOString();
+  // The tap time is when the driver pressed the button, which the caller
+  // already stamped into the payload. Restamping it here shifted every
+  // timeout-path tap later by however long the request hung — keep the
+  // caller's value and only fall back when there is none.
+  const driverTimestamp =
+    typeof payload.driverTimestamp === 'string' ? payload.driverTimestamp : new Date().toISOString();
 
   let photoPath: string | undefined;
 

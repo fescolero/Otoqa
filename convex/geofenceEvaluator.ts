@@ -11,6 +11,8 @@ import {
 } from './lib/geo';
 import { pointInPolygon } from './lib/polygonGeo';
 import { logSystemEvent } from './lib/systemEvents';
+import { reconcileLoadCompletion } from './lib/loadCompletion';
+import { TAP_GRACE_MS as SHARED_TAP_GRACE_MS } from './_helpers/loadProgress';
 import {
   nextArrivalTarget,
   buildArrivalWatch,
@@ -24,7 +26,9 @@ import {
  * live load state; long enough that the fallback is useless as a crutch
  * at the dock — the tap remains the driver's job.
  */
-export const TAP_GRACE_MS = 20 * 60 * 1000;
+// Defined once in _helpers/loadProgress so provenance classification
+// ('synced late' vs 'tapped late') uses the very same window.
+export const TAP_GRACE_MS = SHARED_TAP_GRACE_MS;
 
 /**
  * Geofence Evaluator — Phases 2–3.
@@ -375,10 +379,12 @@ export const evaluateLatestPing = internalMutation({
  *   - log a missed-tap review item to the platform console (driver
  *     coaching signal — reinforce training, don't fail the client).
  *
- * Deliberately NOT done here: activating/completing dispatch legs,
- * completing the load, or anything the driver's own workflow gates (POD,
- * pay). The driver's app never auto-completes — from their seat the
- * geofence does nothing for them.
+ * Deliberately NOT done here: activating dispatch legs or anything the
+ * driver's own workflow gates (POD, pay). The one exception is load
+ * completion: when the fence closes the LAST open stop the load is
+ * completed through lib/loadCompletion (completionSource 'geofence'), so
+ * the load row never lags the stops. The driver's app still never
+ * auto-completes — from their seat the geofence does nothing for them.
  */
 export async function runTapGraceCheck(
   ctx: MutationCtx,
@@ -432,6 +438,12 @@ export async function runTapGraceCheck(
       ...(advanceStatus ? { status: 'Completed' as const } : {}),
       updatedAt: Date.now(),
     });
+    // If that was the last open stop the load is done — complete it here
+    // (stamped completionSource: 'geofence') instead of leaving the row at
+    // Assigned / In Transit with nothing left to ever finish it. The
+    // driver's app still never auto-completes from their seat; this is
+    // the dispatch-side record catching up with the truck.
+    await reconcileLoadCompletion(ctx, stop.loadId, 'geofence');
     // A fully passive stop (no check-in either) already produced a
     // missed_checkin review item — one coaching signal per stop is enough.
     if (stop.checkedInAt !== undefined) {

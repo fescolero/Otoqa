@@ -117,8 +117,12 @@ export default function DriverDetailScreen() {
     );
   }
 
-  const statusWord = (s: string) =>
-    s === 'COMPLETED' ? 'completed' : s === 'IN_PROGRESS' ? 'in transit' : 'scheduled';
+  // Server-derived label (listDriverHistory.statusLabel) — the same words
+  // the web and the driver app use; the raw-status fallback only serves a
+  // server that predates it.
+  const statusWord = (l: { status: string; statusLabel?: string }) =>
+    l.statusLabel?.toLowerCase() ??
+    (l.status === 'COMPLETED' ? 'completed' : l.status === 'IN_PROGRESS' ? 'in transit' : 'scheduled');
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: 64 }}>
@@ -235,7 +239,7 @@ export default function DriverDetailScreen() {
                   {loadIdentity(l)}
                 </Text>
                 <Text style={{ color: l.status === 'IN_PROGRESS' ? colors.primary : colors.foregroundMuted, fontSize: typography.xs, fontWeight: typography.bold }}>
-                  {statusWord(l.status)}
+                  {statusWord(l)}
                 </Text>
               </View>
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs, marginTop: 3 }}>

@@ -534,8 +534,9 @@ export default function VoiceScreen() {
             const name = `${d.firstName} ${d.lastName}`;
             const label = dayLabel(day, endDay);
             if (loads.length === 0) return say('agent', `${name} had no loads ${label}.`);
-            const statusWord = (s: string) =>
-              s === 'COMPLETED' ? 'completed' : s === 'IN_PROGRESS' ? 'in transit' : 'scheduled';
+            const statusWord = (l: { status: string; statusLabel?: string }) =>
+              l.statusLabel?.toLowerCase() ??
+              (l.status === 'COMPLETED' ? 'completed' : l.status === 'IN_PROGRESS' ? 'in transit' : 'scheduled');
             const rows: LoadRow[] = loads.map((l) => ({
               load: displayLoadId(l.internalId),
               when: l.firstStopTime ?? null,
@@ -544,11 +545,11 @@ export default function VoiceScreen() {
                 l.tripNumber ? `Trip ${l.tripNumber}` : null,
                 l.hcr ? `HCR ${l.hcr}` : null,
               ].filter((t): t is string => !!t),
-              note: [l.customerName, statusWord(l.status)].filter(Boolean).join(' · '),
+              note: [l.customerName, statusWord(l)].filter(Boolean).join(' · '),
               warn: null,
             }));
             const spoken = loads
-              .map((l) => `${displayLoadId(l.internalId)} ${l.customerName ?? ''} ${statusWord(l.status)}`)
+              .map((l) => `${displayLoadId(l.internalId)} ${l.customerName ?? ''} ${statusWord(l)}`)
               .join('; ');
             say('agent', `${name} — ${loads.length} load${loads.length === 1 ? '' : 's'} ${label}:`, {
               rows,

@@ -1100,6 +1100,8 @@ export const completeLoad = mutation({
     await ctx.db.patch(assignment.loadId, {
       status: 'Completed',
       trackingStatus: 'Completed',
+      deliveredAt: now,
+      completionSource: 'carrier',
       updatedAt: now,
     });
 

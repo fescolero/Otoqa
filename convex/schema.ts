@@ -2,6 +2,7 @@ import { defineSchema, defineTable } from 'convex/server';
 import { v } from 'convex/values';
 import { scheduleRuleValidator } from './lib/validators';
 import { fuelTypeValidator } from './lib/fuelTypes';
+import { loadCompletionSourceValidator, stopSyncValidator } from './_helpers/loadProgress';
 import {
   chargeComponents,
   fuelSurchargeCalculators,
@@ -1758,6 +1759,12 @@ export default defineSchema({
 
     // Delivery Tracking
     deliveredAt: v.optional(v.number()), // Unix timestamp, set when status -> Completed
+    // Who/what moved the load to Completed. The driver's final check-out
+    // tap is the primary path; the others exist so a load whose stops
+    // closed without that tap (geofence fallback, shift end) still
+    // completes — and so every reader can see the completion was inferred
+    // rather than confirmed. Absent on loads completed before this existed.
+    completionSource: v.optional(loadCompletionSourceValidator),
 
     // POD (Proof of Delivery) Tracking
     podStorageId: v.optional(v.id('_storage')), // Uploaded POD document
@@ -1867,6 +1874,17 @@ export default defineSchema({
     // log to the platform console (geofence.missed_checkin/_checkout).
     autoArrivedAt: v.optional(v.number()),
     autoDepartedAt: v.optional(v.number()),
+
+    // Tap sync bookkeeping (ms epoch, server-attributed). Written next to
+    // each manual tap so provenance is derivable later: receivedAt is the
+    // server time the tap was written (vs. the device time in
+    // checkedInAt/checkedOutAt), and replayed/queuedAt/retryCount come
+    // from the driver app's offline queue when the tap did not go through
+    // live. Absent on taps written before this existed. Read by
+    // _helpers/loadProgress to tell "tap synced late" from "driver tapped
+    // late" from "no tap at all".
+    checkedInSync: v.optional(stopSyncValidator),
+    checkedOutSync: v.optional(stopSyncValidator),
 
     // Check-in geofence audit (dispatch-facing; deliberately NOT projected
     // to mobile). Distance from the stop pin at check-in, and whether it

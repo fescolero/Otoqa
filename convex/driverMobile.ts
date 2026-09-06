@@ -17,6 +17,8 @@ import {
 import { setFrontierOnCheckIn, releaseFrontierOnLoadComplete } from './loadTrackingState';
 import { pendingLegsForShift } from './lib/legTracking';
 import { logSystemEvent } from './lib/systemEvents';
+import { deriveLoadProgress, loadProgressValidator, stopSyncValidator } from './_helpers/loadProgress';
+import { loadProgressForLoad } from './lib/loadCompletion';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 
@@ -202,6 +204,29 @@ export const getMyAssignedLoads = query({
       // no dispatchLeg exists for this driver on this load yet.
       legPlannedStartAt: v.optional(v.float64()),
       legStatus: v.optional(v.string()),
+      // Derived status the dashboard buckets and chips on — same source as
+      // the trip screen, the web, and the Schedule (_helpers/loadProgress).
+      progress: v.object({
+        status: v.union(
+          v.literal('open'),
+          v.literal('assigned'),
+          v.literal('in_transit'),
+          v.literal('delivered'),
+          v.literal('canceled'),
+          v.literal('expired'),
+        ),
+        label: v.string(),
+        percent: v.number(),
+        stopsTotal: v.number(),
+        stopsClosed: v.number(),
+        evidence: v.union(
+          v.literal('manual'),
+          v.literal('mixed'),
+          v.literal('gps'),
+          v.literal('reported'),
+          v.literal('none'),
+        ),
+      }),
       // First pickup info
       firstPickup: v.optional(
         v.object({
@@ -381,6 +406,17 @@ export const getMyAssignedLoads = query({
           commodityDescription: load.commodityDescription,
           legPlannedStartAt: leg?.plannedStartAt,
           legStatus: leg?.status,
+          progress: (() => {
+            const p = deriveLoadProgress(load, stops);
+            return {
+              status: p.status,
+              label: p.label,
+              percent: p.percent,
+              stopsTotal: p.stopsTotal,
+              stopsClosed: p.stopsClosed,
+              evidence: p.evidence,
+            };
+          })(),
           firstPickup: firstPickup
             ? {
                 city: firstPickup.city,
@@ -605,6 +641,9 @@ export const getLoadWithStops = query({
         parsedTripNumber: v.optional(v.string()),
         facets: v.array(v.object({ key: v.string(), value: v.string() })),
       }),
+      // The ONE derived status / percent / per-stop provenance — the same
+      // object the web load page and the dispatch Schedule render.
+      progress: loadProgressValidator,
       stops: v.array(
         v.object({
           _id: v.id('loadStops'),
@@ -630,6 +669,11 @@ export const getLoadWithStops = query({
           instructions: v.optional(v.string()),
           checkedInAt: v.optional(v.string()),
           checkedOutAt: v.optional(v.string()),
+          checkedInSync: v.optional(stopSyncValidator),
+          checkedOutSync: v.optional(stopSyncValidator),
+          autoArrivedAt: v.optional(v.number()),
+          autoDepartedAt: v.optional(v.number()),
+          isRedirected: v.optional(v.boolean()),
           // Detour fields
           isDetour: v.optional(v.boolean()),
           detourReason: v.optional(v.string()),
@@ -686,8 +730,10 @@ export const getLoadWithStops = query({
     // Pull tagged facets so the trip detail's LoadSummary can render
     // the same HCR / TRIP / custom badges the dashboard shows.
     const facets = await getLoadFacets(ctx, args.loadId);
+    const progress = await loadProgressForLoad(ctx, load, stops);
 
     return {
+      progress,
       load: {
         _id: load._id,
         internalId: load.internalId,
@@ -735,6 +781,11 @@ export const getLoadWithStops = query({
         instructions: stop.instructions,
         checkedInAt: stop.checkedInAt,
         checkedOutAt: stop.checkedOutAt,
+        checkedInSync: stop.checkedInSync,
+        checkedOutSync: stop.checkedOutSync,
+        autoArrivedAt: stop.autoArrivedAt,
+        autoDepartedAt: stop.autoDepartedAt,
+        isRedirected: stop.isRedirected,
         // Detour fields
         isDetour: stop.isDetour,
         detourReason: stop.detourReason,
@@ -772,6 +823,12 @@ export const checkInAtStop = mutation({
     overrideReason: v.optional(v.string()),
     // Driver flagged this stop as redirected to a different location
     isRedirected: v.optional(v.boolean()),
+    // Offline-queue replay provenance (driver app offline-queue.ts). Absent
+    // on live taps and on builds that predate it. Stored next to the tap
+    // so "synced late" is distinguishable from "tapped late" later.
+    replayed: v.optional(v.boolean()),
+    queuedAt: v.optional(v.number()),
+    retryCount: v.optional(v.number()),
   },
   returns: v.object({
     success: v.boolean(),
@@ -981,8 +1038,39 @@ export const checkInAtStop = mutation({
     const checkinTime = args.driverTimestamp;
     const serverNow = Date.now();
 
+    // The fence already closed this arrival: the tap is late evidence, not
+    // a missed one. The grace check logged a missed-tap coaching item;
+    // this info event is the correction so the console can pair them.
+    if (stop.autoArrivedAt !== undefined) {
+      await logSystemEvent(ctx, {
+        severity: 'info',
+        source: 'geofence',
+        code: 'geofence.late_checkin_synced',
+        message:
+          `Driver check-in at stop ${stop.sequenceNumber} of load ${stop.internalId} arrived after the ` +
+          `geofence had already recorded the arrival (${args.replayed ? 'offline-queue replay' : 'late tap'})`,
+        orgId: stop.workosOrgId,
+        context: {
+          stopId: stop._id,
+          loadId: stop.loadId,
+          loadInternalId: stop.internalId,
+          tapAt: checkinTime,
+          detectedAt: stop.autoArrivedAt,
+          replayed: args.replayed ?? false,
+          queuedAt: args.queuedAt,
+          retryCount: args.retryCount,
+        },
+      });
+    }
+
     await ctx.db.patch(args.stopId, {
       checkedInAt: checkinTime,
+      checkedInSync: {
+        receivedAt: serverNow,
+        ...(args.replayed ? { replayed: true } : {}),
+        ...(typeof args.queuedAt === 'number' ? { queuedAt: args.queuedAt } : {}),
+        ...(typeof args.retryCount === 'number' ? { retryCount: args.retryCount } : {}),
+      },
       checkinLatitude: args.latitude,
       checkinLongitude: args.longitude,
       status: 'In Transit',
@@ -1077,6 +1165,12 @@ export const checkOutFromStop = mutation({
     notes: v.optional(v.string()),
     podPhotoUrl: v.optional(v.string()), // S3 URL for proof of delivery photo
     podPhotoKey: v.optional(v.string()), // R2 object key for the same photo
+    // Offline-queue replay provenance (driver app offline-queue.ts). Absent
+    // on live taps and on builds that predate it. Stored next to the tap
+    // so "synced late" is distinguishable from "tapped late" later.
+    replayed: v.optional(v.boolean()),
+    queuedAt: v.optional(v.number()),
+    retryCount: v.optional(v.number()),
   },
   returns: v.object({
     success: v.boolean(),
@@ -1140,15 +1234,44 @@ export const checkOutFromStop = mutation({
       dwellTime = Math.round((checkOutTime - checkInTime) / (1000 * 60)); // minutes
     }
 
+    const checkoutReceivedAt = Date.now();
+    if (stop.autoDepartedAt !== undefined) {
+      await logSystemEvent(ctx, {
+        severity: 'info',
+        source: 'geofence',
+        code: 'geofence.late_checkout_synced',
+        message:
+          `Driver check-out at stop ${stop.sequenceNumber} of load ${stop.internalId} arrived after the ` +
+          `geofence had already recorded the departure (${args.replayed ? 'offline-queue replay' : 'late tap'})`,
+        orgId: stop.workosOrgId,
+        context: {
+          stopId: stop._id,
+          loadId: stop.loadId,
+          loadInternalId: stop.internalId,
+          tapAt: args.driverTimestamp,
+          detectedAt: stop.autoDepartedAt,
+          replayed: args.replayed ?? false,
+          queuedAt: args.queuedAt,
+          retryCount: args.retryCount,
+        },
+      });
+    }
+
     // Use driver's timestamp for check-out time (supports offline scenarios)
     await ctx.db.patch(args.stopId, {
       checkedOutAt: args.driverTimestamp,
+      checkedOutSync: {
+        receivedAt: checkoutReceivedAt,
+        ...(args.replayed ? { replayed: true } : {}),
+        ...(typeof args.queuedAt === 'number' ? { queuedAt: args.queuedAt } : {}),
+        ...(typeof args.retryCount === 'number' ? { retryCount: args.retryCount } : {}),
+      },
       checkoutLatitude: args.latitude,
       checkoutLongitude: args.longitude,
       status: 'Completed',
       dwellTime,
       driverNotes: args.notes || stop.driverNotes,
-      updatedAt: Date.now(), // Server timestamp for audit
+      updatedAt: checkoutReceivedAt, // Server timestamp for audit
     });
 
     // #region agent log
@@ -1220,6 +1343,7 @@ export const checkOutFromStop = mutation({
       await ctx.runMutation(internal.loads.updateLoadStatusInternal, {
         loadId: stop.loadId,
         status: 'Completed',
+        completionSource: 'driver_checkout',
       });
 
       // Close the active leg for this driver-load pair with endReason='completed'.
