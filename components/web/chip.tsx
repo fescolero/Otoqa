@@ -55,12 +55,15 @@ interface ChipProps {
   label?: React.ReactNode;
   dotOnly?: boolean;
   className?: string;
+  /** Hover text — the long form when the chip label is abbreviated. */
+  title?: string;
 }
 
-export function Chip({ status, label, dotOnly, className }: ChipProps) {
+export function Chip({ status, label, dotOnly, className, title }: ChipProps) {
   const p = STATUS_PRESETS[status] ?? STATUS_PRESETS.inactive;
   return (
     <span
+      title={title}
       className={cn(
         'inline-flex items-center gap-1.5 rounded-full whitespace-nowrap',
         'text-[11.5px] font-semibold leading-[18px] tracking-[0.01em]',
