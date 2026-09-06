@@ -1228,7 +1228,8 @@ export const getLoadStops = query({
     stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
 
     const progress = await loadProgressForLoad(ctx, load, stops);
-    const bySeq = new Map(progress.stops.map((p) => [p.sequenceNumber, p]));
+    // Joined by stop id — detour stops can share a sequence number.
+    const byId = new Map(progress.stops.map((p) => [p.stopId, p]));
 
     return stops.map((s) => ({
       _id: s._id,
@@ -1240,7 +1241,7 @@ export const getLoadStops = query({
       checkedInAt: s.checkedInAt ?? null,
       checkedOutAt: s.checkedOutAt ?? null,
       // Derived, provenance-carrying view of the same stop.
-      progress: bySeq.get(s.sequenceNumber) ?? null,
+      progress: byId.get(s._id as string) ?? null,
     }));
   },
 });
@@ -3462,7 +3463,7 @@ export const autoExpireStaleLoads = internalMutation({
         });
         expired++;
 
-        if (expired >= BATCH_SIZE) break;
+        if (expired + reconciled >= BATCH_SIZE) break;
       }
 
       if (expired > 0) {
@@ -3470,7 +3471,7 @@ export const autoExpireStaleLoads = internalMutation({
       }
 
       // Re-schedule if there are more to process
-      if (expired >= BATCH_SIZE) {
+      if (expired + reconciled >= BATCH_SIZE) {
         await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {
           orgId: args.orgId,
           phase: 'in-transit',
@@ -3593,6 +3594,7 @@ export const resolveReference = query({
 export const reconcileStuckLoads = internalMutation({
   args: {
     orgId: v.optional(v.string()),
+    cursor: v.optional(v.string()),
   },
   returns: v.object({ scanned: v.number(), completed: v.number() }),
   handler: async (ctx, args) => {
@@ -3618,16 +3620,24 @@ export const reconcileStuckLoads = internalMutation({
     // trip may still carry trackingStatus 'Pending', so that field is
     // deliberately not part of the scan.
     const today = new Date().toISOString().slice(0, 10);
-    const candidates = await ctx.db
+    const page = await ctx.db
       .query('loadInformation')
       .withIndex('by_org_status_first_stop', (q) =>
         q.eq('workosOrgId', args.orgId!).eq('status', 'Assigned').lte('firstStopDate', today),
       )
       .order('desc')
-      .take(BATCH);
-    for (const load of candidates) {
+      .paginate({ numItems: BATCH, cursor: args.cursor ?? null });
+    for (const load of page.page) {
       scanned++;
       if (await reconcileLoadCompletion(ctx, load._id, 'reconcile')) completed++;
+    }
+    // Page through the whole candidate set, one batch per scheduled run, so
+    // an org with more than BATCH past-pickup Assigned loads is fully swept.
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.loads.reconcileStuckLoads, {
+        orgId: args.orgId,
+        cursor: page.continueCursor,
+      });
     }
     if (completed > 0) {
       console.log(`[reconcileStuckLoads] org=${args.orgId} scanned=${scanned} completed=${completed}`);

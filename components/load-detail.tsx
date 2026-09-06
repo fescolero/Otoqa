@@ -518,7 +518,8 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   const rowLagsStops = progress.status === 'delivered' && loadData.status !== 'Completed';
   const statusChipLabel = rowLagsStops ? 'Delivered · not closed' : progress.label;
   const transitProgressPct = progress.percent;
-  const progressBySeq = new Map(progress.stops.map((p) => [p.sequenceNumber, p]));
+  // Keyed by stop id — detour stops can share a sequence number.
+  const progressById = new Map(progress.stops.map((p) => [p.stopId, p]));
 
   // Delivery on-time roll-up — the SAME rule the leg stamp and the driver
   // KPI use (convex/_helpers/onTime.ts), computed live from this load's
@@ -663,7 +664,13 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   // `margin`, `marginPct` above are still computed because they feed the
   // attention-band "Settlement preview" tile.
 
-  const pickupCheckedIn = !!origin?.checkedInAt;
+  // Arrival evidence from the derived progress (tap or fence), never the
+  // raw tap field alone — a fence-closed pickup is still a pickup.
+  const originProgress = origin ? progressById.get(origin._id as string) : undefined;
+  const finalProgress = finalDeliveryStop ? progressById.get(finalDeliveryStop._id as string) : undefined;
+  const eventTime = (e: { at: number; source: string } | null | undefined) =>
+    e ? `${formatTime(new Date(e.at).toISOString())}${e.source === 'gps' ? ' (GPS)' : e.source === 'reported' ? ' (reported)' : ''}` : '';
+  const pickupCheckedIn = !!originProgress?.arrival;
   const isCompleted = loadData.status === 'Completed';
   const isCanceled = loadData.status === 'Canceled';
   const isExpired = loadData.status === 'Expired';
@@ -780,7 +787,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       icon: 'check',
       tab: 'docs',
       title: hasPOD ? 'POD on file' : 'POD pending',
-      detail: finalDeliveryStop?.checkedInAt ? `Arrived ${formatTime(finalDeliveryStop.checkedInAt)}` : '',
+      detail: finalProgress?.arrival ? `Arrived ${eventTime(finalProgress.arrival)}` : '',
     });
     attentionItems.push({
       tone: 'info',
@@ -829,8 +836,12 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       tone: pickupCheckedIn ? 'ok' : 'warn',
       icon: pickupCheckedIn ? 'check' : 'alert',
       tab: 'docs',
-      title: pickupCheckedIn ? 'BOL — pickup signed' : 'BOL — pickup pending',
-      detail: origin?.checkedInAt ? formatTime(origin.checkedInAt) : 'Awaiting check-in',
+      title: pickupCheckedIn
+        ? originProgress?.arrival?.source === 'gps'
+          ? 'BOL — pickup detected by GPS, no tap'
+          : 'BOL — pickup signed'
+        : 'BOL — pickup pending',
+      detail: originProgress?.arrival ? eventTime(originProgress.arrival) : 'Awaiting check-in',
     });
   }
 
@@ -952,8 +963,8 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   // are taps that arrived after the fence. Unsupported closures (GPS /
   // reported) get the attention tint so they read as inferred, not
   // confirmed.
-  const stopChip = (sequenceNumber: number, rawStatus: string | undefined) => {
-    const p = progressBySeq.get(sequenceNumber);
+  const stopChip = (stopId: string, rawStatus: string | undefined) => {
+    const p = progressById.get(stopId);
     if (!p) return <Chip status={rawStatus === 'Canceled' ? 'cancelled' : 'pending'} />;
     const chipStatus: ChipStatus =
       p.phase === 'canceled'
@@ -1030,7 +1041,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
             key: 'st',
             label: 'Status',
             width: '100px',
-            render: (r) => stopChip(r.sequenceNumber, r.status),
+            render: (r) => stopChip(r._id as string, r.status),
           },
         ]}
         rows={stopRows}
@@ -1169,7 +1180,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       key: 'st',
       label: 'Status',
       width: '110px',
-      render: (r) => stopChip(r.sequenceNumber, r.status),
+      render: (r) => stopChip(r._id as string, r.status),
     },
     {
       key: 'fence',
@@ -1590,7 +1601,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
               icon: 'check',
               tone: 'ok',
               text: hasPOD ? 'POD on file' : 'POD pending',
-              when: finalDeliveryStop?.checkedInAt ? formatTime(finalDeliveryStop.checkedInAt) : '',
+              when: finalProgress?.arrival ? eventTime(finalProgress.arrival) : '',
             },
             {
               icon: 'pulse',

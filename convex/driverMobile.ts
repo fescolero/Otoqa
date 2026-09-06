@@ -18,7 +18,7 @@ import { setFrontierOnCheckIn, releaseFrontierOnLoadComplete } from './loadTrack
 import { pendingLegsForShift } from './lib/legTracking';
 import { logSystemEvent } from './lib/systemEvents';
 import { deriveLoadProgress, loadProgressValidator, stopSyncValidator } from './_helpers/loadProgress';
-import { loadProgressForLoad } from './lib/loadCompletion';
+import { loadProgressForLoad, reconcileLoadCompletion } from './lib/loadCompletion';
 import { closeLeg } from './lib/legOnTime';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
@@ -1064,14 +1064,19 @@ export const checkInAtStop = mutation({
       });
     }
 
+    // A replay of a tap whose first attempt actually landed (timeout path)
+    // must not rewrite the original receipt as "replayed, received later".
+    const checkedInSync = stop.checkedInAt !== undefined && stop.checkedInSync !== undefined
+      ? stop.checkedInSync
+      : {
+          receivedAt: serverNow,
+          ...(args.replayed ? { replayed: true } : {}),
+          ...(typeof args.queuedAt === 'number' ? { queuedAt: args.queuedAt } : {}),
+          ...(typeof args.retryCount === 'number' ? { retryCount: args.retryCount } : {}),
+        };
     await ctx.db.patch(args.stopId, {
       checkedInAt: checkinTime,
-      checkedInSync: {
-        receivedAt: serverNow,
-        ...(args.replayed ? { replayed: true } : {}),
-        ...(typeof args.queuedAt === 'number' ? { queuedAt: args.queuedAt } : {}),
-        ...(typeof args.retryCount === 'number' ? { retryCount: args.retryCount } : {}),
-      },
+      checkedInSync,
       checkinLatitude: args.latitude,
       checkinLongitude: args.longitude,
       status: 'In Transit',
@@ -1259,14 +1264,17 @@ export const checkOutFromStop = mutation({
     }
 
     // Use driver's timestamp for check-out time (supports offline scenarios)
+    const checkedOutSync = stop.checkedOutAt !== undefined && stop.checkedOutSync !== undefined
+      ? stop.checkedOutSync
+      : {
+          receivedAt: checkoutReceivedAt,
+          ...(args.replayed ? { replayed: true } : {}),
+          ...(typeof args.queuedAt === 'number' ? { queuedAt: args.queuedAt } : {}),
+          ...(typeof args.retryCount === 'number' ? { retryCount: args.retryCount } : {}),
+        };
     await ctx.db.patch(args.stopId, {
       checkedOutAt: args.driverTimestamp,
-      checkedOutSync: {
-        receivedAt: checkoutReceivedAt,
-        ...(args.replayed ? { replayed: true } : {}),
-        ...(typeof args.queuedAt === 'number' ? { queuedAt: args.queuedAt } : {}),
-        ...(typeof args.retryCount === 'number' ? { retryCount: args.retryCount } : {}),
-      },
+      checkedOutSync,
       checkoutLatitude: args.latitude,
       checkoutLongitude: args.longitude,
       status: 'Completed',
@@ -1379,6 +1387,11 @@ export const checkOutFromStop = mutation({
         )
         .first();
       await releaseFrontierOnLoadComplete(ctx, stop.loadId, Date.now(), activeSession?._id);
+    } else {
+      // Not the last stop by sequence, but it may be the last OPEN one — the
+      // fence or a status report can close later stops before this tap
+      // (offline replay). The driver's tap is then what completes the load.
+      await reconcileLoadCompletion(ctx, stop.loadId, 'driver_checkout');
     }
 
     return { success: true, message: 'Checked out successfully' };
@@ -1456,6 +1469,11 @@ export const updateStopStatus = mutation({
         trackingStatus: 'Delayed',
         updatedAt: Date.now(),
       });
+    }
+
+    // Completing or canceling a stop can close the load's last open stop.
+    if (args.status === 'Completed' || args.status === 'Canceled') {
+      await reconcileLoadCompletion(ctx, stop.loadId, 'driver_checkout');
     }
 
     return { success: true, message: `Status updated to ${args.status}` };

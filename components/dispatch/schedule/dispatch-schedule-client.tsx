@@ -46,7 +46,7 @@ interface TripBar {
   // Server-derived (dispatchLegs.scheduleDisplayStatus): the load's
   // progress decides, the leg row only refines. 'ended' = the leg closed
   // (shift end, handoff) but the load is not delivered.
-  status: 'completed' | 'in-transit' | 'assigned' | 'open' | 'ended';
+  status: 'completed' | 'in-transit' | 'assigned' | 'open' | 'ended' | 'canceled';
   orderNumber: string;
   hcr: string | null;
   tripNumber: string | null;
@@ -97,7 +97,8 @@ const TRIP_STATUS = {
   'in-transit': { bg: 'var(--bar-intransit-bg)', bd: 'var(--bar-intransit-bd)', fg: 'var(--bar-intransit-fg)', label: 'In transit' },
   assigned: { bg: 'var(--bar-assigned-bg)', bd: 'var(--bar-assigned-bd)', fg: 'var(--bar-assigned-fg)', label: 'Assigned' },
   open: { bg: 'var(--bar-open-bg)', bd: 'var(--bar-open-bd)', fg: 'var(--bar-open-fg)', label: 'Open' },
-  ended: { bg: 'var(--bar-open-bg)', bd: 'var(--bar-open-bd)', fg: 'var(--bar-open-fg)', label: 'Ended · load open' },
+  ended: { bg: 'var(--bar-ended-bg)', bd: 'var(--bar-ended-bd)', fg: 'var(--bar-ended-fg)', label: 'Ended · load open' },
+  canceled: { bg: 'var(--bar-canceled-bg)', bd: 'var(--bar-canceled-bd)', fg: 'var(--bar-canceled-fg)', label: 'Cancelled' },
 } as const;
 
 const cityState = (city: string | null, state: string | null) => {
@@ -112,6 +113,7 @@ const mapDisplayStatus = (s: string): TripBar['status'] => {
   if (s === 'in_transit') return 'in-transit';
   if (s === 'open') return 'open';
   if (s === 'ended') return 'ended';
+  if (s === 'canceled') return 'canceled';
   return 'assigned';
 };
 
@@ -679,7 +681,9 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
         <LegendDot color={TRIP_STATUS['in-transit'].bg} bd={TRIP_STATUS['in-transit'].bd} label="In transit" />
         <LegendDot color={TRIP_STATUS['assigned'].bg} bd={TRIP_STATUS['assigned'].bd} label="Assigned" />
         <LegendDot color={TRIP_STATUS['completed'].bg} bd={TRIP_STATUS['completed'].bd} label="Completed" />
+        <LegendDot color={TRIP_STATUS['open'].bg} bd={TRIP_STATUS['open'].bd} label="Open" />
         <LegendDot color={TRIP_STATUS['ended'].bg} bd={TRIP_STATUS['ended'].bd} label="Ended · load open" />
+        <LegendDot color={TRIP_STATUS['canceled'].bg} bd={TRIP_STATUS['canceled'].bd} label="Cancelled" />
         <span className="inline-flex items-center gap-1.5">
           <span style={{ width: 14, height: 10, borderRadius: 3, background: '#FCE7E7', border: '1.5px solid #DC2626' }} />
           Conflict
@@ -1001,7 +1005,11 @@ function DetailDrawer({
   // Reassign is a driver-to-driver handoff, so it needs a driver row and a
   // load that isn't already delivered. Carrier bars and completed legs keep
   // the button visible but disabled.
-  const canReassign = Boolean(trip.loadId && driverId && trip.status !== 'completed');
+  // Handoff needs a live leg on the from-driver: not after delivery, not
+  // after the leg ended, not on a canceled load.
+  const canReassign = Boolean(
+    trip.loadId && driverId && trip.status !== 'completed' && trip.status !== 'ended' && trip.status !== 'canceled',
+  );
   return (
     <div
       // Flex sibling (not absolute) so the schedule body's flex-1 width

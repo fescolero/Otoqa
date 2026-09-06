@@ -1586,7 +1586,7 @@ export const getDriverSchedule = query({
  * leg row only decides between "not started" and "under way" and flags a
  * leg that ended without the load being delivered (shift end, handoff).
  */
-export type ScheduleDisplayStatus = 'open' | 'assigned' | 'in_transit' | 'completed' | 'ended';
+export type ScheduleDisplayStatus = 'open' | 'assigned' | 'in_transit' | 'completed' | 'ended' | 'canceled';
 export function scheduleDisplayStatus(
   leg: { status: Doc<'dispatchLegs'>['status'] },
   progress: LoadProgress | null,
@@ -1595,7 +1595,7 @@ export function scheduleDisplayStatus(
     return leg.status === 'COMPLETED' ? 'completed' : leg.status === 'ACTIVE' ? 'in_transit' : 'assigned';
   }
   if (progress.status === 'delivered') return 'completed';
-  if (progress.status === 'canceled' || progress.status === 'expired') return 'ended';
+  if (progress.status === 'canceled' || progress.status === 'expired') return 'canceled';
   if (leg.status === 'COMPLETED') return 'ended';
   if (progress.status === 'in_transit' || leg.status === 'ACTIVE') return 'in_transit';
   if (progress.status === 'open') return 'open';
@@ -1649,10 +1649,10 @@ export const getOrgSchedule = query({
         const progress = load ? await loadProgressForLoad(ctx, load) : null;
         const displayStatus = scheduleDisplayStatus(leg, progress);
         const startProgress = startStop
-          ? (progress?.stops.find((p) => p.sequenceNumber === startStop.sequenceNumber) ?? null)
+          ? (progress?.stops.find((p) => p.stopId === (startStop._id as string)) ?? null)
           : null;
         const endProgress = endStop
-          ? (progress?.stops.find((p) => p.sequenceNumber === endStop.sequenceNumber) ?? null)
+          ? (progress?.stops.find((p) => p.stopId === (endStop._id as string)) ?? null)
           : null;
 
         return {

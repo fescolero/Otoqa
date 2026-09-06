@@ -703,7 +703,7 @@ export const listDriverHistory = query({
                 ? 'IN_PROGRESS'
                 : 'AWARDED',
         statusLabel: legEnded
-          ? `Ended · load ${progress?.label.toLowerCase() ?? 'open'}`
+          ? `Ended · load ${progress?.status === 'in_transit' ? 'in transit' : (progress?.status ?? 'open')}`
           : (progress?.label ?? (leg.status === 'ACTIVE' ? 'In transit' : 'Scheduled')),
         progress,
         completedAt: leg.endedAt ?? null,
