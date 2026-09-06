@@ -85,7 +85,13 @@ export default function LoadDetailScreen() {
     );
   }
 
-  const rolling = load.legStatus === 'ACTIVE' || load.trackingStatus === 'In Transit';
+  // Status from the server's derived progress (same source as the web
+  // load page and the driver app); the leg/tracking fields are only a
+  // fallback for a server that predates `progress`.
+  const rolling = load.progress
+    ? load.progress.status === 'in_transit'
+    : load.legStatus === 'ACTIVE' || load.trackingStatus === 'In Transit';
+  const statusText = load.progress?.label ?? (rolling ? 'In transit' : (load.trackingStatus ?? load.status));
   const title = loadIdentity(load);
   const loadNumber = displayLoadId(load.internalId);
 
@@ -113,7 +119,7 @@ export default function LoadDetailScreen() {
           )}
         </View>
         <Text style={{ color: rolling ? colors.primary : colors.foregroundMuted, fontSize: typography.xs, fontWeight: typography.bold }}>
-          {rolling ? 'In transit' : (load.trackingStatus ?? load.status)}
+          {statusText}
         </Text>
       </View>
 

@@ -147,6 +147,13 @@
   --bar-open-bg:       #FBE7C2;
   --bar-open-bd:       #E8B665;
   --bar-open-fg:       #8C5200;
+  /* leg ended (shift end / handoff) while the load is still open */
+  --bar-ended-bg:      #FDE2E2;
+  --bar-ended-bd:      #E39A9A;
+  --bar-ended-fg:      #9B2C2C;
+  --bar-canceled-bg:   #ECEEF2;
+  --bar-canceled-bd:   #C2C7D2;
+  --bar-canceled-fg:   #8A90A0;
 
   /* === Density (compact default) === */
   --row-h-compact: 36px;
@@ -259,6 +266,12 @@
   --bar-open-bg:       #362A1A;
   --bar-open-bd:       rgba(220, 180, 100, 0.55);
   --bar-open-fg:       #F0C684;
+  --bar-ended-bg:      #3A2224;
+  --bar-ended-bd:      rgba(230, 140, 140, 0.55);
+  --bar-ended-fg:      #F2A8A8;
+  --bar-canceled-bg:   #24272F;
+  --bar-canceled-bd:   rgba(255, 255, 255, 0.14);
+  --bar-canceled-fg:   #8A90A0;
 }
 
 /* Comfortable density — taller rows, larger controls */

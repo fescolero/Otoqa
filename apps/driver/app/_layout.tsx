@@ -207,13 +207,21 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
     // Set up the mutation processor for the offline queue
     setMutationProcessor(async (mutation: QueuedMutation) => {
       const { type, payload, photoPath } = mutation;
+      // Replay provenance for the tap mutations: the server stores it next
+      // to the tap so dispatch can tell "tapped in time, synced late" from
+      // "tapped late" from "never tapped" (convex/_helpers/loadProgress).
+      const replayMeta = {
+        replayed: true,
+        queuedAt: mutation.queuedAt,
+        retryCount: mutation.retryCount,
+      };
 
       switch (type) {
         case 'checkIn': {
           // checkInAtStop signals rejection via { success: false } rather
           // than throwing — surface it as a permanent failure instead of
           // letting the queue mark the entry completed.
-          const result = await checkInMutation(payload as any);
+          const result = await checkInMutation({ ...(payload as any), ...replayMeta });
           if (result && result.success === false) {
             throw new NonRetryableError(result.message || 'Check-in was rejected');
           }
@@ -257,6 +265,7 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
 
           const checkOutResult = await checkOutMutation({
             ...checkOutArgs,
+            ...replayMeta,
             ...(podPhotoUrl ? { podPhotoUrl, podPhotoKey } : {}),
           });
           if (checkOutResult && checkOutResult.success === false) {

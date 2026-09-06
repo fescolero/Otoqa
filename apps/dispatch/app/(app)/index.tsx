@@ -592,7 +592,7 @@ export default function BoardScreen() {
                       </Pressable>
                     )}
                     <Text style={{ color: row.status === 'IN_PROGRESS' ? colors.primary : colors.warning, fontSize: typography.xs, fontWeight: typography.bold }}>
-                      {row.status === 'IN_PROGRESS' ? 'In transit' : 'Awarded'}
+                      {row.status === 'IN_PROGRESS' ? (row.progress?.label ?? 'In transit') : 'Awarded'}
                     </Text>
                   </View>
                 </View>

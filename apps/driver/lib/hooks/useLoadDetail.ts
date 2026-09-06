@@ -20,7 +20,7 @@ export function useLoadDetail(
   driverId: Id<'drivers'> | null
 ) {
   const { connectionQuality } = useNetworkStatus();
-  const [cachedData, setCachedData] = useState<{ load: any; stops: any[] } | null>(null);
+  const [cachedData, setCachedData] = useState<{ load: any; stops: any[]; progress?: any } | null>(null);
   const [cacheLoaded, setCacheLoaded] = useState(false);
 
   // Only fetch from Convex when connection is good
@@ -74,6 +74,11 @@ export function useLoadDetail(
   return {
     load: displayData?.load ?? null,
     stops: displayData?.stops ?? [],
+    // Server-derived status / percent / per-stop provenance — the same
+    // object the web load page and the dispatch Schedule render. Null on
+    // cache blobs written before it existed; callers fall back to raw
+    // stop fields only then.
+    progress: displayData?.progress ?? null,
     isLoading,
     isOffline,
     isCached: isOffline && cachedData !== null,

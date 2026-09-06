@@ -2,6 +2,8 @@ import { ConvexError, v } from 'convex/values';
 import { query, mutation, internalMutation, QueryCtx, MutationCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
+import { reconcileLoadCompletion } from './lib/loadCompletion';
+import { closeLeg } from './lib/legOnTime';
 import { requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { resolveAuthenticatedDriver } from './driverMobile';
 import {
@@ -91,13 +93,16 @@ export async function endSessionInternal(
 
   const affectedLegIds: Id<'dispatchLegs'>[] = [];
   for (const leg of activeLegs) {
-    await ctx.db.patch(leg._id, {
-      status: 'COMPLETED',
-      endedAt,
-      endReason: 'session_ended',
-      updatedAt: endedAt,
-    });
+    // Pay is scheduled below, after the session row is closed, so the
+    // completed-work gate sees the closed shift.
+    await closeLeg(ctx, leg, { endReason: 'session_ended', endedAt, actor: 'system:session_end', schedulePay: false });
     affectedLegIds.push(leg._id);
+    // Closing the leg used to leave its load at Assigned / In Transit even
+    // when every stop was already closed — the Schedule said Completed
+    // while the load page said In transit. Complete the load when its
+    // stops say so (completionSource 'session_end'); otherwise leave it
+    // open for dispatch, which is the honest state.
+    await reconcileLoadCompletion(ctx, leg.loadId, 'session_end');
   }
 
   await ctx.db.patch(session._id, {

@@ -205,6 +205,15 @@ crons.cron(
   job('auto-expire-stale-loads', 'loads:autoExpireStaleLoads', 'mutation', HOUR),
 );
 
+// ✅ Reconcile loads whose stops all closed without the load completing
+// (hourly; write-time reconcile is primary, this is the safety net)
+crons.cron(
+  'reconcile-stuck-loads',
+  '30 * * * *',
+  internal.platform.cronRunner.run,
+  job('reconcile-stuck-loads', 'loads:reconcileStuckLoads', 'mutation', HOUR),
+);
+
 // ==========================================
 // DRIVER SESSION SYSTEM
 // ==========================================

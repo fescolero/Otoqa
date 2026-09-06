@@ -115,7 +115,7 @@ export default function TripDetailScreen() {
   const { uploadDocument } = useUploadDocument(getFreshLocation);
   const posthog = usePostHog();
 
-  const { load, stops, isLoading, hasNoData } = useLoadDetail(id as Id<'loadInformation'>, driverId);
+  const { load, stops, progress, isLoading, hasNoData } = useLoadDetail(id as Id<'loadInformation'>, driverId);
 
   // Check-in modal state
   const [checkInModal, setCheckInModal] = useState<{
@@ -245,19 +245,62 @@ export default function TripDetailScreen() {
     reconcilePendingActions(id, stops).then(setPendingActions);
   }, [id, stops]);
 
-  // Merge pending actions into stops for display
+  // Merge pending actions into stops for display. Each stop also carries
+  // the server's derived phase (`phase`: pending / arrived / departed /
+  // canceled) and the provenance of its close (`closeSource`: manual, gps,
+  // manual_late_sync, …) — the SAME derivation the web and the Schedule
+  // render (convex/_helpers/loadProgress) — overlaid with this phone's
+  // not-yet-synced taps. Nothing below decides "done" from raw
+  // checkedOutAt / status any more.
   const displayStops = useMemo(() => {
+    // Keyed by stop id — detour stops can share a sequence number.
+    const byId = new Map<string, any>((progress?.stops ?? []).map((p: any) => [p.stopId, p]));
     return stops.map((stop: any) => {
+      const p = byId.get(String(stop._id));
+      // Fallback for cache blobs that predate `progress`: derive locally
+      // from the raw fields, the way the server does.
+      const basePhase: 'pending' | 'arrived' | 'departed' | 'canceled' = p
+        ? p.phase
+        : stop.status === 'Canceled'
+          ? 'canceled'
+          : stop.status === 'Completed' || stop.checkedOutAt
+            ? 'departed'
+            : stop.checkedInAt
+              ? 'arrived'
+              : 'pending';
       const pending = pendingActions[stop._id];
-      if (!pending) return stop;
+      const phase =
+        pending?.type === 'out'
+          ? 'departed'
+          : pending?.type === 'in' && basePhase === 'pending'
+            ? 'arrived'
+            : basePhase;
+      // The phone's tap only explains the displayed phase when it produced
+      // it: a pending check-in on a stop the server already closed by GPS
+      // must still read as a GPS closure.
+      const overlayDrivesPhase =
+        pending?.type === 'out' || (pending?.type === 'in' && basePhase !== 'departed');
+      // Times to display: the tap when there is one, else the server's
+      // attributed event (fence / report) so a closed stop never shows blank.
+      const arrivedIso =
+        (pending?.type === 'in' ? pending.timestamp : stop.checkedInAt) ??
+        (p?.arrival ? new Date(p.arrival.at).toISOString() : undefined);
+      const departedIso =
+        (pending?.type === 'out' ? pending.timestamp : stop.checkedOutAt) ??
+        (p?.departure ? new Date(p.departure.at).toISOString() : undefined);
       return {
         ...stop,
-        checkedInAt: pending.type === 'in' ? pending.timestamp : stop.checkedInAt,
-        checkedOutAt: pending.type === 'out' ? pending.timestamp : stop.checkedOutAt,
-        pendingSync: true,
+        checkedInAt: pending?.type === 'in' ? pending.timestamp : stop.checkedInAt,
+        checkedOutAt: pending?.type === 'out' ? pending.timestamp : stop.checkedOutAt,
+        arrivedIso,
+        departedIso,
+        pendingSync: !!pending,
+        phase,
+        closeSource: overlayDrivesPhase ? 'manual' : (p?.departure?.source ?? p?.arrival?.source ?? null),
+        supported: overlayDrivesPhase ? true : (p?.supported ?? true),
       };
     });
-  }, [stops, pendingActions]);
+  }, [stops, progress, pendingActions]);
 
   // Record a pending action (optimistic + persisted)
   const recordPendingAction = useCallback(
@@ -761,20 +804,33 @@ export default function TripDetailScreen() {
     return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
   };
 
-  // Get load status display
+  // Load status display — from the server's derived status, with this
+  // phone's unsynced taps counting as activity.
   const getStatusDisplay = () => {
     if (!load) return { text: 'Unknown', color: colors.muted };
 
-    const status = load.trackingStatus || load.status;
+    const hasLocalActivity = Object.keys(pendingActions).length > 0;
+    const derived: string | undefined = progress?.status;
+    const status =
+      derived ??
+      // Cache blobs from before `progress` existed.
+      (load.status === 'Completed' || load.trackingStatus === 'Completed'
+        ? 'delivered'
+        : load.trackingStatus === 'In Transit'
+          ? 'in_transit'
+          : 'assigned');
     switch (status) {
-      case 'In Transit':
-      case 'At Pickup':
-      case 'At Delivery':
-        return { text: 'Active', color: colors.primary };
-      case 'Completed':
+      case 'delivered':
         return { text: 'Completed', color: colors.success };
+      case 'in_transit':
+        return { text: 'Active', color: colors.primary };
+      case 'canceled':
+      case 'expired':
+        return { text: 'Cancelled', color: colors.muted };
       default:
-        return { text: 'Scheduled', color: colors.secondary };
+        return hasLocalActivity
+          ? { text: 'Active', color: colors.primary }
+          : { text: 'Scheduled', color: colors.secondary };
     }
   };
 
@@ -782,7 +838,7 @@ export default function TripDetailScreen() {
   const getCurrentStopIndex = () => {
     for (let i = 0; i < displayStops.length; i++) {
       const stop = displayStops[i];
-      if (stop.status !== 'Completed' && !stop.checkedOutAt) {
+      if (stop.phase !== 'departed' && stop.phase !== 'canceled') {
         return i;
       }
     }
@@ -836,7 +892,7 @@ export default function TripDetailScreen() {
 
   const statusDisplay = getStatusDisplay();
   const currentStopIndex = getCurrentStopIndex();
-  const activeCheckedInStop = displayStops.find((stop: any) => !!stop.checkedInAt && !stop.checkedOutAt) ?? null;
+  const activeCheckedInStop = displayStops.find((stop: any) => stop.phase === 'arrived') ?? null;
 
   return (
     <>
@@ -881,7 +937,7 @@ export default function TripDetailScreen() {
                 });
               }
               const nextStop =
-                displayStops.find((s) => !s.checkedOutAt) ?? displayStops[0];
+                displayStops.find((s) => s.phase !== 'departed' && s.phase !== 'canceled') ?? displayStops[0];
               if (
                 nextStop &&
                 (nextStop.address ||
@@ -990,9 +1046,19 @@ export default function TripDetailScreen() {
             {displayStops.map((stop: any, index: number) => {
               const isDetour = stop.stopType === 'DETOUR';
               const isPickup = stop.stopType === 'PICKUP';
-              const isCompleted =
-                stop.status === 'Completed' || !!stop.checkedOutAt;
-              const isCheckedIn = !!stop.checkedInAt && !stop.checkedOutAt;
+              const isCompleted = stop.phase === 'departed';
+              const isCheckedIn = stop.phase === 'arrived';
+              // How the stop was closed, when not by this driver's tap.
+              const closeNote =
+                stop.closeSource === 'gps'
+                  ? 'GPS'
+                  : stop.closeSource === 'manual_late_sync'
+                    ? 'SYNCED LATE'
+                    : stop.closeSource === 'manual_late_tap'
+                      ? 'TAPPED LATE'
+                      : stop.closeSource === 'reported'
+                        ? 'REPORTED'
+                        : '';
               const isCurrent = index === currentStopIndex;
               const isLast = index === displayStops.length - 1;
               const isPendingSync = !!(stop as any).pendingSync;
@@ -1119,6 +1185,7 @@ export default function TripDetailScreen() {
                     >
                       {kindLabel.toUpperCase()}
                       {isCompleted && !isDetour ? ' · DONE' : ''}
+                      {isCompleted && closeNote ? ` · ${closeNote}` : ''}
                     </Text>
 
                     <Text
@@ -1177,7 +1244,7 @@ export default function TripDetailScreen() {
                           {windowText}
                         </Text>
                       )}
-                      {(stop.checkedInAt || stop.checkedOutAt) && (
+                      {(stop.arrivedIso || stop.departedIso) && (
                         <Text
                           style={{
                             fontSize: 12,
@@ -1186,13 +1253,13 @@ export default function TripDetailScreen() {
                           }}
                         >
                           {!isDetour && windowText ? '· ' : ''}
-                          {compactTime(stop.checkedInAt)}
-                          {stop.checkedOutAt
-                            ? ` → ${compactTime(stop.checkedOutAt)}`
+                          {compactTime(stop.arrivedIso)}
+                          {stop.departedIso
+                            ? ` → ${compactTime(stop.departedIso)}`
                             : ''}
                         </Text>
                       )}
-                      {!windowText && !stop.checkedInAt && !isDetour && (
+                      {!windowText && !stop.arrivedIso && !isDetour && (
                         <Text
                           style={{
                             fontSize: 12,
@@ -1373,7 +1440,7 @@ export default function TripDetailScreen() {
               // Navigate the next stop that isn't completed yet. Falls back
               // to the first stop if everything's done (edge case).
               const target =
-                displayStops.find((s) => !s.checkedOutAt) ?? displayStops[0];
+                displayStops.find((s) => s.phase !== 'departed' && s.phase !== 'canceled') ?? displayStops[0];
               if (
                 target &&
                 (target.address ||
@@ -1960,13 +2027,15 @@ function LoadSummary({
   activeCheckedInStop: any | null;
   statusDisplay: { text: string; color: string };
 }) {
-  const plannedStops = displayStops.filter((s) => s.stopType !== 'DETOUR');
+  // Same rule as the server (convex/_helpers/loadProgress): counted stops
+  // are non-detour, non-canceled; done means departed by any source.
+  const plannedStops = displayStops.filter((s) => s.stopType !== 'DETOUR' && s.phase !== 'canceled');
   const total = plannedStops.length || 1;
-  const done = plannedStops.filter((s) => !!s.checkedOutAt).length;
+  const done = plannedStops.filter((s) => s.phase === 'departed').length;
   const onDetour =
     activeCheckedInStop && activeCheckedInStop.stopType === 'DETOUR';
   const hasDetour = displayStops.some(
-    (s) => s.stopType === 'DETOUR' && !s.checkedOutAt,
+    (s) => s.stopType === 'DETOUR' && s.phase !== 'departed' && s.phase !== 'canceled',
   );
   const progressPct = Math.min((done / total) * 100, 100);
 

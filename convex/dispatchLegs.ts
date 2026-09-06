@@ -9,6 +9,8 @@ import {
 } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc, TableNames } from './_generated/dataModel';
+import { loadProgressForLoad } from './lib/loadCompletion';
+import type { LoadProgress } from './_helpers/loadProgress';
 import {
   getLegTimeRange,
   doTimeRangesOverlap,
@@ -23,7 +25,7 @@ import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from '
 import { logAudit } from './lib/audit';
 import { transferFrontierToDriver } from './loadTrackingState';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
-import { computeLegOnTime } from './lib/legOnTime';
+import { closeLeg } from './lib/legOnTime';
 import { getLoadFacets } from './lib/loadFacets';
 
 /**
@@ -1579,6 +1581,27 @@ export const getDriverSchedule = query({
 // leg in an org whose time range intersects [startMs, endMs], enriched
 // with the order number and start/end stop city we need to render each
 // bar. The caller groups the result by driverId / carrierPartnershipId.
+/**
+ * What a Schedule bar says. Derived from the load's progress first; the
+ * leg row only decides between "not started" and "under way" and flags a
+ * leg that ended without the load being delivered (shift end, handoff).
+ */
+export type ScheduleDisplayStatus = 'open' | 'assigned' | 'in_transit' | 'completed' | 'ended' | 'canceled';
+export function scheduleDisplayStatus(
+  leg: { status: Doc<'dispatchLegs'>['status'] },
+  progress: LoadProgress | null,
+): ScheduleDisplayStatus {
+  if (!progress) {
+    return leg.status === 'COMPLETED' ? 'completed' : leg.status === 'ACTIVE' ? 'in_transit' : 'assigned';
+  }
+  if (progress.status === 'delivered') return 'completed';
+  if (progress.status === 'canceled' || progress.status === 'expired') return 'canceled';
+  if (leg.status === 'COMPLETED') return 'ended';
+  if (progress.status === 'in_transit' || leg.status === 'ACTIVE') return 'in_transit';
+  if (progress.status === 'open') return 'open';
+  return 'assigned';
+}
+
 export const getOrgSchedule = query({
   args: {
     workosOrgId: v.string(),
@@ -1619,11 +1642,26 @@ export const getOrgSchedule = query({
           getLoadFacets(ctx, leg.loadId),
         ]);
 
+        // The bar's status comes from the load's derived progress — the
+        // same object the load page renders — not from the leg row alone.
+        // A leg closed by a shift end or a handoff on a load that is not
+        // delivered reads as what it is: ended, load still open.
+        const progress = load ? await loadProgressForLoad(ctx, load) : null;
+        const displayStatus = scheduleDisplayStatus(leg, progress);
+        const startProgress = startStop
+          ? (progress?.stops.find((p) => p.stopId === (startStop._id as string)) ?? null)
+          : null;
+        const endProgress = endStop
+          ? (progress?.stops.find((p) => p.stopId === (endStop._id as string)) ?? null)
+          : null;
+
         return {
           _id: leg._id,
           driverId: leg.driverId ?? null,
           carrierPartnershipId: leg.carrierPartnershipId ?? null,
           status: leg.status,
+          endReason: leg.endReason ?? null,
+          displayStatus,
           startMs: start,
           endMs: end,
           startedAt: leg.startedAt ?? null,
@@ -1634,8 +1672,22 @@ export const getOrgSchedule = query({
                 orderNumber: load.orderNumber,
                 internalId: load.internalId,
                 status: load.status,
+                progress: progress
+                  ? {
+                      status: progress.status,
+                      label: progress.label,
+                      percent: progress.percent,
+                      stopsTotal: progress.stopsTotal,
+                      stopsClosed: progress.stopsClosed,
+                      evidence: progress.evidence,
+                      evidenceLabel: progress.evidenceLabel,
+                      completionSource: progress.completionSource,
+                    }
+                  : null,
               }
             : null,
+          startProgress,
+          endProgress,
           hcr: facets.hcr ?? null,
           tripNumber: facets.trip ?? null,
           startCity: startStop?.city ?? null,
@@ -1854,19 +1906,13 @@ export const completeLeg = internalMutation({
   handler: async (ctx, args) => {
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new ConvexError('Leg not found');
-    if (leg.status === 'COMPLETED') return null; // idempotent
-
-    const onTime = await computeLegOnTime(ctx, leg);
-    await ctx.db.patch(args.legId, {
-      status: 'COMPLETED',
-      endedAt: args.endedAt,
+    // Idempotent; stamps on-time and schedules the pay recalc
+    // (lib/legOnTime.closeLeg — the one close path).
+    await closeLeg(ctx, leg, {
       endReason: args.endReason,
-      updatedAt: args.endedAt,
-      ...onTime,
+      endedAt: args.endedAt,
+      actor: 'system:leg_completed',
     });
-    // Completion is a pricing event (completed-work gate in
-    // calculatePayForLeg): schedule the recalc that writes the leg's items.
-    await scheduleLegPayRecalc(ctx, args.legId, 'system:leg_completed');
     return null;
   },
 });
@@ -1954,18 +2000,9 @@ export const handoffLoad = mutation({
       if (frontierStop) newLegStartStopId = frontierStop._id;
     }
 
-    // Complete the old leg (stamping on-time for the deliveries it made).
-    const oldLegOnTime = await computeLegOnTime(ctx, oldLeg);
-    await ctx.db.patch(oldLeg._id, {
-      status: 'COMPLETED',
-      endedAt: now,
-      endReason: 'handoff',
-      updatedAt: now,
-      ...oldLegOnTime,
-    });
-    // Completion is a pricing event (completed-work gate): re-price the
-    // from-driver's finished portion.
-    await scheduleLegPayRecalc(ctx, oldLeg._id, caller.userId);
+    // Complete the old leg (stamping on-time for the deliveries it made)
+    // and re-price the from-driver's finished portion.
+    await closeLeg(ctx, oldLeg, { endReason: 'handoff', endedAt: now, actor: caller.userId });
 
     // Determine new leg sequence.
     const allLegs = await ctx.db

@@ -15,6 +15,25 @@ import { logAudit } from './lib/audit';
 import { raiseAlert } from './dispatchAlerts';
 import { createLoadArgs, createLoadForOrg } from './loads';
 import type { Doc, Id } from './_generated/dataModel';
+import { deriveLoadProgress, type LoadProgress } from './_helpers/loadProgress';
+
+// The compact progress every dispatcher-mobile row carries — the same
+// derivation (_helpers/loadProgress) the web load page, the driver app and
+// the Schedule render, so a load reads the same everywhere.
+function compactProgress(load: Doc<'loadInformation'> | null, stops: Doc<'loadStops'>[]) {
+  if (!load) return null;
+  const p: LoadProgress = deriveLoadProgress(load, stops);
+  return {
+    status: p.status,
+    label: p.label,
+    percent: p.percent,
+    stopsTotal: p.stopsTotal,
+    stopsClosed: p.stopsClosed,
+    evidence: p.evidence,
+    evidenceLabel: p.evidenceLabel,
+    completionSource: p.completionSource,
+  };
+}
 
 // The mobile create-load surface: the web validator set minus the fields
 // the server derives from the caller (org + performer identity).
@@ -383,6 +402,7 @@ export const listActiveAssignments = query({
         return {
           ...assignment,
           source: 'assignment' as const,
+          progress: compactProgress(load, stops),
           load: load
             ? {
                 _id: load._id,
@@ -447,10 +467,17 @@ export const listActiveAssignments = query({
       const facets = load
         ? await getLoadFacets(ctx, load._id)
         : { hcr: undefined, trip: undefined, all: [] as { key: string; value: string }[] };
+      const progress = compactProgress(load, stops);
       legRows.push({
         _id: leg._id as string,
         source: 'leg' as const,
-        status: leg.status === 'ACTIVE' ? ('IN_PROGRESS' as const) : ('AWARDED' as const),
+        // Rolling = the load's derived status says so (a stop was touched
+        // or tracking is live), not merely that the leg row is ACTIVE.
+        status:
+          progress?.status === 'in_transit' || progress?.status === 'delivered'
+            ? ('IN_PROGRESS' as const)
+            : ('AWARDED' as const),
+        progress,
         assignedDriverId: leg.driverId ?? null,
         load: load
           ? {
@@ -491,6 +518,7 @@ export const listActiveAssignments = query({
             loadId: load._id,
             source: 'open' as const,
             status: 'AWARDED' as const,
+            progress: compactProgress(load, stops),
             openBacklogTruncated: truncated,
             load: {
               _id: load._id,
@@ -581,6 +609,11 @@ export const listDriverHistory = query({
     const out: {
       _id: string;
       status: 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED';
+      // Human status from the shared derivation ("In transit", "Delivered",
+      // "Ended · load open") so the app and the voice agent say the same
+      // thing the web says.
+      statusLabel: string;
+      progress: ReturnType<typeof compactProgress>;
       completedAt: number | null;
       loadId: string;
       internalId: string | null;
@@ -606,9 +639,14 @@ export const listDriverHistory = query({
       const facets: { trip?: string; hcr?: string } = load
         ? await getLoadFacets(ctx, load._id)
         : {};
+      const progress = compactProgress(load, stops);
       out.push({
         _id: assignment._id,
         status: assignment.status as 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED',
+        statusLabel:
+          progress?.label ??
+          (assignment.status === 'COMPLETED' ? 'Delivered' : assignment.status === 'IN_PROGRESS' ? 'In transit' : 'Scheduled'),
+        progress,
         completedAt: assignment.completedAt ?? null,
         loadId: assignment.loadId as string,
         internalId: load?.internalId ?? null,
@@ -649,10 +687,25 @@ export const listDriverHistory = query({
       const facets: { trip?: string; hcr?: string } = load
         ? await getLoadFacets(ctx, load._id)
         : {};
+      const progress = compactProgress(load, stops);
+      // A leg that ended (shift end, handoff) on a load that is not
+      // delivered is reported as COMPLETED for the day's history — that
+      // driver's part is over — but the label says the load is still open.
+      const legEnded = leg.status === 'COMPLETED' && progress?.status !== 'delivered';
       out.push({
         _id: leg._id,
         status:
-          leg.status === 'ACTIVE' ? 'IN_PROGRESS' : leg.status === 'PENDING' ? 'AWARDED' : 'COMPLETED',
+          progress?.status === 'delivered'
+            ? 'COMPLETED'
+            : leg.status === 'COMPLETED'
+              ? 'COMPLETED'
+              : progress?.status === 'in_transit' || leg.status === 'ACTIVE'
+                ? 'IN_PROGRESS'
+                : 'AWARDED',
+        statusLabel: legEnded
+          ? `Ended · load ${progress?.status === 'in_transit' ? 'in transit' : (progress?.status ?? 'open')}`
+          : (progress?.label ?? (leg.status === 'ACTIVE' ? 'In transit' : 'Scheduled')),
+        progress,
         completedAt: leg.endedAt ?? null,
         loadId: leg.loadId as string,
         internalId: load?.internalId ?? null,
@@ -1981,6 +2034,8 @@ export const getLoadDetail = query({
       tripNumber: facets.trip ?? null,
       hcr: facets.hcr ?? null,
       legStatus: liveLeg?.status ?? null,
+      // Derived status / percent / per-stop provenance (_helpers/loadProgress).
+      progress: deriveLoadProgress(load, stops),
       driver: driver
         ? { _id: driver._id, firstName: driver.firstName, lastName: driver.lastName, phone: driver.phone }
         : null,
