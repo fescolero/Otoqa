@@ -16,6 +16,7 @@ import { deleteFrontierForLoad, releaseFrontierOnLoadComplete } from './loadTrac
 import { getActiveFacilities, resolveStopFacilityLink } from './lib/facilityLink';
 import { loadCompletionSourceValidator, type LoadCompletionSource } from './_helpers/loadProgress';
 import { loadProgressForLoad, reconcileLoadCompletion } from './lib/loadCompletion';
+import { closeLeg } from './lib/legOnTime';
 import {
   setLoadTag,
   removeAllTagsForLoad,
@@ -115,16 +116,22 @@ async function applyLoadStatusUpdate(
       .query('dispatchLegs')
       .withIndex('by_load', (q: any) => q.eq('loadId', args.loadId))
       .collect();
+    // One stop read for every leg's on-time stamp (lib/legOnTime.closeLeg).
+    // Inferred completions (geofence, shift end, reconcile) come through
+    // here, so this is what keeps their legs visible to the driver KPI.
+    const stops = legs.some((l) => l.status === 'ACTIVE')
+      ? await ctx.db
+          .query('loadStops')
+          .withIndex('by_load', (q: any) => q.eq('loadId', args.loadId))
+          .collect()
+      : [];
     for (const leg of legs) {
-      if (leg.status !== 'COMPLETED' && leg.status !== 'CANCELED') {
-        await ctx.db.patch(leg._id, {
-          status: 'COMPLETED' as const,
-          updatedAt: now,
-        });
-        // Completion is a pricing event (completed-work gate in
-        // calculatePayForLeg): the leg's items are only written now.
-        await scheduleLegPayRecalc(ctx, leg._id, 'system:load_completed');
-      }
+      await closeLeg(ctx, leg, {
+        endReason: 'completed',
+        endedAt: now,
+        actor: 'system:load_completed',
+        stops,
+      });
     }
   } else if (args.status === 'Assigned') {
     if (load.trackingStatus === 'Pending') {
@@ -3251,6 +3258,7 @@ export const autoExpireStaleLoads = internalMutation({
       const status = statusesToCheck[statusIdx];
       let expired = 0;
       let warned = 0;
+      let reconciled = 0;
 
       // Assigned loads get one warning sweep before expiry: the first
       // eligible sweep flags the load (dashboard "expiring soon" card +
@@ -3305,6 +3313,16 @@ export const autoExpireStaleLoads = internalMutation({
 
         // Assigned loads get one warning sweep before expiry; Open loads
         // expire immediately.
+        // Stops all closed (a tap-less trip the fence recorded before the
+        // row learned about it): that load ran. Complete it, never expire
+        // it. Counts against the batch budget like an expiry — each one is
+        // a full completion cascade.
+        if (status === 'Assigned' && (await reconcileLoadCompletion(ctx, load._id, 'reconcile'))) {
+          reconciled++;
+          if (expired + reconciled >= BATCH_SIZE) break;
+          continue;
+        }
+
         if (status === 'Assigned') {
           if (load.expiryWarnedAt === undefined) {
             await ctx.db.patch(load._id, { expiryWarnedAt: now });
@@ -3347,16 +3365,16 @@ export const autoExpireStaleLoads = internalMutation({
         });
         expired++;
 
-        if (expired >= BATCH_SIZE) break;
+        if (expired + reconciled >= BATCH_SIZE) break;
       }
 
-      if (expired > 0 || warned > 0) {
+      if (expired > 0 || warned > 0 || reconciled > 0) {
         console.log(
-          `⏰ Auto-expiry sweep for org ${args.orgId}: expired ${expired}, warned ${warned} (${status})`
+          `⏰ Auto-expiry sweep for org ${args.orgId}: expired ${expired}, warned ${warned}, completed-not-expired ${reconciled} (${status})`
         );
       }
 
-      if (expired >= BATCH_SIZE) {
+      if (expired + reconciled >= BATCH_SIZE) {
         await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {
           orgId: args.orgId,
           statusIndex: statusIdx,
@@ -3382,6 +3400,7 @@ export const autoExpireStaleLoads = internalMutation({
     //     updatedAt alone would mis-flag actively-tracking trucks as idle.
     if (phase === 'in-transit') {
       let expired = 0;
+      let reconciled = 0;
       const cutoff = now - STALE_IN_TRANSIT_THRESHOLD_MS;
 
       const loads = await ctx.db
@@ -3413,6 +3432,16 @@ export const autoExpireStaleLoads = internalMutation({
           lastActivityAt = pushState.lastPushedRecordedAt;
         }
         if (lastActivityAt >= cutoff) continue;
+
+        // A load whose every counted stop is closed ran — it is delivered,
+        // not stale. Complete it instead of expiring it (the 2026-03
+        // expiry incident restored by migration 015 was exactly loads that
+        // ran without their row ever being completed).
+        if (await reconcileLoadCompletion(ctx, load._id, 'reconcile')) {
+          reconciled++;
+          if (expired + reconciled >= BATCH_SIZE) break;
+          continue;
+        }
 
         // Route through applyLoadStatusUpdate so the Expired branch's leg
         // cascade fires. Same reasoning as the pending-phase loop above.
@@ -3583,18 +3612,22 @@ export const reconcileStuckLoads = internalMutation({
     const BATCH = 200;
     let scanned = 0;
     let completed = 0;
-    for (const trackingStatus of ['In Transit', 'Delayed'] as const) {
-      const candidates = await ctx.db
-        .query('loadInformation')
-        .withIndex('by_org_tracking_status', (q) =>
-          q.eq('workosOrgId', args.orgId!).eq('trackingStatus', trackingStatus),
-        )
-        .filter((q) => q.eq(q.field('status'), 'Assigned'))
-        .take(BATCH);
-      for (const load of candidates) {
-        scanned++;
-        if (await reconcileLoadCompletion(ctx, load._id, 'reconcile')) completed++;
-      }
+    // Candidates = Assigned loads whose pickup date has passed, newest
+    // first — a load cannot have every stop closed before its pickup, and
+    // Assigned (not trackingStatus) is the small, indexed set. A tap-less
+    // trip may still carry trackingStatus 'Pending', so that field is
+    // deliberately not part of the scan.
+    const today = new Date().toISOString().slice(0, 10);
+    const candidates = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_org_status_first_stop', (q) =>
+        q.eq('workosOrgId', args.orgId!).eq('status', 'Assigned').lte('firstStopDate', today),
+      )
+      .order('desc')
+      .take(BATCH);
+    for (const load of candidates) {
+      scanned++;
+      if (await reconcileLoadCompletion(ctx, load._id, 'reconcile')) completed++;
     }
     if (completed > 0) {
       console.log(`[reconcileStuckLoads] org=${args.orgId} scanned=${scanned} completed=${completed}`);

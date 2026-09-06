@@ -25,7 +25,7 @@ import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from '
 import { logAudit } from './lib/audit';
 import { transferFrontierToDriver } from './loadTrackingState';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
-import { computeLegOnTime } from './lib/legOnTime';
+import { closeLeg } from './lib/legOnTime';
 import { getLoadFacets } from './lib/loadFacets';
 
 /**
@@ -1906,19 +1906,13 @@ export const completeLeg = internalMutation({
   handler: async (ctx, args) => {
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new ConvexError('Leg not found');
-    if (leg.status === 'COMPLETED') return null; // idempotent
-
-    const onTime = await computeLegOnTime(ctx, leg);
-    await ctx.db.patch(args.legId, {
-      status: 'COMPLETED',
-      endedAt: args.endedAt,
+    // Idempotent; stamps on-time and schedules the pay recalc
+    // (lib/legOnTime.closeLeg — the one close path).
+    await closeLeg(ctx, leg, {
       endReason: args.endReason,
-      updatedAt: args.endedAt,
-      ...onTime,
+      endedAt: args.endedAt,
+      actor: 'system:leg_completed',
     });
-    // Completion is a pricing event (completed-work gate in
-    // calculatePayForLeg): schedule the recalc that writes the leg's items.
-    await scheduleLegPayRecalc(ctx, args.legId, 'system:leg_completed');
     return null;
   },
 });
@@ -2006,18 +2000,9 @@ export const handoffLoad = mutation({
       if (frontierStop) newLegStartStopId = frontierStop._id;
     }
 
-    // Complete the old leg (stamping on-time for the deliveries it made).
-    const oldLegOnTime = await computeLegOnTime(ctx, oldLeg);
-    await ctx.db.patch(oldLeg._id, {
-      status: 'COMPLETED',
-      endedAt: now,
-      endReason: 'handoff',
-      updatedAt: now,
-      ...oldLegOnTime,
-    });
-    // Completion is a pricing event (completed-work gate): re-price the
-    // from-driver's finished portion.
-    await scheduleLegPayRecalc(ctx, oldLeg._id, caller.userId);
+    // Complete the old leg (stamping on-time for the deliveries it made)
+    // and re-price the from-driver's finished portion.
+    await closeLeg(ctx, oldLeg, { endReason: 'handoff', endedAt: now, actor: caller.userId });
 
     // Determine new leg sequence.
     const allLegs = await ctx.db

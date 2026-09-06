@@ -13,6 +13,7 @@ import { getLoadFacets } from './lib/loadFacets';
 import { computeLegScheduledTimes } from './_helpers/timeUtils';
 import { logAudit } from './lib/audit';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
+import { closeLeg } from './lib/legOnTime';
 import { raiseAlert } from './dispatchAlerts';
 
 /**
@@ -1115,15 +1116,7 @@ export const completeLoad = mutation({
       .withIndex('by_load', (q) => q.eq('loadId', assignment.loadId))
       .collect();
     for (const leg of legs) {
-      if (leg.status !== 'COMPLETED' && leg.status !== 'CANCELED') {
-        await ctx.db.patch(leg._id, {
-          status: 'COMPLETED',
-          endedAt: now,
-          endReason: 'completed',
-          updatedAt: now,
-        });
-        await scheduleLegPayRecalc(ctx, leg._id, 'system:carrier_load_completed');
-      }
+      await closeLeg(ctx, leg, { endReason: 'completed', endedAt: now, actor: 'system:carrier_load_completed' });
     }
 
     return { success: true };

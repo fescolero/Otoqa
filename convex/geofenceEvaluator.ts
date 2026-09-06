@@ -409,6 +409,13 @@ export async function runTapGraceCheck(
       ...(advanceStatus ? { status: 'In Transit' as const } : {}),
       updatedAt: Date.now(),
     });
+    // The manual check-in flips the load to In Transit; the fence must
+    // too, or a tap-less trip stays 'Pending' on the row and the stale-
+    // load expiry treats a moving truck as one that never left.
+    const load = await ctx.db.get(stop.loadId);
+    if (load && load.status === 'Assigned' && load.trackingStatus === 'Pending') {
+      await ctx.db.patch(load._id, { trackingStatus: 'In Transit', updatedAt: Date.now() });
+    }
     await logSystemEvent(ctx, {
       severity: 'warn',
       source: 'geofence',

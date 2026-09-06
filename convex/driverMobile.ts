@@ -19,6 +19,7 @@ import { pendingLegsForShift } from './lib/legTracking';
 import { logSystemEvent } from './lib/systemEvents';
 import { deriveLoadProgress, loadProgressValidator, stopSyncValidator } from './_helpers/loadProgress';
 import { loadProgressForLoad } from './lib/loadCompletion';
+import { closeLeg } from './lib/legOnTime';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 
@@ -1351,17 +1352,18 @@ export const checkOutFromStop = mutation({
       // Only acts when a leg exists; legacy loads without a matching leg
       // (pre-backfill) continue to work via the load-status path above.
       if (matchingActiveLeg) {
-        const serverNow = Date.now();
-        await ctx.db.patch(matchingActiveLeg._id, {
-          status: 'COMPLETED',
-          endedAt: serverNow,
-          endReason: 'completed',
-          updatedAt: serverNow,
-        });
-        // Completion is a pricing event (completed-work gate): re-price the
-        // leg now that actual times are final. If the driver's shift is
-        // still open the calc defers again and endSession re-fires it.
-        await scheduleLegPayRecalc(ctx, matchingActiveLeg._id, String(driver._id));
+        // The load-completion cascade above normally closed it already;
+        // closeLeg is idempotent on a fresh read. Completion is a pricing
+        // event (completed-work gate): if the driver's shift is still open
+        // the calc defers again and endSession re-fires it.
+        const freshLeg = await ctx.db.get(matchingActiveLeg._id);
+        if (freshLeg) {
+          await closeLeg(ctx, freshLeg, {
+            endReason: 'completed',
+            endedAt: Date.now(),
+            actor: String(driver._id),
+          });
+        }
       }
 
       // Release the geofence frontier. Historical geofenceEvents stay; if a

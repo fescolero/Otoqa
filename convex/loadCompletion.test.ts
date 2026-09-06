@@ -11,7 +11,8 @@
  */
 
 import { convexTest } from 'convex-test';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { vi } from 'vitest';
 import schema from './schema';
 import { internal } from './_generated/api';
 import { runTapGraceCheck, TAP_GRACE_MS } from './geofenceEvaluator';
@@ -21,6 +22,12 @@ import type { Doc, Id } from './_generated/dataModel';
 import type { MutationCtx } from './_generated/server';
 
 const ORG = 'org_test_load_completion';
+
+// Completion schedules pay recalcs and the expiry sweep re-schedules
+// itself; fake timers keep those from firing against a finished
+// transaction after each test (same pattern as entityDocuments.test.ts).
+beforeEach(() => vi.useFakeTimers());
+afterEach(() => vi.useRealTimers());
 const MIN = 60_000;
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -54,9 +61,11 @@ async function insertFixtures(ctx: MutationCtx) {
     name: 'USPS', companyType: 'Shipper', status: 'Active', addressLine1: '1', city: 'C', state: 'S', zip: 'Z', country: 'US',
     workosOrgId: ORG, createdBy: 'u', createdAt: now, updatedAt: now,
   });
+  const yesterday = new Date(now - 24 * 60 * MIN).toISOString().slice(0, 10);
   const loadId = await ctx.db.insert('loadInformation', {
     internalId: '121536139', orderNumber: '121536139', status: 'Assigned', trackingStatus: 'In Transit',
     customerId, customerName: 'USPS', fleet: 'Main', units: 'Pallets', primaryDriverId: driverId,
+    firstStopDate: yesterday,
     workosOrgId: ORG, createdBy: 'u', createdAt: now, updatedAt: now,
   });
   const stop = (sequenceNumber: number, stopType: 'PICKUP' | 'DELIVERY', extra: Record<string, unknown> = {}) =>
@@ -68,8 +77,12 @@ async function insertFixtures(ctx: MutationCtx) {
   // Driver tapped stops 1 and 2; 3 and 4 are still open.
   const s1 = await stop(1, 'PICKUP', { status: 'Completed', checkedInAt: iso(now - 150 * MIN), checkedOutAt: iso(now - 142 * MIN) });
   const s2 = await stop(2, 'DELIVERY', { status: 'Completed', checkedInAt: iso(now - 120 * MIN), checkedOutAt: iso(now - 112 * MIN) });
-  const s3 = await stop(3, 'DELIVERY');
-  const s4 = await stop(4, 'DELIVERY');
+  // Delivery windows ending an hour ago, so the on-time stamp has
+  // something to evaluate when these stops close.
+  const windowEnd = new Date(now - 60 * MIN);
+  const win = { windowEndDate: windowEnd.toISOString().slice(0, 10), windowEndTime: windowEnd.toISOString() };
+  const s3 = await stop(3, 'DELIVERY', win);
+  const s4 = await stop(4, 'DELIVERY', win);
   const legId = await ctx.db.insert('dispatchLegs', {
     loadId, driverId, sequence: 1, startStopId: s1, endStopId: s4, legLoadedMiles: 64, legEmptyMiles: 0,
     status: 'ACTIVE', startedAt: now - 160 * MIN, workosOrgId: ORG, createdAt: now, updatedAt: now,
@@ -223,6 +236,117 @@ describe('reconcileLoadCompletion', () => {
       await ctx.runMutation(internal.loads.updateLoadStatusInternal, { loadId: f.loadId, status: 'Completed' });
       const load = (await ctx.db.get(f.loadId)) as Doc<'loadInformation'>;
       expect(load.completionSource).toBe('dispatcher');
+    });
+  });
+});
+
+describe('inferred completion side effects', () => {
+  it('stamps the leg like a driver check-out would (endedAt, endReason, on-time)', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      await ctx.db.patch(f.s3, { status: 'Completed', autoArrivedAt: f.now - 80 * MIN, autoDepartedAt: f.now - 72 * MIN });
+      await ctx.db.patch(f.s4, { status: 'Completed', autoArrivedAt: f.now - 30 * MIN, autoDepartedAt: f.now - 22 * MIN });
+      expect(await reconcileLoadCompletion(ctx, f.loadId, 'geofence')).toBe(true);
+      const leg = (await ctx.db.get(f.legId)) as Doc<'dispatchLegs'>;
+      expect(leg.status).toBe('COMPLETED');
+      expect(leg.endReason).toBe('completed');
+      expect(leg.endedAt).toBeTypeOf('number');
+      // Stops 3 and 4 carry windows and arrivals → both evaluated, both
+      // early (arrived before the window end).
+      expect(leg.deliveriesEvaluated).toBe(2);
+      expect(leg.deliveriesOnTime).toBe(1); // stop 4 arrived past window end + grace
+    });
+  });
+
+  it('a PENDING leg closed by a load-level completion is not stamped with someone else\'s deliveries', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      const pendingLegId = await ctx.db.insert('dispatchLegs', {
+        loadId: f.loadId, driverId: f.driverId, sequence: 2, startStopId: f.s3, endStopId: f.s4,
+        legLoadedMiles: 10, legEmptyMiles: 0, status: 'PENDING', workosOrgId: ORG, createdAt: f.now, updatedAt: f.now,
+      });
+      await ctx.db.patch(f.s3, { status: 'Completed', autoArrivedAt: f.now - 80 * MIN, autoDepartedAt: f.now - 72 * MIN });
+      await ctx.db.patch(f.s4, { status: 'Completed', autoArrivedAt: f.now - 30 * MIN, autoDepartedAt: f.now - 22 * MIN });
+      expect(await reconcileLoadCompletion(ctx, f.loadId, 'geofence')).toBe(true);
+      const pending = (await ctx.db.get(pendingLegId)) as Doc<'dispatchLegs'>;
+      expect(pending.status).toBe('COMPLETED');
+      expect(pending.deliveriesEvaluated).toBeUndefined();
+    });
+  });
+
+  it('the pending-phase expiry completes a delivered-by-evidence Assigned load instead of warning it', async () => {
+    const t = convexTest(schema);
+    const H = 60 * MIN;
+    const loadId = await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      const pickup = new Date(f.now - 10 * H);
+      // Never tapped at stop 1: trackingStatus still Pending, pickup 10h ago.
+      await ctx.db.patch(f.loadId, { trackingStatus: 'Pending' });
+      await ctx.db.patch(f.s1, { windowBeginDate: pickup.toISOString().slice(0, 10), windowBeginTime: pickup.toISOString() });
+      await ctx.db.patch(f.s3, { status: 'Completed', autoArrivedAt: f.now - 8 * H, autoDepartedAt: f.now - 7.5 * H });
+      await ctx.db.patch(f.s4, { status: 'Completed', autoArrivedAt: f.now - 7 * H, autoDepartedAt: f.now - 6.5 * H });
+      return f.loadId;
+    });
+    // statusIndex 1 = 'Assigned' in the pending phase.
+    await t.mutation(internal.loads.autoExpireStaleLoads, { orgId: ORG, statusIndex: 1, phase: 'pending' });
+    await t.run(async (ctx) => {
+      const load = (await ctx.db.get(loadId)) as Doc<'loadInformation'>;
+      expect(load.status).toBe('Completed');
+      expect(load.completionSource).toBe('reconcile');
+      expect(load.expiryWarnedAt).toBeUndefined();
+    });
+  });
+
+  it('a GPS arrival moves a Pending load to In Transit, as the tap does', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      await ctx.db.patch(f.loadId, { trackingStatus: 'Pending' });
+      await runTapGraceCheck(ctx, { stopId: f.s3, kind: 'checkin', detectedAt: f.now - 10 * MIN });
+      const load = (await ctx.db.get(f.loadId)) as Doc<'loadInformation'>;
+      expect(load.trackingStatus).toBe('In Transit');
+      expect(load.status).toBe('Assigned');
+    });
+  });
+
+  it('the stale-load expiry completes a delivered-by-evidence load instead of expiring it', async () => {
+    const t = convexTest(schema);
+    const H = 60 * MIN;
+    const loadId = await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      const pickup = new Date(f.now - 30 * H);
+      const ymd = pickup.toISOString().slice(0, 10);
+      // Pickup 30h ago, no activity for 26h, every stop closed by the fence.
+      await ctx.db.patch(f.s1, { windowBeginDate: ymd, windowBeginTime: pickup.toISOString() });
+      await ctx.db.patch(f.s3, { status: 'Completed', autoArrivedAt: f.now - 28 * H, autoDepartedAt: f.now - 27.5 * H });
+      await ctx.db.patch(f.s4, { status: 'Completed', autoArrivedAt: f.now - 27 * H, autoDepartedAt: f.now - 26.5 * H });
+      await ctx.db.patch(f.loadId, { updatedAt: f.now - 26 * H });
+      return f.loadId;
+    });
+    await t.mutation(internal.loads.autoExpireStaleLoads, { orgId: ORG, phase: 'in-transit' });
+    await t.run(async (ctx) => {
+      const load = (await ctx.db.get(loadId)) as Doc<'loadInformation'>;
+      expect(load.status).toBe('Completed');
+      expect(load.completionSource).toBe('reconcile');
+    });
+  });
+
+  it('the stale-load expiry still expires a load whose stops never closed', async () => {
+    const t = convexTest(schema);
+    const H = 60 * MIN;
+    const loadId = await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      const pickup = new Date(f.now - 30 * H);
+      await ctx.db.patch(f.s1, { windowBeginDate: pickup.toISOString().slice(0, 10), windowBeginTime: pickup.toISOString() });
+      await ctx.db.patch(f.loadId, { updatedAt: f.now - 26 * H });
+      return f.loadId;
+    });
+    await t.mutation(internal.loads.autoExpireStaleLoads, { orgId: ORG, phase: 'in-transit' });
+    await t.run(async (ctx) => {
+      const load = (await ctx.db.get(loadId)) as Doc<'loadInformation'>;
+      expect(load.status).toBe('Expired');
     });
   });
 });
