@@ -20,6 +20,7 @@ import Link from 'next/link';
 import { LoadPayPlanCard } from '@/components/web/pay-plan/load-pay-plan-card';
 import { LiveTrackingModal, type TimelineEvent } from '@/components/loads/live-tracking-modal';
 import { evaluateDeliveryOnTime, formatLateDuration, summarizeLegOnTime } from '@/convex/_helpers/onTime';
+import { stopEventSourceLabel } from '@/convex/_helpers/loadProgress';
 import { onTimeChipProps } from '@/components/web/on-time-chip';
 import { DocPreviewModal, type DocRecord } from '@/components/loads/doc-preview-modal';
 import { LoadDocumentUploadDialog } from '@/components/loads/load-document-upload-dialog';
@@ -976,7 +977,14 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
             : p.phase === 'departed'
               ? 'delivered'
               : 'active';
-    return <Chip status={chipStatus} label={p.label} />;
+    const closing = p.departure ?? p.arrival;
+    return (
+      <Chip
+        status={chipStatus}
+        label={p.label}
+        title={closing ? stopEventSourceLabel(closing.source) : undefined}
+      />
+    );
   };
 
   // Inline Stops mini-card on the overview (the dedicated "Stops" tab keeps
@@ -1040,7 +1048,8 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
           {
             key: 'st',
             label: 'Status',
-            width: '100px',
+            // Fits the longest provenance label ("Delivered · tapped late").
+            width: '176px',
             render: (r) => stopChip(r._id as string, r.status),
           },
         ]}
@@ -1179,7 +1188,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     {
       key: 'st',
       label: 'Status',
-      width: '110px',
+      width: '176px',
       render: (r) => stopChip(r._id as string, r.status),
     },
     {
