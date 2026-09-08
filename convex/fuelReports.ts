@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { loadReferenceOf } from './lib/loadReference';
 import { assertCallerOwnsOrg } from './lib/auth';
 import { DEFAULT_FUEL_TYPE, type FuelProduct } from './lib/fuelTypes';
 
@@ -558,5 +559,124 @@ export const monthlySummary = query({
       },
       months,
     };
+  },
+});
+
+/**
+ * Every fuel + DEF entry in the range, projected down to the fields the
+ * reports page needs — no pagination, no per-row lookups.
+ *
+ * The reports page used to pull its raw rows from `fuelEntries.listCombined`
+ * with a single 500-row page. The chart, exception counts, vendor / fuel
+ * type shares and the purchases table were all fed from that page, so any
+ * range holding more than 500 entries was silently truncated: the newest
+ * 500 rows made it in, everything older fell off the left edge of the
+ * chart, and applying a filter chip narrowed the truncated pool rather
+ * than the real one.
+ *
+ * This query returns the whole range instead. It stays cheap because:
+ *   - lookups (vendor / driver / carrier / truck / load) are fetched once
+ *     per distinct id, not once per row;
+ *   - no storage URLs are resolved — the page only needs to know whether a
+ *     receipt is on file;
+ *   - only the columns the page reads are returned.
+ *
+ * Rows are sorted newest first, matching `listCombined`.
+ */
+export const reportEntries = query({
+  args: {
+    organizationId: v.string(),
+    dateRangeStart: v.number(),
+    dateRangeEnd: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
+    const [fuelEntries, defEntriesList] = await Promise.all([
+      ctx.db
+        .query('fuelEntries')
+        .withIndex('by_organization_and_date', (q) =>
+          q.eq('organizationId', args.organizationId)
+            .gte('entryDate', args.dateRangeStart)
+            .lte('entryDate', args.dateRangeEnd)
+        )
+        .collect(),
+      ctx.db
+        .query('defEntries')
+        .withIndex('by_organization_and_date', (q) =>
+          q.eq('organizationId', args.organizationId)
+            .gte('entryDate', args.dateRangeStart)
+            .lte('entryDate', args.dateRangeEnd)
+        )
+        .collect(),
+    ]);
+
+    const all = [
+      ...fuelEntries.map((e) => ({ entry: e, type: 'fuel' as const })),
+      ...defEntriesList.map((e) => ({ entry: e, type: 'def' as const })),
+    ];
+
+    // One lookup per distinct id across the whole range.
+    const vendorIds = new Set<Id<'fuelVendors'>>();
+    const driverIds = new Set<Id<'drivers'>>();
+    const carrierIds = new Set<Id<'carrierPartnerships'>>();
+    const truckIds = new Set<Id<'trucks'>>();
+    const loadIds = new Set<Id<'loadInformation'>>();
+    for (const { entry } of all) {
+      vendorIds.add(entry.vendorId);
+      if (entry.driverId) driverIds.add(entry.driverId);
+      if (entry.carrierId) carrierIds.add(entry.carrierId);
+      if (entry.truckId) truckIds.add(entry.truckId);
+      if (entry.loadId) loadIds.add(entry.loadId);
+    }
+
+    const [vendors, drivers, carriers, trucks, loads] = await Promise.all([
+      Promise.all([...vendorIds].map((id) => ctx.db.get(id))),
+      Promise.all([...driverIds].map((id) => ctx.db.get(id))),
+      Promise.all([...carrierIds].map((id) => ctx.db.get(id))),
+      Promise.all([...truckIds].map((id) => ctx.db.get(id))),
+      Promise.all([...loadIds].map((id) => ctx.db.get(id))),
+    ]);
+
+    const vendorName = new Map<string, string>();
+    for (const v of vendors) if (v) vendorName.set(v._id, v.name);
+    const driverName = new Map<string, string>();
+    for (const d of drivers) if (d) driverName.set(d._id, `${d.firstName} ${d.lastName}`);
+    const carrierName = new Map<string, string>();
+    for (const c of carriers) if (c) carrierName.set(c._id, c.carrierName);
+    const truckUnit = new Map<string, string>();
+    for (const t of trucks) if (t) truckUnit.set(t._id, t.unitId);
+    const loadRef = new Map<string, string | undefined>();
+    for (const l of loads) if (l) loadRef.set(l._id, loadReferenceOf(l));
+
+    return all
+      .map(({ entry, type }) => ({
+        _id: entry._id as string,
+        type,
+        entryDate: entry.entryDate,
+        // DEF rows come from their own table (no fuelType column) — the
+        // table IS the type. Fuel rows saved before the fuelType field
+        // existed count as diesel.
+        fuelType: (type === 'def'
+          ? 'DEF'
+          : ((entry as { fuelType?: FuelProduct }).fuelType ?? DEFAULT_FUEL_TYPE)) as FuelProduct,
+        vendorId: entry.vendorId as string,
+        vendorName: vendorName.get(entry.vendorId) ?? 'Unknown',
+        driverId: entry.driverId as string | undefined,
+        driverName: entry.driverId ? driverName.get(entry.driverId) : undefined,
+        carrierId: entry.carrierId as string | undefined,
+        carrierName: entry.carrierId ? carrierName.get(entry.carrierId) : undefined,
+        truckId: entry.truckId as string | undefined,
+        truckUnitId: entry.truckId ? truckUnit.get(entry.truckId) : undefined,
+        loadId: entry.loadId as string | undefined,
+        loadReference: entry.loadId ? loadRef.get(entry.loadId) : undefined,
+        gallons: entry.gallons,
+        pricePerGallon: entry.pricePerGallon,
+        totalCost: entry.totalCost,
+        location: entry.location,
+        paymentMethod: entry.paymentMethod,
+        fuelCardNumber: entry.fuelCardNumber,
+        hasReceipt: entry.receiptStorageId !== undefined,
+      }))
+      .sort((a, b) => b.entryDate - a.entryDate);
   },
 });

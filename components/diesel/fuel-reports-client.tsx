@@ -39,7 +39,6 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { api } from '@/convex/_generated/api';
 import {
-  DEFAULT_FUEL_TYPE,
   FUEL_PRODUCT_ORDER,
   fuelProductLabel,
   type FuelProduct,
@@ -249,58 +248,16 @@ export function FuelReportsClient() {
   // Individual entries drive: weekly chart bars, exception counts, the
   // Fuel purchases table. The summary query gives us monthly aggregates
   // only — for weekly granularity + per-entry exception classification we
-  // need the raw rows. listCombined merges fuelEntries + defEntries and
-  // tags each row with its source table. Capped at 500; if the range
-  // exceeds that we still get correct totals from the summary query
-  // above, and the per-entry surfaces show "showing 500 of N".
-  const entriesPage = useAuthQuery(
-    api.fuelEntries.listCombined,
-    organizationId
-      ? ({
-          organizationId,
-          dateRangeStart: range.start.getTime(),
-          dateRangeEnd: range.end.getTime(),
-          paginationOpts: { numItems: 500, cursor: null },
-        } as never)
-      : 'skip',
-  );
-  const rawEntries = React.useMemo(() => {
-    if (!entriesPage) return [];
-    return ((entriesPage as { page: Array<Record<string, unknown>> }).page ?? []).map((e) => {
-      const entryType = ((e.type as string) ?? 'fuel') as 'fuel' | 'def';
-      return {
-      _id: e._id as string,
-      entryDate: e.entryDate as number,
-      // DEF rows come from their own table (no fuelType column) — the
-      // table IS the type. Fuel rows created before the fuelType field
-      // existed count as diesel.
-      type: entryType,
-      fuelType: (entryType === 'def'
-        ? 'DEF'
-        : ((e.fuelType as string) ?? DEFAULT_FUEL_TYPE)) as FuelProduct,
-      vendorId: e.vendorId as string,
-      vendorName: (e.vendorName as string) ?? 'Unknown',
-      driverName: e.driverName as string | undefined,
-      driverId: e.driverId as string | undefined,
-      // carrierId comes through from the raw entry record — used by the
-      // carrier filter chip below.
-      carrierId: e.carrierId as string | undefined,
-      carrierName: e.carrierName as string | undefined,
-      truckUnitId: e.truckUnitId as string | undefined,
-      truckId: e.truckId as string | undefined,
-      loadId: e.loadId as string | undefined,
-      loadReference: e.loadReference as string | undefined,
-      gallons: (e.gallons as number) ?? 0,
-      pricePerGallon: (e.pricePerGallon as number) ?? 0,
-      totalCost: (e.totalCost as number) ?? 0,
-      location: e.location as { city: string; state: string } | undefined,
-      paymentMethod: e.paymentMethod as string | undefined,
-      fuelCardNumber: e.fuelCardNumber as string | undefined,
-      receiptUrl: e.receiptUrl as string | undefined,
-      receiptStorageId: e.receiptStorageId as string | undefined,
-      };
-    });
-  }, [entriesPage]);
+  // need the raw rows. reportEntries returns EVERY fuel + DEF entry in the
+  // range (lean projection, no pagination), so the chart, the exception
+  // counts and the filter chips all operate on the complete pool. This
+  // replaced a single 500-row page of listCombined, which silently dropped
+  // everything older than the newest 500 entries — visible as bars that
+  // faded out on the left of the chart for busy ranges, and as filtered
+  // totals that only covered part of the period.
+  const reportEntries = useAuthQuery(api.fuelReports.reportEntries, baseArgs);
+  const entriesLoading = baseArgs !== 'skip' && reportEntries === undefined;
+  const rawEntries: RawEntry[] = React.useMemo(() => reportEntries ?? [], [reportEntries]);
 
   // Lookup data for the FilterBar options.
   const driversList = useAuthQuery(
@@ -429,9 +386,9 @@ export function FuelReportsClient() {
   // Headline totals cover EVERY product bought at the pump — fuel AND
   // DEF — so the unfiltered page equals the sum of all Fuel type filter
   // options. When no chips are active we trust the server-side
-  // aggregates (they count every entry, not just the 500-row raw page).
-  // When chips ARE active we recompute from the filtered raw entries so
-  // the KPIs match the visible chart / table.
+  // aggregates. When chips ARE active we recompute from the filtered raw
+  // entries (the full range — see reportEntries above) so the KPIs match
+  // the visible chart / table.
   const totals = summary?.totals;
   let totalSpend: number;
   let totalGallons: number;
@@ -545,7 +502,7 @@ export function FuelReportsClient() {
 
   // Exception classifier — counts per rule, computed from filtered entries.
   // Same rules as the design's <FrExceptions/>:
-  //   1. receipt — no receiptUrl AND no receiptStorageId on file
+  //   1. receipt — no receipt scan on file (hasReceipt from the server)
   //   2. offcard — paymentMethod !== 'FUEL_CARD'
   //   3. price   — > $0.20/gal above the period's average
   //   4. unlink  — no loadId on the entry
@@ -569,7 +526,7 @@ export function FuelReportsClient() {
     }
     let receipt = 0, offcard = 0, price = 0, unlink = 0;
     for (const e of filteredEntries) {
-      if (!e.receiptUrl && !e.receiptStorageId) receipt++;
+      if (!e.hasReceipt) receipt++;
       if (e.paymentMethod && e.paymentMethod !== 'FUEL_CARD') offcard++;
       const typeAvg = avgByType.get(e.fuelType) ?? 0;
       if (typeAvg > 0 && e.pricePerGallon > typeAvg + 0.20) price++;
@@ -771,7 +728,7 @@ export function FuelReportsClient() {
               rawEntries={filteredEntries}
               onOpenEntry={(id, type) => router.push(`/operations/diesel/${id}?type=${type}`)}
               onOpenExceptions={() => setView('overview')}
-              loading={summary === undefined}
+              loading={summary === undefined || entriesLoading}
             />
           )}
 
@@ -1732,6 +1689,9 @@ interface RawEntry {
   fuelType: FuelProduct;
   driverName?: string;
   driverId?: string;
+  carrierId?: string;
+  carrierName?: string;
+  truckId?: string;
   truckUnitId?: string;
   loadId?: string;
   loadReference?: string;
@@ -1741,8 +1701,8 @@ interface RawEntry {
   location?: { city: string; state: string };
   paymentMethod?: string;
   fuelCardNumber?: string;
-  receiptUrl?: string;
-  receiptStorageId?: string;
+  /** A receipt scan is attached. Drives the "Missing receipt" exception. */
+  hasReceipt: boolean;
 }
 
 type PurchaseSortKey =
