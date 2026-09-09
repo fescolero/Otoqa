@@ -725,6 +725,23 @@ const ANOMALY_WINDOW_MS = PRICE_ANOMALY.windowDays * 86_400_000;
 const SIDE_WINDOW_ROWS = 300;
 
 /**
+ * Rows read per product table for the PRIOR period in reportSummary. The
+ * prior period only feeds the KPI deltas, so it gets a smaller cap, no
+ * side windows, and price assessments only when the exception chip
+ * needs them. Worst-case document reads for one reportSummary call:
+ *
+ *   range        2 tables × (MAX_RANGE_ROWS + 1)      6,002
+ *   side windows 2 sides × 2 tables × (300 + 1)       1,204
+ *   prior        2 tables × (PRIOR_RANGE_ROWS + 1)    4,002
+ *   vendor lookups                                    tens
+ *                                                    ------
+ *                                                   ~11,300
+ *
+ * comfortably inside Convex's per-query document budget.
+ */
+const PRIOR_RANGE_ROWS = 2000;
+
+/**
  * Load the report range, assess every in-range fill against its peers,
  * and hand back the in-range rows with their assessments.
  *
@@ -830,16 +847,35 @@ export const reportSummary = query({
     const range = await loadAssessedRange(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd);
     const rows = applyReportFilters(range.rows, args, range.assess);
 
-    // Prior period for the KPI deltas, filtered by the same chips — which
-    // means it needs its own price assessments so an Exception chip on
-    // "price" matches prior rows too. Skipped when the main range is
-    // truncated (a delta against a partial period is meaningless, and
-    // not reading it keeps the call inside the read budget), and dropped
-    // when the prior window itself is truncated.
+    // Prior period for the KPI deltas, filtered by the same chips. It is
+    // read under a smaller cap (see PRIOR_RANGE_ROWS) with no side
+    // windows, and assessed for price only when the Exception chip
+    // includes "price" — otherwise the assessment is never consulted.
+    // Skipped when the main range is truncated (a delta against a partial
+    // period is meaningless), and dropped when the prior window itself
+    // overflows its cap.
     let prior: ReturnType<typeof sumRows> | null = null;
     if (hasPrior && !range.truncated) {
-      const p = await loadAssessedRange(ctx, args.organizationId, args.priorStart!, args.priorEnd!);
-      if (!p.truncated) prior = sumRows(applyReportFilters(p.rows, args, p.assess));
+      const p = await loadRangeRows(
+        ctx, args.organizationId, args.priorStart!, args.priorEnd!, PRIOR_RANGE_ROWS,
+      );
+      if (!p.truncated) {
+        const needsPrice = args.exceptions?.includes('price') ?? false;
+        const priorAssess = needsPrice
+          ? assessPrices(
+              p.rows.map(({ entry, product }) => ({
+                id: entry._id as string,
+                product,
+                entryDate: entry.entryDate,
+                pricePerGallon: entry.pricePerGallon,
+                gallons: entry.gallons,
+                totalCost: entry.totalCost,
+                state: entry.location?.state,
+              })),
+            )
+          : undefined;
+        prior = sumRows(applyReportFilters(p.rows, args, priorAssess));
+      }
     }
 
     // ── Buckets ──
