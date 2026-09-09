@@ -91,6 +91,7 @@ import type * as fourKitesUtils from "../fourKitesUtils.js";
 import type * as fuelEntries from "../fuelEntries.js";
 import type * as fuelReceiptImport from "../fuelReceiptImport.js";
 import type * as fuelReports from "../fuelReports.js";
+import type * as fuelReview from "../fuelReview.js";
 import type * as fuelVendors from "../fuelVendors.js";
 import type * as geofenceEvaluator from "../geofenceEvaluator.js";
 import type * as geofenceEvents from "../geofenceEvents.js";
@@ -348,6 +349,7 @@ declare const fullApi: ApiFromModules<{
   fuelEntries: typeof fuelEntries;
   fuelReceiptImport: typeof fuelReceiptImport;
   fuelReports: typeof fuelReports;
+  fuelReview: typeof fuelReview;
   fuelVendors: typeof fuelVendors;
   geofenceEvaluator: typeof geofenceEvaluator;
   geofenceEvents: typeof geofenceEvents;

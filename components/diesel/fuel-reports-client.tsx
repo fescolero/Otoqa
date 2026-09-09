@@ -53,6 +53,7 @@ import { useAuthPaginatedQuery, useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { exportToCSV } from '@/lib/csv-export';
 import { nicePriceTicks } from '@/lib/charts/price-ticks';
+import { REVIEW_LABELS } from '@/convex/lib/fuelReview';
 
 const FLEET_MPG = 6.4;
 
@@ -68,7 +69,10 @@ const EXCEPTION_RULES = [
   { id: 'mismatch', label: 'Price × gallons ≠ total', sub: 'Recorded total disagrees with the math', icon: 'alert',      tone: 'danger' },
 ] as const;
 type ExceptionId = (typeof EXCEPTION_RULES)[number]['id'];
-type ExceptionCounts = Record<ExceptionId, number> & { total: number };
+/** Exception-filter value that selects reviewed rows (fuelReports.REVIEWED_FILTER). */
+const REVIEWED = 'reviewed';
+type ExceptionFilterId = ExceptionId | typeof REVIEWED;
+type ExceptionCounts = Record<ExceptionId, number> & { total: number; reviewed: number };
 type PriceTierCounts = { state: number; fleet: number; range: number; none: number };
 
 // Fixed per-product series colors — color follows the entity, so a
@@ -337,7 +341,10 @@ export function FuelReportsClient() {
         icon: 'alert',
         kind: 'enum',
         operator: 'is any of',
-        options: EXCEPTION_RULES.map((r) => ({ value: r.id, label: r.label })),
+        options: [
+          ...EXCEPTION_RULES.map((r) => ({ value: r.id, label: r.label })),
+          { value: REVIEWED, label: 'Reviewed (cleared)' },
+        ],
       },
     ];
   }, [driversList, trucksList, carriersList, vendorsList]);
@@ -375,7 +382,7 @@ export function FuelReportsClient() {
   // "Review →" on the exceptions card: scope the page to that rule via
   // the same chip a user could set by hand, so it shows in the filter
   // bar and clears with everything else.
-  const reviewException = React.useCallback((id: ExceptionId) => {
+  const reviewException = React.useCallback((id: ExceptionFilterId) => {
     setFilters((cur) => [
       ...cur.filter((c) => c.propId !== 'exception'),
       { propId: 'exception', op: 'is any of', values: [id] },
@@ -512,11 +519,11 @@ export function FuelReportsClient() {
     });
   }, [bucketDefs, summary]);
 
-  // Exception counts — four rules evaluated server-side over the filtered
-  // pool: missing receipt scan, paid off fuel card, price > $0.20/gal
-  // above the product's period average, not linked to a load.
+  // Exception counts — the five rules evaluated server-side over the
+  // filtered pool, plus how many rows a person has already reviewed
+  // (those trip no rule; see fuelReports.exceptionsFor).
   const exceptionCounts: ExceptionCounts = summary?.exceptions ?? {
-    receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0,
+    receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0, reviewed: 0,
   };
   const priceTiers: PriceTierCounts = summary?.priceTiers ?? { state: 0, fleet: 0, range: 0, none: 0 };
   const peersCapped = summary?.peersCapped ?? false;
@@ -952,7 +959,7 @@ function OverviewView({
   purchases: PurchaseScope | null;
   exportFilename: string;
   onOpenEntry: (id: string, type: 'fuel' | 'def') => void;
-  onReviewException: (id: ExceptionId) => void;
+  onReviewException: (id: ExceptionFilterId) => void;
   loading: boolean;
 }) {
   const fmtPct = (p: number) =>
@@ -1630,7 +1637,7 @@ function ExceptionsCard({
   counts: ExceptionCounts;
   priceTiers: PriceTierCounts;
   peersCapped: boolean;
-  onReview: (id: ExceptionId) => void;
+  onReview: (id: ExceptionFilterId) => void;
 }) {
   const toneColor = { warn: '#A66800', danger: '#C33C3C', muted: 'var(--text-tertiary)' } as const;
   const toneBg = {
@@ -1699,6 +1706,26 @@ function ExceptionsCard({
           </div>
         );
       })}
+      {counts.reviewed > 0 && (
+        <div
+          className="flex items-center gap-2 text-[11.5px] text-[var(--text-tertiary)]"
+          style={{ padding: '8px 0 0', borderTop: '1px solid var(--border-hairline)' }}
+        >
+          <WIcon name="badge-check" size={12} />
+          <span>
+            <span className="num">{counts.reviewed}</span> reviewed and cleared
+          </span>
+          <button
+            type="button"
+            onClick={() => onReview(REVIEWED)}
+            title="Show only purchases a person has reviewed"
+            className="focus-ring text-[11.5px] font-medium bg-transparent border-0 cursor-pointer"
+            style={{ padding: '2px 4px', color: 'var(--accent)' }}
+          >
+            Show →
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1806,6 +1833,7 @@ function FuelPurchasesTable({
           { header: 'Δ vs benchmark', accessor: (r) => (r.priceBenchmark == null ? '' : r.priceDelta.toFixed(3)) },
           { header: 'Benchmark tier', accessor: (r) => (r.priceBenchmark == null ? '' : r.priceTier) },
           { header: 'Exceptions', accessor: (r) => r.exceptions.join(' ') },
+          { header: 'Review', accessor: (r) => r.review?.status ?? '' },
           { header: 'Total', accessor: (r) => r.totalCost },
           { header: 'Payment', accessor: (r) => r.paymentMethod },
           { header: 'Card last 4', accessor: (r) => (r.fuelCardNumber ? r.fuelCardNumber.slice(-4) : '') },
@@ -1999,6 +2027,14 @@ function FuelPurchasesTable({
                     title={`Benchmark: median of ${r.pricePeers} nearby ${r.priceTier === 'state' ? 'same-state' : r.priceTier === 'fleet' ? 'fleet' : 'range'} fills`}
                   >
                     +${r.priceDelta.toFixed(2)} vs ${r.priceBenchmark.toFixed(2)}
+                  </div>
+                )}
+                {r.review && (
+                  <div
+                    className="text-[10.5px] mt-0.5 text-[var(--text-tertiary)]"
+                    title={`${REVIEW_LABELS[r.review.status]}${r.review.reviewedByName ? ` by ${r.review.reviewedByName}` : ''}${r.review.note ? ` — ${r.review.note}` : ''}`}
+                  >
+                    {REVIEW_LABELS[r.review.status]}
                   </div>
                 )}
               </div>
