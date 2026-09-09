@@ -7,8 +7,8 @@
  *   - Hero: droplet avatar tile + title `{gallons} gal · {total}` +
  *     identity subtitle + 4-up KPI grid (Gallons / Price-per-gal /
  *     Total / Method)
- *   - Sections: Overview · Payment · Assignment · Attachments · Notes ·
- *     Activity
+ *   - Sections: Overview (price check · review · purchase · assignment) ·
+ *     Payment · Assignment · Attachments · Notes · Activity
  *   - Right rail: linked load (when present)
  */
 
@@ -39,7 +39,10 @@ import {
   WIcon,
 } from '@/components/web';
 import { api } from '@/convex/_generated/api';
+import type { FunctionReturnType } from 'convex/server';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { fuelProductLabel } from '@/convex/lib/fuelTypes';
+import { REVIEW_LABELS, REVIEW_STATUSES, type ReviewStatus } from '@/convex/lib/fuelReview';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import type { Id } from '@/convex/_generated/dataModel';
 
@@ -78,6 +81,11 @@ export function FuelEntryDetailContent({ id }: { id: string }) {
   const removeDefEntry = useMutation(api.defEntries.remove);
   const updateFuelEntry = useMutation(api.fuelEntries.update);
   const updateDefEntry = useMutation(api.defEntries.update);
+  const setReview = useMutation(api.fuelReview.setReview);
+
+  // The same benchmark the Fuel reports page flags against, plus the
+  // fills behind it — see fuelReports.entryPriceCheck.
+  const priceCheck = useAuthQuery(api.fuelReports.entryPriceCheck, { type: entryType, entryId: id });
 
   const [isDeleting, setIsDeleting] = React.useState(false);
   // Controlled active-section so the comments-peek "Open →" link in the
@@ -247,8 +255,9 @@ export function FuelEntryDetailContent({ id }: { id: string }) {
   // ─── Section: Overview (Audit-first variant) ──────────────────────────
   // Layout follows details-diesel.jsx → DsOverviewAudit:
   //   ┌───────────────────┬─────────────────┐
-  //   │ Location (map)    │ Anomaly signals │
-  //   │ Price audit       │ Assignment      │
+  //   │ Location (map)    │ Price check     │
+  //   │ Review            │ Purchase        │
+  //   │ Assignment        │                 │
   //   └───────────────────┴─────────────────┘
   // The Location card is omitted entirely when the entry has no city/state.
   const purchaseEditor = (
@@ -342,20 +351,37 @@ export function FuelEntryDetailContent({ id }: { id: string }) {
         purchaseEditor
       )}
 
-      <DSCard title="Price audit">
-        <PriceAudit ppg={ppg} gallons={gallons} city={entry.location?.city} />
+      <DSCard title="Price check">
+        <PriceCheck
+          check={priceCheck}
+          ppg={ppg}
+          gallons={gallons}
+          total={total}
+          onOpenPeer={(peerId, peerType) =>
+            router.push(`/operations/diesel/${peerId}${peerType === 'def' ? '?type=def' : ''}`)
+          }
+        />
       </DSCard>
 
-      <DSCard title="Anomaly signals">
-        <DSActivity
-          items={buildAnomalySignals({
-            ppg,
+      <DSCard title="Review">
+        <ReviewBlock
+          check={priceCheck}
+          review={entry.review ?? null}
+          signals={buildOtherSignals({
             method: entry.paymentMethod,
             methodLabel,
             hasReceipt: !!(entry.receiptUrl || entry.receiptStorageId),
             loadRef: entry.loadReference ?? (entry.loadId ? String(entry.loadId) : null),
-            city: entry.location?.city,
           })}
+          onSet={async (status, note) => {
+            try {
+              await setReview({ type: entryType, entryId: id, status, note });
+              toast.success(status ? `Marked ${REVIEW_LABELS[status]}` : 'Review cleared');
+            } catch (e) {
+              console.error(e);
+              toast.error('Failed to save review');
+            }
+          }}
         />
       </DSCard>
 
@@ -773,106 +799,354 @@ function MapPlaceholder({ city }: { city: string }) {
   );
 }
 
-// ─── Price audit ────────────────────────────────────────────────────────
-// Three-row comparison with a delta callout. Regional / fleet averages are
-// placeholder constants until the analytics rollup ships; the callout
-// tone reacts to the live delta so the visual hierarchy still works.
-function PriceAudit({ ppg, gallons, city }: { ppg: number; gallons: number; city?: string }) {
-  // TODO: replace with real Convex aggregates once we have them.
-  const regAvg = 4.20;
-  const fleetAvg = 4.18;
-  const delta = ppg - regAvg;
-  const over = delta > 0.1;
-  return (
-    <div className="flex flex-col gap-2.5">
-      <PriceRow label="This purchase" value={`$${ppg.toFixed(3)}`} accent />
-      <PriceRow label={`Regional avg${city ? ` (${city})` : ''}`} value={`$${regAvg.toFixed(3)}`} />
-      <PriceRow label="Fleet 30-day avg" value={`$${fleetAvg.toFixed(3)}`} />
-      <div
-        className="mt-1 px-2.5 py-2 rounded-md inline-flex items-center gap-2"
-        style={{
-          background: over ? 'rgba(245,158,11,0.10)' : 'rgba(16,185,129,0.08)',
-          border: `1px solid ${over ? 'rgba(245,158,11,0.25)' : 'rgba(16,185,129,0.20)'}`,
-        }}
-      >
-        <WIcon name={over ? 'alert' : 'check'} size={13} style={{ color: over ? '#A66800' : '#0F8C5F' }} />
-        <span className="text-[12px] font-medium" style={{ color: over ? '#A66800' : '#0F8C5F' }}>
-          {delta > 0 ? '+' : ''}${delta.toFixed(3)}/gal vs regional avg
-          {gallons > 0 && (
-            <>{' '}({delta > 0 ? '+' : ''}${(delta * gallons).toFixed(2)} total)</>
-          )}
-        </span>
-      </div>
-    </div>
-  );
-}
+// ─── Price check ────────────────────────────────────────────────────────
+// One verdict against the benchmark the Fuel reports page uses (median
+// $/gal of the fleet's other fills of the same product within ±3 days,
+// same state first), the dollar impact on its own line, the entry
+// errors that would explain an outlier, and the fills behind the median
+// so the user can see what "nearby" meant.
 
-function PriceRow({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+type PriceCheckData = FunctionReturnType<typeof api.fuelReports.entryPriceCheck>;
+type PriceCause = NonNullable<PriceCheckData>['causes'][number];
+
+const TONE = {
+  ok:     { bg: 'rgba(16,185,129,0.08)', bd: 'rgba(16,185,129,0.20)', fg: '#0F8C5F', icon: 'check' as const },
+  warn:   { bg: 'rgba(245,158,11,0.10)', bd: 'rgba(245,158,11,0.25)', fg: '#A66800', icon: 'alert' as const },
+  danger: { bg: 'rgba(239,68,68,0.08)',  bd: 'rgba(239,68,68,0.22)',  fg: '#C33C3C', icon: 'alert' as const },
+  muted:  { bg: 'var(--bg-surface-2)',   bd: 'var(--border-hairline)', fg: 'var(--text-secondary)', icon: 'circle-dot' as const },
+};
+type Tone = keyof typeof TONE;
+
+function Callout({ tone, children }: { tone: Tone; children: React.ReactNode }) {
+  const t = TONE[tone];
   return (
-    <div className="flex items-center justify-between">
-      <span
-        className="text-[12.5px]"
-        style={{ color: accent ? 'var(--text-primary)' : 'var(--text-secondary)', fontWeight: accent ? 500 : 400 }}
-      >
-        {label}
-      </span>
-      <span
-        className="num text-[13px]"
-        style={{ color: accent ? 'var(--accent)' : 'var(--text-primary)', fontWeight: accent ? 600 : 500 }}
-      >
-        {value}
+    <div
+      className="px-2.5 py-2 rounded-md flex items-start gap-2"
+      style={{ background: t.bg, border: `1px solid ${t.bd}` }}
+    >
+      <WIcon name={t.icon} size={13} style={{ color: t.fg, marginTop: 2, flexShrink: 0 }} />
+      <span className="text-[12.5px] font-medium leading-[18px]" style={{ color: t.fg }}>
+        {children}
       </span>
     </div>
   );
 }
 
-// ─── Anomaly signals builder ────────────────────────────────────────────
-// Each rule emits one DSActivity item — `alert` for things that need a
-// human review, `check` for things in the clear, `circle-dot` for neutral
-// observations. The 4-rule shape matches the design's Anomaly card.
-type AnomalyItem = { icon: 'alert' | 'check' | 'circle-dot'; text: string; when: string };
-function buildAnomalySignals({
+/** "12 other diesel fills in CA within 3 days" — what the median was taken over. */
+function peerScope(check: NonNullable<PriceCheckData>, state?: string): string {
+  const { assessment: a, rule } = check;
+  const product = fuelProductLabel(check.product).toLowerCase();
+  const n = `${a.peers} other ${product} fill${a.peers === 1 ? '' : 's'}`;
+  switch (a.tier) {
+    case 'state': return `${n} in ${state?.toUpperCase() ?? 'the same state'} within ${rule.windowDays} days`;
+    case 'fleet': return `${n} across the fleet within ${rule.windowDays} days`;
+    case 'thin': return `the only ${n} within ${rule.windowDays} days`;
+    default: return n;
+  }
+}
+
+function causeText(cause: PriceCause, check: NonNullable<PriceCheckData>, ppg: number, gallons: number, total: number): string {
+  const b = check.assessment.benchmark;
+  switch (cause) {
+    case 'swapped':
+      return `Price and gallons look swapped: $${gallons.toFixed(3)}/gal × ${ppg.toFixed(2)} gal would sit with nearby fills and still add up to the total.`;
+    case 'total_as_price':
+      return `The price equals the receipt total ($${total.toFixed(2)}). The total may have been typed into the price field.`;
+    case 'decimal': {
+      const fixed = b !== null && Math.abs(ppg / 10 - b) <= Math.abs(ppg / 100 - b) ? ppg / 10 : ppg / 100;
+      return `A decimal point may have slipped: $${fixed.toFixed(3)}/gal would match nearby fills.`;
+    }
+    case 'product': {
+      const other = fuelProductLabel(check.otherProduct);
+      const ob = check.otherBenchmark;
+      return `Priced like ${other} (nearby ${other} fills run about $${ob?.toFixed(3)}/gal). This may be a ${other} purchase logged as ${fuelProductLabel(check.product).toLowerCase()}.`;
+    }
+    case 'mismatch':
+      return `$${ppg.toFixed(3)} × ${gallons.toFixed(2)} gal = $${(ppg * gallons).toFixed(2)}, but the recorded total is $${total.toFixed(2)}. One of the three was entered wrong.`;
+    case 'none':
+      return 'No entry error detected. The price itself is high — check the receipt or the vendor’s pump price.';
+  }
+}
+
+function PriceCheck({
+  check,
   ppg,
+  gallons,
+  total,
+  onOpenPeer,
+}: {
+  check: PriceCheckData | undefined;
+  ppg: number;
+  gallons: number;
+  total: number;
+  onOpenPeer: (id: string, type: 'fuel' | 'def') => void;
+}) {
+  if (check === undefined) {
+    return <p className="m-0 text-[12.5px] text-[var(--text-tertiary)]">Comparing with nearby fills…</p>;
+  }
+  if (check === null) {
+    return <p className="m-0 text-[12.5px] text-[var(--text-tertiary)]">No price check available.</p>;
+  }
+  const { assessment: a, rule } = check;
+  const state = check.peers.find((p) => p.state)?.state;
+  const limitText = `${Math.round(rule.pct * 100)}% or ${Math.round(rule.floor * 100)}¢`;
+
+  let verdict: React.ReactNode;
+  let tone: Tone;
+  if (a.benchmark === null) {
+    tone = 'muted';
+    verdict = (
+      <>No other {fuelProductLabel(check.product).toLowerCase()} fills within {rule.windowDays} days to compare against.</>
+    );
+  } else if (a.tier === 'thin') {
+    // Too few neighbours to judge: show them, draw no conclusion.
+    tone = 'muted';
+    verdict = (
+      <>
+        Only {peerScope(check, state).replace(/^the only /, '')} — fewer than the {rule.minPeers} needed to judge
+        this price. They ran <span className="num">${a.benchmark.toFixed(3)}</span>/gal against{' '}
+        <span className="num">${ppg.toFixed(3)}</span> here.
+      </>
+    );
+  } else if (a.flagged) {
+    tone = a.pct >= 0.25 ? 'danger' : 'warn';
+    verdict = (
+      <>
+        <span className="num">${ppg.toFixed(3)}</span>/gal is <span className="num">{Math.round(a.pct * 100)}%</span> above
+        the <span className="num">${a.benchmark.toFixed(3)}</span> median of {peerScope(check, state)}.
+      </>
+    );
+  } else {
+    tone = 'ok';
+    const below = a.delta < 0 && Math.abs(a.delta) > Math.max(rule.floor, a.benchmark * rule.pct);
+    verdict = below ? (
+      <>
+        <span className="num">${ppg.toFixed(3)}</span>/gal is <span className="num">{Math.round(-a.pct * 100)}%</span> below
+        the <span className="num">${a.benchmark.toFixed(3)}</span> median of {peerScope(check, state)}. A good price.
+      </>
+    ) : (
+      <>
+        <span className="num">${ppg.toFixed(3)}</span>/gal is within {limitText} of
+        the <span className="num">${a.benchmark.toFixed(3)}</span> median of {peerScope(check, state)}.
+      </>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <Callout tone={tone}>{verdict}</Callout>
+
+      {a.flagged && a.benchmark !== null && gallons > 0 && (
+        <p className="m-0 text-[12.5px] text-[var(--text-secondary)]">
+          About <span className="num font-semibold text-foreground">${check.impact.toFixed(2)}</span> more than a
+          typical fill of this size
+          <span className="num text-[var(--text-tertiary)]"> ({gallons.toFixed(1)} gal × ${a.delta.toFixed(3)})</span>.
+        </p>
+      )}
+
+      {check.causes.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-tertiary)]">
+            Likely cause
+          </div>
+          {check.causes.slice(0, 2).map((c) => (
+            <div key={c} className="flex items-start gap-2 text-[12.5px] leading-[18px]">
+              <WIcon
+                name={c === 'none' ? 'circle-dot' : 'edit-pen'}
+                size={12}
+                style={{ color: 'var(--text-tertiary)', marginTop: 3, flexShrink: 0 }}
+              />
+              <span>{causeText(c, check, ppg, gallons, total)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {check.peers.length > 0 && (
+        <div>
+          <div className="flex items-baseline justify-between gap-2 mb-1.5">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-tertiary)]">
+              Fills behind the median
+            </span>
+            {check.peerRange && (
+              <span className="num text-[11px] text-[var(--text-tertiary)]">
+                {a.peers} fills · ${check.peerRange.min.toFixed(3)}–${check.peerRange.max.toFixed(3)}
+              </span>
+            )}
+          </div>
+          <div className="rounded-md border border-[var(--border-hairline)] overflow-hidden">
+            {check.peers.map((p, i) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => onOpenPeer(p.id, p.type)}
+                title="Open this fill"
+                className="focus-ring w-full flex items-center gap-2 px-2.5 text-left bg-transparent cursor-pointer hover:bg-[var(--bg-surface-2)]"
+                style={{
+                  height: 30,
+                  border: 0,
+                  borderTop: i === 0 ? 'none' : '1px solid var(--border-hairline)',
+                }}
+              >
+                <span className="num text-[11.5px] text-[var(--text-tertiary)] shrink-0" style={{ width: 44 }}>
+                  {format(new Date(p.entryDate), 'MMM d')}
+                </span>
+                <span className="text-[12px] truncate flex-1 min-w-0">
+                  {p.vendorName}
+                  {(p.city || p.state) && (
+                    <span className="text-[var(--text-tertiary)]">
+                      {' · '}{[p.city, p.state].filter(Boolean).join(', ')}
+                    </span>
+                  )}
+                </span>
+                <span className="num text-[12px] font-medium shrink-0">${p.pricePerGallon.toFixed(3)}</span>
+              </button>
+            ))}
+          </div>
+          {(a.peers > check.peers.length || check.peersCapped) && (
+            <p className="m-0 mt-1.5 text-[11px] text-[var(--text-tertiary)]">
+              {a.peers > check.peers.length ? `Nearest ${check.peers.length} shown. ` : ''}
+              {check.peersCapped ? 'Very busy window: the farthest fills were left out of the benchmark.' : ''}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Review ─────────────────────────────────────────────────────────────
+// The checks the Fuel reports page counts as exceptions, and the
+// disposition that clears them. A reviewed entry drops out of the
+// exception counts whatever its status — a person has looked.
+
+type SignalItem = { icon: 'alert' | 'check' | 'circle-dot'; text: string; when: string };
+
+function buildOtherSignals({
   method,
   methodLabel,
   hasReceipt,
   loadRef,
-  city,
 }: {
-  ppg: number;
   method?: string;
   methodLabel: string;
   hasReceipt: boolean;
   loadRef: string | null;
-  city?: string;
-}): AnomalyItem[] {
-  const items: AnomalyItem[] = [];
-  // 1. Price-per-gal vs regional avg.
-  const PRICE_OVER_THRESHOLD = 0.10;
-  const REG_AVG = 4.20;
-  const delta = ppg - REG_AVG;
-  if (delta > PRICE_OVER_THRESHOLD) {
-    items.push({ icon: 'alert', text: `Price-per-gal $${ppg.toFixed(3)} is +$${delta.toFixed(2)} over regional avg`, when: city ?? '' });
-  } else {
-    items.push({ icon: 'check', text: 'Price within ±$0.05 of regional average', when: city ?? '' });
-  }
-  // 2. Payment method check.
+}): SignalItem[] {
+  const items: SignalItem[] = [];
   if (method === 'FUEL_CARD') {
-    items.push({ icon: 'check', text: 'Paid on assigned fleet card', when: '' });
+    items.push({ icon: 'check', text: 'Paid on fleet card', when: '' });
   } else {
     items.push({ icon: 'alert', text: `Paid via ${methodLabel} — outside fleet card`, when: '' });
   }
-  // 3. Receipt-on-file check (IFTA requirement).
   if (hasReceipt) {
     items.push({ icon: 'check', text: 'Receipt scan on file', when: '' });
   } else {
     items.push({ icon: 'alert', text: 'No receipt scanned — required for IFTA', when: '' });
   }
-  // 4. Load linkage.
   if (loadRef) {
     items.push({ icon: 'check', text: `Linked to load ${loadRef}`, when: '' });
   } else {
-    items.push({ icon: 'circle-dot', text: 'Not linked to a load (local route)', when: '' });
+    items.push({ icon: 'circle-dot', text: 'Not linked to a load', when: '' });
   }
   return items;
+}
+
+type EntryReview = NonNullable<FuelEntry['review']>;
+
+function ReviewBlock({
+  check,
+  review,
+  signals,
+  onSet,
+}: {
+  check: PriceCheckData | undefined;
+  review: EntryReview | null;
+  signals: SignalItem[];
+  onSet: (status: ReviewStatus | null, note?: string) => Promise<void>;
+}) {
+  const [note, setNote] = React.useState('');
+  const [busy, setBusy] = React.useState<ReviewStatus | 'clear' | null>(null);
+
+  const priceSignal: SignalItem = (() => {
+    if (!check) return { icon: 'circle-dot', text: 'Checking price…', when: '' };
+    const a = check.assessment;
+    if (a.benchmark === null) return { icon: 'circle-dot', text: 'Price: nothing nearby to compare', when: '' };
+    if (a.flagged) return { icon: 'alert', text: `Price ${Math.round(a.pct * 100)}% above nearby fills`, when: '' };
+    return { icon: 'check', text: 'Price in line with nearby fills', when: '' };
+  })();
+  const mismatchSignal: SignalItem[] = check?.mismatch
+    ? [{ icon: 'alert', text: 'Price × gallons does not match the total', when: '' }]
+    : [];
+  const items = [priceSignal, ...mismatchSignal, ...signals];
+  const open = items.filter((i) => i.icon === 'alert').length;
+
+  const act = async (status: ReviewStatus | null) => {
+    setBusy(status ?? 'clear');
+    try {
+      await onSet(status, status ? note : undefined);
+      setNote('');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <DSActivity items={items} />
+
+      <div className="border-t border-[var(--border-hairline)] pt-3">
+        {review ? (
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <Chip status={review.status === 'DRIVER_FOLLOW_UP' ? 'pending' : 'valid'} label={REVIEW_LABELS[review.status]} />
+              <span className="text-[12px] text-[var(--text-secondary)]">
+                {review.reviewedByName ? `by ${review.reviewedByName} · ` : ''}
+                <span className="num">{format(new Date(review.reviewedAt), 'MMM d, yyyy')}</span>
+              </span>
+              <span className="flex-1" />
+              <WBtn size="xs" variant="ghost" disabled={busy !== null} onClick={() => act(null)}>
+                Clear
+              </WBtn>
+            </div>
+            {review.note && (
+              <p className="m-0 text-[12.5px] text-[var(--text-secondary)]">{review.note}</p>
+            )}
+            <p className="m-0 text-[11px] text-[var(--text-tertiary)]">
+              Not counted as an exception on Fuel reports. Editing the price, gallons, payment, receipt, or load clears this.
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            <div className="text-[12.5px] font-medium">
+              {open === 0 ? 'Nothing open on this entry.' : `${open} item${open === 1 ? '' : 's'} open. Mark this entry:`}
+            </div>
+            <input
+              type="text"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Note (optional) — e.g. DEF pump, receipt confirms"
+              className="focus-ring w-full h-8 px-2.5 rounded-md border border-[var(--border-hairline)] bg-transparent text-[12.5px]"
+            />
+            <div className="flex flex-wrap gap-1.5">
+              {REVIEW_STATUSES.map((s) => (
+                <WBtn
+                  key={s}
+                  size="xs"
+                  variant={s === 'OK' ? 'primary' : 'secondary'}
+                  disabled={busy !== null}
+                  onClick={() => act(s)}
+                >
+                  {busy === s ? 'Saving…' : REVIEW_LABELS[s]}
+                </WBtn>
+              ))}
+            </div>
+            <p className="m-0 text-[11px] text-[var(--text-tertiary)]">
+              Reviewed entries drop out of the exception counts on Fuel reports.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }

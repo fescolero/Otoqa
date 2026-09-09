@@ -48,6 +48,7 @@ async function insertFuel(
     loadId?: Id<'loadInformation'>;
     paymentMethod?: 'FUEL_CARD' | 'CASH';
     receiptStorageId?: Id<'_storage'>;
+    reviewed?: boolean;
   },
 ): Promise<void> {
   const now = Date.now();
@@ -62,6 +63,7 @@ async function insertFuel(
     totalCost: opts.gallons * opts.ppg,
     paymentMethod: opts.paymentMethod,
     receiptStorageId: opts.receiptStorageId,
+    review: opts.reviewed ? { status: 'OK', reviewedAt: now, reviewedBy: USER } : undefined,
     createdAt: now,
     updatedAt: now,
     createdBy: USER,
@@ -194,14 +196,15 @@ describe('reportSummary', () => {
         trackingStatus: 'Pending', customerId, fleet: 'Default', units: 'Pallets',
         workosOrgId: ORG, createdBy: USER, createdAt: now, updatedAt: now,
       });
-      // Baseline diesel @ $4, fuel card, receipt, load: clean.
-      for (let i = 0; i < 4; i++) {
+      // Baseline diesel @ $4, fuel card, receipt, load: clean. Days 1–4,
+      // so three of them sit inside the outlier's ±3-day window.
+      for (let i = 1; i <= 4; i++) {
         await insertFuel(ctx, {
           vendorId, entryDate: T0 + i * DAY, gallons: 100, ppg: 4,
           paymentMethod: 'FUEL_CARD', receiptStorageId: receipt, loadId,
         });
       }
-      // Outlier diesel @ $4.50 (> avg + 0.20), cash, no receipt, no load.
+      // Outlier diesel @ $4.50 (> median + 25¢), cash, no receipt, no load.
       await insertFuel(ctx, {
         vendorId, entryDate: T0 + 5 * DAY, gallons: 10, ppg: 4.5, paymentMethod: 'CASH',
       });
@@ -342,6 +345,35 @@ describe('reportSummary', () => {
     expect(res.exceptions.mismatch).toBe(1);
     expect(res.exceptions.price).toBe(0);
     expect(res.exceptions.total).toBe(4 + 4 + 1); // receipt + unlink on all four, plus the mismatch
+  });
+
+  it('stops counting a reviewed row as an exception, and finds it again under the reviewed filter', async () => {
+    const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
+    const vendorId = await t.run(async (ctx) => seedVendor(ctx, 'Pilot'));
+    await t.run(async (ctx) => {
+      // Two off-card fills with no receipt or load: one reviewed, one not.
+      await insertFuel(ctx, { vendorId, entryDate: T0, gallons: 10, ppg: 4, paymentMethod: 'CASH', reviewed: true });
+      await insertFuel(ctx, { vendorId, entryDate: T0 + DAY, gallons: 10, ppg: 4, paymentMethod: 'CASH' });
+    });
+    const entryArgs = { organizationId: ORG, dateRangeStart: T0, dateRangeEnd: T0 + 7 * DAY };
+    const args = { ...entryArgs, bucketStarts: [T0] };
+
+    const all = await t.query(api.fuelReports.reportSummary, args);
+    expect(all.totals.entries).toBe(2);
+    expect(all.exceptions).toEqual({ receipt: 1, offcard: 1, price: 0, unlink: 1, mismatch: 0, total: 3, reviewed: 1 });
+
+    const offcard = await t.query(api.fuelReports.reportSummary, { ...args, exceptions: ['offcard'] });
+    expect(offcard.totals.entries).toBe(1);
+
+    const reviewed = await t.query(api.fuelReports.reportSummary, { ...args, exceptions: ['reviewed'] });
+    expect(reviewed.totals.entries).toBe(1);
+    expect(reviewed.exceptions.total).toBe(0);
+    expect(reviewed.exceptions.reviewed).toBe(1);
+
+    const rows = await t.query(api.fuelReports.reportEntries, { ...entryArgs, exceptions: ['reviewed'] });
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].exceptions).toEqual([]);
+    expect(rows.rows[0].review?.status).toBe('OK');
   });
 
   it('drops rows dated before the first bucket from the chart but not the totals', async () => {

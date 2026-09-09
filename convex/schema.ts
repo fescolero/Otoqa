@@ -2,6 +2,7 @@ import { defineSchema, defineTable } from 'convex/server';
 import { v } from 'convex/values';
 import { scheduleRuleValidator } from './lib/validators';
 import { fuelTypeValidator } from './lib/fuelTypes';
+import { reviewValidator } from './lib/fuelReview';
 import { loadCompletionSourceValidator, stopSyncValidator } from './_helpers/loadProgress';
 import {
   chargeComponents,
@@ -3838,6 +3839,8 @@ export default defineSchema({
     ),
     notes: v.optional(v.string()),
     receiptStorageId: v.optional(v.id('_storage')),
+    /** Human disposition of the entry's exceptions; see lib/fuelReview. */
+    review: v.optional(reviewValidator),
     createdAt: v.number(),
     updatedAt: v.number(),
     createdBy: v.string(),
@@ -3884,6 +3887,8 @@ export default defineSchema({
     ),
     notes: v.optional(v.string()),
     receiptStorageId: v.optional(v.id('_storage')),
+    /** Human disposition of the entry's exceptions; see lib/fuelReview. */
+    review: v.optional(reviewValidator),
     createdAt: v.number(),
     updatedAt: v.number(),
     createdBy: v.string(),

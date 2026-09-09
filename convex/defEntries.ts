@@ -4,6 +4,7 @@ import { paginationOptsValidator } from 'convex/server';
 import type { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
+import { REVIEW_SENSITIVE_FIELDS } from './lib/fuelReview';
 import { loadReferenceOf } from './lib/loadReference';
 
 const paymentMethodValidator = v.optional(
@@ -352,9 +353,16 @@ export const update = mutation({
     // value in place. `ctx.db.patch` deletes a field whose value is
     // `undefined`, so translate the signal here — and leave the key
     // out entirely when the client didn't send it.
+    // A review judged the figures as they stood; once one of those
+    // figures changes the decision no longer applies (lib/fuelReview).
+    const reviewStale =
+      existing.review !== undefined &&
+      changedFields.some((f) => (REVIEW_SENSITIVE_FIELDS as readonly string[]).includes(f));
+
     const { driverId, carrierId, truckId, loadId, ...patchable } = updates;
     await ctx.db.patch(args.entryId, {
       ...patchable,
+      ...(reviewStale ? { review: undefined } : {}),
       ...(driverId !== undefined ? { driverId: driverId ?? undefined } : {}),
       ...(carrierId !== undefined ? { carrierId: carrierId ?? undefined } : {}),
       ...(truckId !== undefined ? { truckId: truckId ?? undefined } : {}),

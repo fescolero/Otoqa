@@ -3,12 +3,15 @@ import { paginationOptsValidator } from 'convex/server';
 import { query, type QueryCtx } from './_generated/server';
 import type { Doc, Id } from './_generated/dataModel';
 import { loadReferenceOf } from './lib/loadReference';
-import { assertCallerOwnsOrg } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 import { DEFAULT_FUEL_TYPE, FUEL_PRODUCT_ORDER, type FuelProduct } from './lib/fuelTypes';
 import {
+  assessOne,
   assessPrices,
+  diagnosePrice,
   isTotalMismatch,
   PRICE_ANOMALY,
+  type AnomalyInput,
   type PriceAssessment,
   type PriceTier,
 } from './lib/fuelAnomaly';
@@ -649,7 +652,10 @@ const reportFilterArgs = {
   truckIds: v.optional(v.array(v.string())),
   vendorIds: v.optional(v.array(v.string())),
   fuelTypes: v.optional(v.array(v.string())),
-  /** Exception rule ids (see EXCEPTION_IDS); a row matches if ANY applies. */
+  /**
+   * Exception rule ids (see EXCEPTION_IDS); a row matches if ANY applies.
+   * The pseudo-id `reviewed` matches rows carrying a review instead.
+   */
   exceptions: v.optional(v.array(v.string())),
 };
 
@@ -665,11 +671,19 @@ type ReportFilters = {
 /** The five exception rules the reports page can count and filter by. */
 export const EXCEPTION_IDS = ['receipt', 'offcard', 'price', 'unlink', 'mismatch'] as const;
 export type ExceptionId = (typeof EXCEPTION_IDS)[number];
+/** Exception-filter value that selects reviewed rows (which trip no rule). */
+export const REVIEWED_FILTER = 'reviewed';
 
-/** Which rules a row trips. `price` needs its assessment. */
+/**
+ * Which rules a row trips. `price` needs its assessment. A reviewed row
+ * trips nothing: a person has already taken the decision the flags were
+ * asking for (see lib/fuelReview), and the `reviewed` filter is how the
+ * page gets those rows back.
+ */
 function exceptionsFor(row: RangeRow, price: PriceAssessment | undefined): ExceptionId[] {
   const { entry } = row;
   const out: ExceptionId[] = [];
+  if (entry.review) return out;
   if (!entry.receiptStorageId) out.push('receipt');
   if (entry.paymentMethod && entry.paymentMethod !== 'FUEL_CARD') out.push('offcard');
   if (price?.flagged) out.push('price');
@@ -705,6 +719,7 @@ function applyReportFilters(
     if (vendor && !vendor.has(entry.vendorId)) return false;
     if (product && !product.has(p)) return false;
     if (exception) {
+      if (entry.review) return exception.has(REVIEWED_FILTER);
       const hits = exceptionsFor(row, assess?.get(entry._id as string));
       if (!hits.some((id) => exception.has(id))) return false;
     }
@@ -915,9 +930,12 @@ export const reportSummary = query({
     // priceTiers says which peer set judged each flagged fill — the
     // instrumentation for deciding whether an external benchmark is worth
     // adding.
-    const exceptions = { receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0 };
-    const priceTiers: Record<PriceTier, number> = { state: 0, fleet: 0, range: 0, none: 0 };
+    // Reviewed rows trip no rule; they are counted apart so the card can
+    // say how many flags a person has already cleared.
+    const exceptions = { receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0, reviewed: 0 };
+    const priceTiers: Record<PriceTier, number> = { state: 0, fleet: 0, thin: 0, none: 0 };
     for (const row of rows) {
+      if (row.entry.review) { exceptions.reviewed++; continue; }
       const a = range.assess.get(row.entry._id as string);
       for (const id of exceptionsFor(row, a)) exceptions[id]++;
       if (a?.flagged) priceTiers[a.tier]++;
@@ -1042,8 +1060,9 @@ function projectRow(row: RangeRow, names: RowNames, price: PriceAssessment | und
     pricePct: price?.pct ?? 0,
     priceTier: (price?.tier ?? 'none') as PriceTier,
     pricePeers: price?.peers ?? 0,
-    /** Every exception rule this row trips. */
+    /** Every exception rule this row trips (none once reviewed). */
     exceptions: exceptionsFor(row, price),
+    review: entry.review ?? null,
   };
 }
 
@@ -1159,6 +1178,122 @@ export const reportPurchases = query({
       continueCursor: nextOffset >= rows.length ? '' : String(nextOffset),
       splitCursor: null,
       pageStatus: null,
+    };
+  },
+});
+
+// ─── Per-entry price check ─────────────────────────────────────────────
+
+/** Nearest peers the detail page lists under the verdict. */
+const PEER_LIST_ROWS = 8;
+
+function toAnomalyInput(row: RangeRow): AnomalyInput {
+  const { entry, product } = row;
+  return {
+    id: entry._id as string,
+    product,
+    entryDate: entry.entryDate,
+    pricePerGallon: entry.pricePerGallon,
+    gallons: entry.gallons,
+    totalCost: entry.totalCost,
+    state: entry.location?.state,
+  };
+}
+
+/**
+ * The price check behind one fuel / DEF entry's detail page: the same
+ * benchmark the reports use (same product, same tiers, same window) plus
+ * the fills that produced it, and — when the price is out of line — the
+ * entry errors that would explain it.
+ *
+ * The pool is every fill within the anomaly window either side of the
+ * entry, read as two windows from the entry outwards (newest-first
+ * before it, oldest-first after) so an overflow drops the farthest
+ * fills, never the nearest.
+ *
+ * Each side is read under the reports' RANGE cap, not their side-window
+ * cap: the reports keep every in-range fill (up to MAX_RANGE_ROWS) as a
+ * peer, so a window read under a smaller cap could hold fewer peers than
+ * the reports had and land on a different median. With the same cap this
+ * page always holds at least the peers the reports did, so the two agree
+ * unless a read overflowed — which both surface (truncated / peersCapped).
+ * Budget: 2 sides × 2 tables × (MAX_RANGE_ROWS + 1) ≈ 12,000 documents,
+ * inside the per-query limit, and this query reads nothing else of size.
+ */
+export const entryPriceCheck = query({
+  args: {
+    type: v.union(v.literal('fuel'), v.literal('def')),
+    entryId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const id = ctx.db.normalizeId(args.type === 'fuel' ? 'fuelEntries' : 'defEntries', args.entryId);
+    if (!id) return null;
+    const entry = await ctx.db.get(id);
+    if (!entry || entry.organizationId !== callerOrgId) return null;
+
+    const product: FuelProduct =
+      args.type === 'def' ? 'DEF' : (((entry as Doc<'fuelEntries'>).fuelType ?? DEFAULT_FUEL_TYPE) as FuelProduct);
+    const me: AnomalyInput = toAnomalyInput({ entry, type: args.type, product });
+
+    const [before, after] = await Promise.all([
+      loadRangeRows(ctx, callerOrgId, entry.entryDate - ANOMALY_WINDOW_MS, entry.entryDate, MAX_RANGE_ROWS),
+      loadRangeRows(ctx, callerOrgId, entry.entryDate + 1, entry.entryDate + ANOMALY_WINDOW_MS, MAX_RANGE_ROWS, 'asc'),
+    ]);
+    const pool = [...before.rows, ...after.rows].filter((r) => (r.entry._id as string) !== me.id);
+    const inputs = pool.map(toAnomalyInput);
+
+    const { assessment, peers } = assessOne(me, inputs);
+
+    // What the fill would have been judged against as the OTHER product,
+    // for the "priced like DEF" diagnosis. Only trusted with a real
+    // windowed tier behind it.
+    const otherProduct: FuelProduct = product === 'DEF' ? (DEFAULT_FUEL_TYPE as FuelProduct) : 'DEF';
+    const other = assessOne({ ...me, product: otherProduct }, inputs).assessment;
+    const otherBenchmark = other.tier === 'state' || other.tier === 'fleet' ? other.benchmark : null;
+
+    const mismatch = isTotalMismatch(entry);
+    const causes = assessment.flagged || mismatch
+      ? diagnosePrice(me, assessment.benchmark, otherBenchmark)
+      : [];
+
+    const shown = peers.slice(0, PEER_LIST_ROWS);
+    const byId = new Map(pool.map((r) => [r.entry._id as string, r]));
+    const vendorIds = new Set(shown.map((p) => byId.get(p.id)!.entry.vendorId));
+    const vendors = await Promise.all([...vendorIds].map((vid) => ctx.db.get(vid)));
+    const vendorName = new Map<string, string>();
+    for (const doc of vendors) if (doc) vendorName.set(doc._id, doc.name);
+
+    const prices = peers.map((p) => p.pricePerGallon);
+    return {
+      product,
+      otherProduct,
+      assessment,
+      rule: PRICE_ANOMALY,
+      /** A window overflowed its cap; the farthest fills were dropped. */
+      peersCapped: before.truncated || after.truncated,
+      peerRange: prices.length ? { min: Math.min(...prices), max: Math.max(...prices) } : null,
+      peers: shown.map((p) => {
+        const row = byId.get(p.id)!;
+        return {
+          id: p.id,
+          type: row.type,
+          entryDate: p.entryDate,
+          vendorName: vendorName.get(row.entry.vendorId) ?? 'Unknown',
+          city: row.entry.location?.city,
+          state: row.entry.location?.state,
+          pricePerGallon: p.pricePerGallon,
+          gallons: p.gallons,
+        };
+      }),
+      /** The other product's benchmark, when it had a windowed tier behind it. */
+      otherBenchmark,
+      mismatch,
+      /** Ordered most likely first; empty when nothing is out of line. */
+      causes,
+      /** Extra dollars on this fill versus the benchmark (0 when not flagged). */
+      impact: assessment.flagged && assessment.benchmark !== null ? assessment.delta * entry.gallons : 0,
+      review: entry.review ?? null,
     };
   },
 });
