@@ -52,6 +52,7 @@ import { cn } from '@/lib/utils';
 import { useAuthPaginatedQuery, useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { exportToCSV } from '@/lib/csv-export';
+import { nicePriceTicks } from '@/lib/charts/price-ticks';
 
 const FLEET_MPG = 6.4;
 
@@ -1279,16 +1280,23 @@ function ComboChart({
   // bucket total — each bar starts at the baseline.
   const maxSpend =
     Math.max(...data.flatMap((d) => products.map((t) => d.byType[t] ?? 0))) * 1.1 || 1;
-  // Price scale spans every product's observed $/gal so all trend lines
-  // share one hidden scale; only real data points contribute.
+  // Price scale: every product's $/gal shares one scale, shown on the
+  // right axis. The observed band is padded and snapped to clean steps so
+  // a ten-cent move reads as a nudge rather than filling the plot, and a
+  // one-day partial bucket at the range edge can't set the scale for
+  // everything else. Only real data points contribute.
   const livePpgs = data.flatMap((d) =>
     products
       .map((t) => d.ppgByType[t])
       .filter((v): v is number => v != null),
   );
-  const ppgMin = livePpgs.length > 0 ? Math.min(...livePpgs) - 0.06 : 0;
-  const ppgMax = livePpgs.length > 0 ? Math.max(...livePpgs) + 0.06 : 1;
+  const priceTicks =
+    livePpgs.length > 0 ? nicePriceTicks(Math.min(...livePpgs), Math.max(...livePpgs)) : [0, 1];
+  const ppgMin = priceTicks[0];
+  const ppgMax = priceTicks[priceTicks.length - 1];
   const ppgSpan = ppgMax - ppgMin || 1;
+  const priceY = (v: number) => padT + chartH - ((v - ppgMin) / ppgSpan) * chartH;
+  const AXIS_W = 44; // right gutter for the $/gal labels (HTML, so no stretch)
   const slot = chartW / n;
   // Group geometry: the group takes up to 72% of the slot, capped so a
   // lone series doesn't balloon; each product gets an equal sub-slot
@@ -1300,12 +1308,14 @@ function ComboChart({
   // One trend line per product: collect that product's data points
   // (buckets where it was purchased) and connect them in order — gaps
   // are bridged so the line reads as a continuous trend.
-  const priceLines = products.map((t) => {
+  // Each product's line runs through the horizontal centre of ITS bar
+  // in every bucket — the bucket centre falls between grouped bars.
+  const priceLines = products.map((t, k) => {
     const pts = data.flatMap((d, i) => {
       const v = d.ppgByType[t];
       if (v == null) return [];
       return [{
-        x: padL + slot * i + slot / 2,
+        x: padL + slot * i + (slot - groupW) / 2 + k * subSlot + subSlot / 2,
         y: padT + chartH - ((v - ppgMin) / ppgSpan) * chartH,
         label: d.label,
         value: v,
@@ -1316,14 +1326,14 @@ function ComboChart({
       .join(' ');
     return { product: t, pts, path };
   });
-  const grid = [0, 0.25, 0.5, 0.75, 1];
 
   // Density-aware label cadence: with > 8 buckets show every other label
   // so they don't overlap. Always show first and last.
   const labelCadence = n > 8 ? 2 : 1;
 
   return (
-    <div style={{ position: 'relative' }}>
+    <div className="flex items-start">
+    <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
       <svg
         width="100%"
         viewBox={`0 0 ${W} ${H}`}
@@ -1331,14 +1341,28 @@ function ComboChart({
         style={{ display: 'block', height: 188 }}
         onMouseLeave={() => setHoverIdx(null)}
       >
-        {grid.map((g, i) => (
+        {/* Gridlines follow the price ticks — the one axis on the chart —
+            so every label sits on a line. */}
+        {priceTicks.map((v) => (
           <line
-            key={i}
+            key={`grid-${v}`}
             x1={padL}
-            y1={padT + chartH * g}
+            y1={priceY(v)}
             x2={W - padR}
-            y2={padT + chartH * g}
+            y2={priceY(v)}
             stroke="var(--border-hairline)"
+            strokeWidth={1}
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+        {priceTicks.map((v) => (
+          <line
+            key={`tick-${v}`}
+            x1={W - padR - 4}
+            x2={W - padR}
+            y1={priceY(v)}
+            y2={priceY(v)}
+            stroke="var(--border-hairline-strong)"
             strokeWidth={1}
             vectorEffect="non-scaling-stroke"
           />
@@ -1435,6 +1459,23 @@ function ComboChart({
           );
         })}
       </div>
+    </div>
+    {/* $/gal axis — HTML labels beside the SVG so they never stretch. */}
+    <div
+      aria-hidden
+      className="shrink-0"
+      style={{ position: 'relative', width: AXIS_W, height: 188 }}
+    >
+      {priceTicks.map((v) => (
+        <span
+          key={v}
+          className="num absolute text-[9.5px] text-[var(--text-tertiary)]"
+          style={{ left: 6, top: (priceY(v) / H) * 188, transform: 'translateY(-50%)' }}
+        >
+          {`$${v.toFixed(2)}`}
+        </span>
+      ))}
+    </div>
     </div>
   );
 }
