@@ -1,8 +1,10 @@
 import { v } from 'convex/values';
-import { query } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { paginationOptsValidator } from 'convex/server';
+import { query, type QueryCtx } from './_generated/server';
+import type { Doc, Id } from './_generated/dataModel';
+import { loadReferenceOf } from './lib/loadReference';
 import { assertCallerOwnsOrg } from './lib/auth';
-import { DEFAULT_FUEL_TYPE, type FuelProduct } from './lib/fuelTypes';
+import { DEFAULT_FUEL_TYPE, FUEL_PRODUCT_ORDER, type FuelProduct } from './lib/fuelTypes';
 
 export const fuelByDriver = query({
   args: {
@@ -557,6 +559,452 @@ export const monthlySummary = query({
         totalDefCost: Math.round(totals.totalDefCost * 100) / 100,
       },
       months,
+    };
+  },
+});
+
+// ─── Shared range loading + chip filters ──────────────────────────────
+// The reports page has one pool of rows (fuel + DEF in the date range)
+// and one set of filter chips. Both the row feed (reportEntries) and the
+// aggregate (reportSummary) load and filter that pool the same way so the
+// chart, KPIs and purchases table can never disagree about scope.
+
+type RangeRow = {
+  entry: Doc<'fuelEntries'> | Doc<'defEntries'>;
+  type: 'fuel' | 'def';
+  /** DEF rows come from their own table; untyped fuel rows are diesel. */
+  product: FuelProduct;
+};
+
+/**
+ * Upper bound on rows read per product table per range. A Convex query
+ * may scan a bounded number of documents per transaction; reportSummary
+ * reads two tables for the range AND two for the prior period, plus
+ * lookups, so the cap keeps the worst case well inside that budget.
+ * Reads run newest-first, so when a range exceeds the cap it is the
+ * OLDEST rows that fall out, and every caller surfaces `truncated` so
+ * the page can say the figures are partial rather than silently
+ * under-report.
+ */
+export const MAX_RANGE_ROWS = 3000;
+
+async function loadRangeRows(
+  ctx: QueryCtx,
+  organizationId: string,
+  dateRangeStart: number,
+  dateRangeEnd: number,
+): Promise<{ rows: RangeRow[]; truncated: boolean }> {
+  const [fuelEntries, defEntriesList] = await Promise.all([
+    ctx.db
+      .query('fuelEntries')
+      .withIndex('by_organization_and_date', (q) =>
+        q.eq('organizationId', organizationId)
+          .gte('entryDate', dateRangeStart)
+          .lte('entryDate', dateRangeEnd)
+      )
+      .order('desc')
+      .take(MAX_RANGE_ROWS + 1),
+    ctx.db
+      .query('defEntries')
+      .withIndex('by_organization_and_date', (q) =>
+        q.eq('organizationId', organizationId)
+          .gte('entryDate', dateRangeStart)
+          .lte('entryDate', dateRangeEnd)
+      )
+      .order('desc')
+      .take(MAX_RANGE_ROWS + 1),
+  ]);
+  const truncated =
+    fuelEntries.length > MAX_RANGE_ROWS || defEntriesList.length > MAX_RANGE_ROWS;
+  return {
+    truncated,
+    rows: [
+      ...fuelEntries.slice(0, MAX_RANGE_ROWS).map((entry) => ({
+        entry,
+        type: 'fuel' as const,
+        product: (entry.fuelType ?? DEFAULT_FUEL_TYPE) as FuelProduct,
+      })),
+      ...defEntriesList.slice(0, MAX_RANGE_ROWS).map((entry) => ({
+        entry,
+        type: 'def' as const,
+        product: 'DEF' as FuelProduct,
+      })),
+    ],
+  };
+}
+
+/** Filter-chip args shared by the report queries. Each list is `is any of`. */
+const reportFilterArgs = {
+  driverIds: v.optional(v.array(v.string())),
+  carrierIds: v.optional(v.array(v.string())),
+  truckIds: v.optional(v.array(v.string())),
+  vendorIds: v.optional(v.array(v.string())),
+  fuelTypes: v.optional(v.array(v.string())),
+};
+
+type ReportFilters = {
+  driverIds?: string[];
+  carrierIds?: string[];
+  truckIds?: string[];
+  vendorIds?: string[];
+  fuelTypes?: string[];
+};
+
+/**
+ * Narrow the pool to rows matching every active chip. A chip on an
+ * optional relation (driver / carrier / truck) excludes rows that have
+ * no value — "Driver is any of X" should not show unassigned fills.
+ */
+function applyReportFilters(rows: RangeRow[], f: ReportFilters): RangeRow[] {
+  const driver = f.driverIds?.length ? new Set(f.driverIds) : null;
+  const carrier = f.carrierIds?.length ? new Set(f.carrierIds) : null;
+  const truck = f.truckIds?.length ? new Set(f.truckIds) : null;
+  const vendor = f.vendorIds?.length ? new Set(f.vendorIds) : null;
+  const product = f.fuelTypes?.length ? new Set(f.fuelTypes) : null;
+  if (!driver && !carrier && !truck && !vendor && !product) return rows;
+  return rows.filter(({ entry, product: p }) => {
+    if (driver && (!entry.driverId || !driver.has(entry.driverId))) return false;
+    if (carrier && (!entry.carrierId || !carrier.has(entry.carrierId))) return false;
+    if (truck && (!entry.truckId || !truck.has(entry.truckId))) return false;
+    if (vendor && !vendor.has(entry.vendorId)) return false;
+    if (product && !product.has(p)) return false;
+    return true;
+  });
+}
+
+function sumRows(rows: RangeRow[]) {
+  let spend = 0, gallons = 0, fuelGallons = 0;
+  for (const { entry, product } of rows) {
+    spend += entry.totalCost;
+    gallons += entry.gallons;
+    if (product !== 'DEF') fuelGallons += entry.gallons;
+  }
+  return { spend, gallons, entries: rows.length, fuelGallons };
+}
+
+/**
+ * Everything the reports overview needs, aggregated server-side under
+ * the active filter chips: range totals, prior-period totals for the
+ * KPI deltas, chart buckets split by fuel product, fuel type share,
+ * vendor share and exception counts.
+ *
+ * Buckets are defined by the CALLER. The client already enumerates every
+ * week / month in the range (so empty periods still draw as zero bars)
+ * and it does so in the user's local time zone, which the server cannot
+ * know. So it sends the bucket start instants and the server assigns
+ * each row to the last bucket that starts on or before its entryDate.
+ * Rows before the first bucket are dropped — the client anchors the
+ * first bucket at or before the range start, so that never happens in
+ * practice.
+ *
+ * This replaces client-side bucketing over every raw row. The payload is
+ * now a few dozen buckets and a short list per share card, regardless of
+ * how many entries the range holds.
+ */
+export const reportSummary = query({
+  args: {
+    organizationId: v.string(),
+    dateRangeStart: v.number(),
+    dateRangeEnd: v.number(),
+    /** Ascending bucket start instants (epoch ms). */
+    bucketStarts: v.array(v.number()),
+    /** Prior period for KPI deltas, filtered the same way. */
+    priorStart: v.optional(v.number()),
+    priorEnd: v.optional(v.number()),
+    ...reportFilterArgs,
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
+
+    const hasPrior = args.priorStart !== undefined && args.priorEnd !== undefined;
+    const [range, priorRange] = await Promise.all([
+      loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd),
+      hasPrior
+        ? loadRangeRows(ctx, args.organizationId, args.priorStart!, args.priorEnd!)
+        : Promise.resolve(null),
+    ]);
+    const rows = applyReportFilters(range.rows, args);
+    // A partial prior window would make the delta meaningless; drop it.
+    const prior =
+      priorRange && !priorRange.truncated ? sumRows(applyReportFilters(priorRange.rows, args)) : null;
+
+    // ── Buckets ──
+    const starts = [...args.bucketStarts].sort((a, b) => a - b);
+    const buckets = starts.map((start) => ({
+      start,
+      spend: 0,
+      gallons: 0,
+      entries: 0,
+      spendByType: {} as Partial<Record<FuelProduct, number>>,
+      gallonsByType: {} as Partial<Record<FuelProduct, number>>,
+    }));
+    const bucketIndex = (t: number): number => {
+      // Last start <= t, by binary search.
+      let lo = 0, hi = starts.length - 1, ans = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (starts[mid] <= t) { ans = mid; lo = mid + 1; } else { hi = mid - 1; }
+      }
+      return ans;
+    };
+
+    // ── Shares + exceptions accumulate in the same pass ──
+    const byType = new Map<FuelProduct, { gallons: number; totalCost: number; entries: number }>();
+    const byVendor = new Map<string, { gallons: number; totalCost: number; entries: number }>();
+
+    for (const { entry, product } of rows) {
+      const i = bucketIndex(entry.entryDate);
+      if (i >= 0) {
+        const b = buckets[i];
+        b.spend += entry.totalCost;
+        b.gallons += entry.gallons;
+        b.entries += 1;
+        b.spendByType[product] = (b.spendByType[product] ?? 0) + entry.totalCost;
+        b.gallonsByType[product] = (b.gallonsByType[product] ?? 0) + entry.gallons;
+      }
+      const t = byType.get(product) ?? { gallons: 0, totalCost: 0, entries: 0 };
+      t.gallons += entry.gallons; t.totalCost += entry.totalCost; t.entries += 1;
+      byType.set(product, t);
+      const vKey = entry.vendorId as string;
+      const vAgg = byVendor.get(vKey) ?? { gallons: 0, totalCost: 0, entries: 0 };
+      vAgg.gallons += entry.gallons; vAgg.totalCost += entry.totalCost; vAgg.entries += 1;
+      byVendor.set(vKey, vAgg);
+    }
+
+    // Price anomalies compare within the SAME product — DEF runs a
+    // different price band than diesel, so a blended average would flag
+    // normal entries as soon as multiple products are in scope.
+    const avgByType = new Map<FuelProduct, number>();
+    for (const [t, agg] of byType) {
+      avgByType.set(t, agg.gallons > 0 ? agg.totalCost / agg.gallons : 0);
+    }
+    const exceptions = { receipt: 0, offcard: 0, price: 0, unlink: 0, total: 0 };
+    for (const { entry, product } of rows) {
+      if (!entry.receiptStorageId) exceptions.receipt++;
+      if (entry.paymentMethod && entry.paymentMethod !== 'FUEL_CARD') exceptions.offcard++;
+      const typeAvg = avgByType.get(product) ?? 0;
+      if (typeAvg > 0 && entry.pricePerGallon > typeAvg + 0.2) exceptions.price++;
+      if (!entry.loadId) exceptions.unlink++;
+    }
+    exceptions.total =
+      exceptions.receipt + exceptions.offcard + exceptions.price + exceptions.unlink;
+
+    const vendorDocs = await Promise.all(
+      [...byVendor.keys()].map((id) => ctx.db.get(id as Id<'fuelVendors'>)),
+    );
+    const vendorName = new Map<string, string>();
+    for (const doc of vendorDocs) if (doc) vendorName.set(doc._id, doc.name);
+
+    return {
+      totals: sumRows(rows),
+      prior,
+      /** The range exceeded MAX_RANGE_ROWS; figures cover the newest rows only. */
+      truncated: range.truncated,
+      buckets,
+      byType: [...byType.entries()]
+        .map(([fuelType, d]) => ({
+          fuelType,
+          gallons: d.gallons,
+          totalCost: d.totalCost,
+          avgPricePerGallon: d.gallons > 0 ? d.totalCost / d.gallons : 0,
+          entries: d.entries,
+        }))
+        .sort((a, b) => b.totalCost - a.totalCost),
+      byVendor: [...byVendor.entries()]
+        .map(([vendorId, d]) => ({
+          vendorId,
+          vendorName: vendorName.get(vendorId) ?? 'Unknown',
+          gallons: d.gallons,
+          totalCost: d.totalCost,
+          avgPricePerGallon: d.gallons > 0 ? d.totalCost / d.gallons : 0,
+          entries: d.entries,
+        }))
+        .sort((a, b) => b.totalCost - a.totalCost),
+      exceptions,
+    };
+  },
+});
+
+// ─── Row projection ───────────────────────────────────────────────────
+// Both row feeds (the paginated purchases table and the CSV export)
+// return the same lean shape. Lookups are resolved once per distinct id
+// across the rows handed in, never once per row.
+
+async function resolveRowNames(ctx: QueryCtx, rows: RangeRow[]) {
+  const vendorIds = new Set<Id<'fuelVendors'>>();
+  const driverIds = new Set<Id<'drivers'>>();
+  const carrierIds = new Set<Id<'carrierPartnerships'>>();
+  const truckIds = new Set<Id<'trucks'>>();
+  const loadIds = new Set<Id<'loadInformation'>>();
+  for (const { entry } of rows) {
+    vendorIds.add(entry.vendorId);
+    if (entry.driverId) driverIds.add(entry.driverId);
+    if (entry.carrierId) carrierIds.add(entry.carrierId);
+    if (entry.truckId) truckIds.add(entry.truckId);
+    if (entry.loadId) loadIds.add(entry.loadId);
+  }
+  const [vendors, drivers, carriers, trucks, loads] = await Promise.all([
+    Promise.all([...vendorIds].map((id) => ctx.db.get(id))),
+    Promise.all([...driverIds].map((id) => ctx.db.get(id))),
+    Promise.all([...carrierIds].map((id) => ctx.db.get(id))),
+    Promise.all([...truckIds].map((id) => ctx.db.get(id))),
+    Promise.all([...loadIds].map((id) => ctx.db.get(id))),
+  ]);
+  const names = {
+    vendor: new Map<string, string>(),
+    driver: new Map<string, string>(),
+    carrier: new Map<string, string>(),
+    truck: new Map<string, string>(),
+    load: new Map<string, string | undefined>(),
+  };
+  for (const v of vendors) if (v) names.vendor.set(v._id, v.name);
+  for (const d of drivers) if (d) names.driver.set(d._id, `${d.firstName} ${d.lastName}`);
+  for (const c of carriers) if (c) names.carrier.set(c._id, c.carrierName);
+  for (const t of trucks) if (t) names.truck.set(t._id, t.unitId);
+  for (const l of loads) if (l) names.load.set(l._id, loadReferenceOf(l));
+  return names;
+}
+
+type RowNames = Awaited<ReturnType<typeof resolveRowNames>>;
+
+function projectRow({ entry, type, product }: RangeRow, names: RowNames) {
+  return {
+    _id: entry._id as string,
+    type,
+    entryDate: entry.entryDate,
+    fuelType: product,
+    vendorId: entry.vendorId as string,
+    vendorName: names.vendor.get(entry.vendorId) ?? 'Unknown',
+    driverId: entry.driverId as string | undefined,
+    driverName: entry.driverId ? names.driver.get(entry.driverId) : undefined,
+    carrierId: entry.carrierId as string | undefined,
+    carrierName: entry.carrierId ? names.carrier.get(entry.carrierId) : undefined,
+    truckId: entry.truckId as string | undefined,
+    truckUnitId: entry.truckId ? names.truck.get(entry.truckId) : undefined,
+    loadId: entry.loadId as string | undefined,
+    loadReference: entry.loadId ? names.load.get(entry.loadId) : undefined,
+    gallons: entry.gallons,
+    pricePerGallon: entry.pricePerGallon,
+    totalCost: entry.totalCost,
+    location: entry.location,
+    paymentMethod: entry.paymentMethod,
+    fuelCardNumber: entry.fuelCardNumber,
+    hasReceipt: entry.receiptStorageId !== undefined,
+  };
+}
+
+/**
+ * Every fuel + DEF entry in the range under the active chips, projected
+ * down to the fields the reports page needs. No pagination — this is the
+ * CSV export source, fetched once on click, not a live subscription.
+ * Rows are sorted newest first; `truncated` says the range exceeded
+ * MAX_RANGE_ROWS and only the newest rows are included.
+ */
+export const reportEntries = query({
+  args: {
+    organizationId: v.string(),
+    dateRangeStart: v.number(),
+    dateRangeEnd: v.number(),
+    ...reportFilterArgs,
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
+    const range = await loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd);
+    const rows = applyReportFilters(range.rows, args);
+    const names = await resolveRowNames(ctx, rows);
+    return {
+      rows: rows.map((r) => projectRow(r, names)).sort((a, b) => b.entryDate - a.entryDate),
+      truncated: range.truncated,
+    };
+  },
+});
+
+export const purchaseSortKeyValidator = v.union(
+  v.literal('date'),
+  v.literal('vendor'),
+  v.literal('type'),
+  v.literal('driver'),
+  v.literal('gallons'),
+  v.literal('ppg'),
+  v.literal('total'),
+  v.literal('payment'),
+);
+export type PurchaseSortKey = typeof purchaseSortKeyValidator.type;
+
+/**
+ * The Fuel purchases table: one page of rows under the active chips,
+ * sorted server-side by any column.
+ *
+ * The pool is fuel + DEF merged and sortable by vendor or driver NAME,
+ * so no index can serve the order directly. The query sorts the filtered
+ * range in memory and pages by offset, the same cursor scheme
+ * `fuelEntries.listCombined` uses. Only vendor and driver names are
+ * resolved for the whole pool (they are sort keys); trucks and loads are
+ * resolved for the page alone.
+ *
+ * Ties break newest first so equal keys keep a stable, useful order
+ * across pages.
+ */
+export const reportPurchases = query({
+  args: {
+    organizationId: v.string(),
+    dateRangeStart: v.number(),
+    dateRangeEnd: v.number(),
+    ...reportFilterArgs,
+    sortKey: purchaseSortKeyValidator,
+    sortDir: v.union(v.literal('asc'), v.literal('desc')),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
+    const rows = applyReportFilters(
+      (await loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd)).rows,
+      args,
+    );
+
+    // Names needed to sort. Cheap: one get per distinct vendor / driver.
+    const vendorIds = new Set(rows.map((r) => r.entry.vendorId));
+    const driverIds = new Set(rows.flatMap((r) => (r.entry.driverId ? [r.entry.driverId] : [])));
+    const [vendors, drivers] = await Promise.all([
+      Promise.all([...vendorIds].map((id) => ctx.db.get(id))),
+      Promise.all([...driverIds].map((id) => ctx.db.get(id))),
+    ]);
+    const vendorName = new Map<string, string>();
+    for (const doc of vendors) if (doc) vendorName.set(doc._id, doc.name);
+    const driverName = new Map<string, string>();
+    for (const doc of drivers) if (doc) driverName.set(doc._id, `${doc.firstName} ${doc.lastName}`);
+
+    const dir = args.sortDir === 'asc' ? 1 : -1;
+    const cmp = (a: RangeRow, b: RangeRow): number => {
+      switch (args.sortKey) {
+        case 'date':    return a.entry.entryDate - b.entry.entryDate;
+        case 'vendor':  return (vendorName.get(a.entry.vendorId) ?? '').localeCompare(vendorName.get(b.entry.vendorId) ?? '');
+        // Canonical product order (Diesel, DEF, …) rather than
+        // alphabetical, so the grouping matches the rest of the page.
+        case 'type':    return FUEL_PRODUCT_ORDER.indexOf(a.product) - FUEL_PRODUCT_ORDER.indexOf(b.product);
+        case 'driver':  return (a.entry.driverId ? driverName.get(a.entry.driverId) ?? '' : '').localeCompare(b.entry.driverId ? driverName.get(b.entry.driverId) ?? '' : '');
+        case 'gallons': return a.entry.gallons - b.entry.gallons;
+        case 'ppg':     return a.entry.pricePerGallon - b.entry.pricePerGallon;
+        case 'total':   return a.entry.totalCost - b.entry.totalCost;
+        case 'payment': return (a.entry.paymentMethod ?? '').localeCompare(b.entry.paymentMethod ?? '');
+      }
+    };
+    rows.sort((a, b) => {
+      const c = cmp(a, b);
+      return c !== 0 ? dir * c : b.entry.entryDate - a.entry.entryDate;
+    });
+
+    const offset = args.paginationOpts.cursor ? Number(args.paginationOpts.cursor) : 0;
+    const pageRows = rows.slice(offset, offset + args.paginationOpts.numItems);
+    const nextOffset = offset + pageRows.length;
+    const names = await resolveRowNames(ctx, pageRows);
+
+    return {
+      page: pageRows.map((r) => projectRow(r, names)),
+      isDone: nextOffset >= rows.length,
+      continueCursor: nextOffset >= rows.length ? '' : String(nextOffset),
+      splitCursor: null,
+      pageStatus: null,
     };
   },
 });
