@@ -8,7 +8,7 @@
  * one means the truck is rolling blind, the other means it's free.
  */
 import { convexTest } from 'convex-test';
-import { describe, it, expect } from 'vitest';
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
 import schema from './schema';
 import { api } from './_generated/api';
 import { permissionsForLevel } from '../lib/team-rbac';
@@ -197,6 +197,16 @@ const byName = <T extends { firstName: string }>(rows: T[], name: string): T =>
   rows.find((r) => r.firstName === name)!;
 
 describe('listDrivers — v8 fleet-list enrichment', () => {
+  // The fixtures put the Overdue driver's leg at now - 1h and the query
+  // counts legs scheduled "today" (local midnight to midnight). Real time
+  // makes that leg belong to yesterday for the first hour of each day, so
+  // pin the clock to midday.
+  beforeAll(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
+  });
+  afterAll(() => vi.useRealTimers());
+
   it('derives all four statuses from checkable conditions', async () => {
     const { t, ready } = setup();
     await ready;
