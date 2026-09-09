@@ -52,6 +52,7 @@ import { cn } from '@/lib/utils';
 import { useAuthPaginatedQuery, useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { exportToCSV } from '@/lib/csv-export';
+import { nicePriceTicks } from '@/lib/charts/price-ticks';
 
 const FLEET_MPG = 6.4;
 
@@ -1255,18 +1256,6 @@ function ChartLegend({ items }: { items: Array<{ color: string; label: string; d
 // across buckets where the product wasn't purchased, so sparse data still
 // reads as a trend; dots mark the buckets with real data. Buckets with no
 // activity at all still render so their x-axis label stays anchored.
-/** Nice $/gal axis: pad the observed band, snap to 25¢, ≤ 5 ticks. */
-function nicePriceTicks(min: number, max: number): number[] {
-  const span = Math.max(max - min, 0);
-  const pad = Math.max(0.1, span * 0.2);
-  const lo = Math.floor((min - pad) * 4) / 4;
-  const hi = Math.ceil((max + pad) * 4) / 4;
-  const step = [0.25, 0.5, 1, 2, 5].find((st) => (hi - lo) / st <= 4) ?? 5;
-  const ticks: number[] = [];
-  for (let v = lo; v <= hi + 1e-9; v += step) ticks.push(Math.round(v * 100) / 100);
-  return ticks;
-}
-
 function ComboChart({
   data,
   products,
@@ -1292,7 +1281,7 @@ function ComboChart({
   const maxSpend =
     Math.max(...data.flatMap((d) => products.map((t) => d.byType[t] ?? 0))) * 1.1 || 1;
   // Price scale: every product's $/gal shares one scale, shown on the
-  // right axis. The observed band is padded and snapped to 25¢ steps so
+  // right axis. The observed band is padded and snapped to clean steps so
   // a ten-cent move reads as a nudge rather than filling the plot, and a
   // one-day partial bucket at the range edge can't set the scale for
   // everything else. Only real data points contribute.
