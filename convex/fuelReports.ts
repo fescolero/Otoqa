@@ -726,16 +726,19 @@ const SIDE_WINDOW_ROWS = 300;
 
 /**
  * Rows read per product table for the PRIOR period in reportSummary. The
- * prior period only feeds the KPI deltas, so it gets a smaller cap, no
- * side windows, and price assessments only when the exception chip
- * needs them. Worst-case document reads for one reportSummary call:
+ * prior period only feeds the KPI deltas, so it gets a smaller cap, and
+ * it is price-assessed (with the same side windows as the current
+ * range, so both periods share one set of exception semantics) only
+ * when the exception chip includes "price". Worst-case document reads
+ * for one reportSummary call:
  *
- *   range        2 tables × (MAX_RANGE_ROWS + 1)      6,002
- *   side windows 2 sides × 2 tables × (300 + 1)       1,204
- *   prior        2 tables × (PRIOR_RANGE_ROWS + 1)    4,002
- *   vendor lookups                                    tens
- *                                                    ------
- *                                                   ~11,300
+ *   range              2 tables × (MAX_RANGE_ROWS + 1)      6,002
+ *   side windows       2 sides × 2 tables × (300 + 1)       1,204
+ *   prior              2 tables × (PRIOR_RANGE_ROWS + 1)    4,002
+ *   prior side windows (price chip only)                    1,204
+ *   vendor lookups                                          tens
+ *                                                          ------
+ *                                                         ~12,500
  *
  * comfortably inside Convex's per-query document budget.
  */
@@ -762,9 +765,10 @@ async function loadAssessedRange(
   organizationId: string,
   dateRangeStart: number,
   dateRangeEnd: number,
+  cap: number = MAX_RANGE_ROWS,
 ) {
   const [main, before, after] = await Promise.all([
-    loadRangeRows(ctx, organizationId, dateRangeStart, dateRangeEnd),
+    loadRangeRows(ctx, organizationId, dateRangeStart, dateRangeEnd, cap),
     loadRangeRows(
       ctx, organizationId, dateRangeStart - ANOMALY_WINDOW_MS, dateRangeStart - 1, SIDE_WINDOW_ROWS,
     ),
@@ -848,34 +852,24 @@ export const reportSummary = query({
     const rows = applyReportFilters(range.rows, args, range.assess);
 
     // Prior period for the KPI deltas, filtered by the same chips. It is
-    // read under a smaller cap (see PRIOR_RANGE_ROWS) with no side
-    // windows, and assessed for price only when the Exception chip
-    // includes "price" — otherwise the assessment is never consulted.
-    // Skipped when the main range is truncated (a delta against a partial
-    // period is meaningless), and dropped when the prior window itself
-    // overflows its cap.
+    // read under a smaller cap (see PRIOR_RANGE_ROWS). When the Exception
+    // chip includes "price" it goes through loadAssessedRange like the
+    // current range — same side windows, same benchmark semantics — so
+    // both periods flag the same way; otherwise the assessment is never
+    // consulted and the plain read is enough. Skipped when the main range
+    // is truncated (a delta against a partial period is meaningless), and
+    // dropped when the prior window itself overflows its cap.
     let prior: ReturnType<typeof sumRows> | null = null;
     if (hasPrior && !range.truncated) {
-      const p = await loadRangeRows(
-        ctx, args.organizationId, args.priorStart!, args.priorEnd!, PRIOR_RANGE_ROWS,
-      );
-      if (!p.truncated) {
-        const needsPrice = args.exceptions?.includes('price') ?? false;
-        const priorAssess = needsPrice
-          ? assessPrices(
-              p.rows.map(({ entry, product }) => ({
-                id: entry._id as string,
-                product,
-                entryDate: entry.entryDate,
-                pricePerGallon: entry.pricePerGallon,
-                gallons: entry.gallons,
-                totalCost: entry.totalCost,
-                state: entry.location?.state,
-              })),
-            )
-          : undefined;
-        prior = sumRows(applyReportFilters(p.rows, args, priorAssess));
-      }
+      const needsPrice = args.exceptions?.includes('price') ?? false;
+      const p = needsPrice
+        ? await loadAssessedRange(
+            ctx, args.organizationId, args.priorStart!, args.priorEnd!, PRIOR_RANGE_ROWS,
+          )
+        : { ...(await loadRangeRows(
+            ctx, args.organizationId, args.priorStart!, args.priorEnd!, PRIOR_RANGE_ROWS,
+          )), assess: undefined };
+      if (!p.truncated) prior = sumRows(applyReportFilters(p.rows, args, p.assess));
     }
 
     // ── Buckets ──
