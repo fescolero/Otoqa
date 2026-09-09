@@ -1208,8 +1208,17 @@ function toAnomalyInput(row: RangeRow): AnomalyInput {
  *
  * The pool is every fill within the anomaly window either side of the
  * entry, read as two windows from the entry outwards (newest-first
- * before it, oldest-first after) under the reports' side-window cap, so
- * an overflow drops the farthest fills, never the nearest.
+ * before it, oldest-first after) so an overflow drops the farthest
+ * fills, never the nearest.
+ *
+ * Each side is read under the reports' RANGE cap, not their side-window
+ * cap: the reports keep every in-range fill (up to MAX_RANGE_ROWS) as a
+ * peer, so a window read under a smaller cap could hold fewer peers than
+ * the reports had and land on a different median. With the same cap this
+ * page always holds at least the peers the reports did, so the two agree
+ * unless a read overflowed — which both surface (truncated / peersCapped).
+ * Budget: 2 sides × 2 tables × (MAX_RANGE_ROWS + 1) ≈ 12,000 documents,
+ * inside the per-query limit, and this query reads nothing else of size.
  */
 export const entryPriceCheck = query({
   args: {
@@ -1228,8 +1237,8 @@ export const entryPriceCheck = query({
     const me: AnomalyInput = toAnomalyInput({ entry, type: args.type, product });
 
     const [before, after] = await Promise.all([
-      loadRangeRows(ctx, callerOrgId, entry.entryDate - ANOMALY_WINDOW_MS, entry.entryDate, SIDE_WINDOW_ROWS),
-      loadRangeRows(ctx, callerOrgId, entry.entryDate + 1, entry.entryDate + ANOMALY_WINDOW_MS, SIDE_WINDOW_ROWS, 'asc'),
+      loadRangeRows(ctx, callerOrgId, entry.entryDate - ANOMALY_WINDOW_MS, entry.entryDate, MAX_RANGE_ROWS),
+      loadRangeRows(ctx, callerOrgId, entry.entryDate + 1, entry.entryDate + ANOMALY_WINDOW_MS, MAX_RANGE_ROWS, 'asc'),
     ]);
     const pool = [...before.rows, ...after.rows].filter((r) => (r.entry._id as string) !== me.id);
     const inputs = pool.map(toAnomalyInput);

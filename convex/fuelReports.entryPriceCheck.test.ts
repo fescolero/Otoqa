@@ -129,6 +129,35 @@ describe('entryPriceCheck', () => {
     expect(res!.causes).toEqual(['mismatch']);
   });
 
+  it('agrees with the reports in a window busier than the reports\' side-window cap', async () => {
+    const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
+    const me = await t.run(async (ctx) => {
+      const v = await seedVendor(ctx, 'Pilot');
+      const me = await insertFuel(ctx, { vendorId: v, entryDate: T0, gallons: 100, ppg: 4.6 });
+      // 260 fills at $4 the next day and 260 at $9 two days on — more on
+      // one side than SIDE_WINDOW_ROWS. The reports see all 520 (they are
+      // in range) and land on a $6.50 median: not flagged. A detail read
+      // capped at 250 would keep only the $4 fills and flag it.
+      for (let i = 0; i < 260; i++) {
+        await insertFuel(ctx, { vendorId: v, entryDate: T0 + DAY + 60_000 * (i + 1), gallons: 100, ppg: 4 });
+        await insertFuel(ctx, { vendorId: v, entryDate: T0 + 2 * DAY + 60_000 * (i + 1), gallons: 100, ppg: 9 });
+      }
+      return me;
+    });
+
+    const report = await t.query(api.fuelReports.reportEntries, {
+      organizationId: ORG, dateRangeStart: T0, dateRangeEnd: T0 + 3 * DAY,
+    });
+    const mine = report.rows.find((r) => r._id === me)!;
+    const detail = await t.query(api.fuelReports.entryPriceCheck, { type: 'fuel', entryId: me });
+    expect(mine.priceBenchmark).toBeCloseTo(6.5);
+    expect(mine.exceptions).not.toContain('price');
+    expect(detail!.assessment.benchmark).toBeCloseTo(mine.priceBenchmark!);
+    expect(detail!.assessment.peers).toBe(mine.pricePeers);
+    expect(detail!.assessment.flagged).toBe(false);
+    expect(detail!.peersCapped).toBe(false);
+  });
+
   it('hides entries of other organizations and unknown ids', async () => {
     const t = convexTest(schema);
     const other = await t.run(async (ctx) => {
