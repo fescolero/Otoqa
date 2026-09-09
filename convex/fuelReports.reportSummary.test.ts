@@ -296,6 +296,32 @@ describe('reportSummary', () => {
     expect(row.priceDelta).toBeCloseTo(0.585, 3);
   });
 
+  it('keeps the NEAREST peers when the window after the range overflows its cap', async () => {
+    const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
+    const vendorId = await t.run(async (ctx) => seedVendor(ctx, 'Pilot'));
+    const END = T0 + DAY;
+    await t.run(async (ctx) => {
+      // One fill in range, alone — all its peers come from after the range.
+      await insertFuel(ctx, { vendorId, entryDate: END, gallons: 100, ppg: 4.6 });
+      // 300 fills at $4.00 in the day right after the range …
+      for (let i = 0; i < 300; i++) {
+        await insertFuel(ctx, { vendorId, entryDate: END + 60_000 * (i + 1), gallons: 100, ppg: 4 });
+      }
+      // … and 300 at $9.00 two days later, still inside the 3-day window.
+      for (let i = 0; i < 300; i++) {
+        await insertFuel(ctx, { vendorId, entryDate: END + 2 * DAY + 60_000 * (i + 1), gallons: 100, ppg: 9 });
+      }
+    });
+    // Reading that window newest-first would keep the $9 fills and call
+    // $4.60 cheap. The nearest 300 are the $4 fills, so it is flagged.
+    const res = await t.query(api.fuelReports.reportEntries, {
+      organizationId: ORG, dateRangeStart: T0, dateRangeEnd: END,
+    });
+    expect(res.rows).toHaveLength(1);
+    expect(res.rows[0].priceBenchmark).toBeCloseTo(4, 3);
+    expect(res.rows[0].exceptions).toContain('price');
+  });
+
   it('flags a total that disagrees with price × gallons as a mismatch, not a price anomaly', async () => {
     const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
     const vendorId = await t.run(async (ctx) => seedVendor(ctx, 'Pilot'));

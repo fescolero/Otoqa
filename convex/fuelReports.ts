@@ -601,6 +601,8 @@ async function loadRangeRows(
   dateRangeStart: number,
   dateRangeEnd: number,
   cap: number = MAX_RANGE_ROWS,
+  /** Which end survives the cap: 'desc' keeps the newest rows, 'asc' the oldest. */
+  order: 'desc' | 'asc' = 'desc',
 ): Promise<{ rows: RangeRow[]; truncated: boolean }> {
   const [fuelEntries, defEntriesList] = await Promise.all([
     ctx.db
@@ -610,7 +612,7 @@ async function loadRangeRows(
           .gte('entryDate', dateRangeStart)
           .lte('entryDate', dateRangeEnd)
       )
-      .order('desc')
+      .order(order)
       .take(cap + 1),
     ctx.db
       .query('defEntries')
@@ -619,7 +621,7 @@ async function loadRangeRows(
           .gte('entryDate', dateRangeStart)
           .lte('entryDate', dateRangeEnd)
       )
-      .order('desc')
+      .order(order)
       .take(cap + 1),
   ]);
   const truncated = fuelEntries.length > cap || defEntriesList.length > cap;
@@ -730,7 +732,10 @@ const SIDE_WINDOW_ROWS = 300;
  * side, so fills at the range edges still have neighbours. The side
  * windows are read SEPARATELY, each under its own small cap: reading
  * one widened span newest-first would let the after-window's rows
- * consume the main cap and push requested in-range rows out.
+ * consume the main cap and push requested in-range rows out. Each side
+ * window is read from the end NEAREST the range — newest-first before
+ * it, oldest-first after it — so when a window overflows its cap the
+ * rows kept are the closest peers, not the farthest.
  *
  * The pool is never filtered — benchmarks must mean the same thing
  * whatever chips are active.
@@ -747,7 +752,7 @@ async function loadAssessedRange(
       ctx, organizationId, dateRangeStart - ANOMALY_WINDOW_MS, dateRangeStart - 1, SIDE_WINDOW_ROWS,
     ),
     loadRangeRows(
-      ctx, organizationId, dateRangeEnd + 1, dateRangeEnd + ANOMALY_WINDOW_MS, SIDE_WINDOW_ROWS,
+      ctx, organizationId, dateRangeEnd + 1, dateRangeEnd + ANOMALY_WINDOW_MS, SIDE_WINDOW_ROWS, 'asc',
     ),
   ]);
   const pool = [...main.rows, ...before.rows, ...after.rows];
