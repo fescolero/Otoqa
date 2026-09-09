@@ -25,6 +25,8 @@
 
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
+import { useConvex } from 'convex/react';
+import type { FunctionArgs, FunctionReturnType } from 'convex/server';
 import { format } from 'date-fns';
 
 import {
@@ -46,7 +48,7 @@ import {
   type FuelProduct,
 } from '@/convex/lib/fuelTypes';
 import { cn } from '@/lib/utils';
-import { useAuthQuery } from '@/hooks/use-auth-query';
+import { useAuthPaginatedQuery, useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { exportToCSV } from '@/lib/csv-export';
 
@@ -235,13 +237,6 @@ export function FuelReportsClient() {
   const byTruck = useAuthQuery(api.fuelReports.fuelByTruck, baseArgs);
   const cpm = useAuthQuery(api.fuelReports.costPerMile, baseArgs);
 
-  // Raw rows feed ONLY the Fuel purchases table now. Every aggregate
-  // surface (KPIs, chart, exceptions, shares) comes from reportSummary,
-  // which buckets and filters on the server, so the page no longer has
-  // to carry every entry over the wire to draw a bar. The table still
-  // pulls the full range here until it moves to a paginated query.
-  const reportEntries = useAuthQuery(api.fuelReports.reportEntries, baseArgs);
-  const rawEntries: RawEntry[] = React.useMemo(() => reportEntries ?? [], [reportEntries]);
 
   // Lookup data for the FilterBar options.
   const driversList = useAuthQuery(
@@ -347,23 +342,33 @@ export function FuelReportsClient() {
     const chip = filters.find((c) => c.propId === 'fuelType');
     return new Set(chip?.values ?? []);
   }, [filters]);
-  const anyChip =
-    driverIds.size + carrierIds.size + truckIds.size + vendorIds.size + fuelTypeIds.size > 0;
-
-  // Purchases-table rows under the same chips. Match the entry if its id
-  // is in the selected set; a chip on an optional relation excludes rows
-  // with no value, mirroring applyReportFilters on the server.
-  const filteredEntries = React.useMemo(() => {
-    if (!anyChip) return rawEntries;
-    return rawEntries.filter((e) => {
-      if (driverIds.size > 0 && (!e.driverId || !driverIds.has(e.driverId))) return false;
-      if (vendorIds.size > 0 && !vendorIds.has(e.vendorId)) return false;
-      if (truckIds.size > 0 && (!e.truckId || !truckIds.has(e.truckId))) return false;
-      if (carrierIds.size > 0 && (!e.carrierId || !carrierIds.has(e.carrierId))) return false;
-      if (fuelTypeIds.size > 0 && !fuelTypeIds.has(e.fuelType)) return false;
-      return true;
-    });
-  }, [rawEntries, anyChip, driverIds, vendorIds, truckIds, carrierIds, fuelTypeIds]);
+  // Chip sets as query args. Sorted so an unchanged selection is the same
+  // argument value and doesn't refetch; undefined when a chip is empty so
+  // the server treats it as "no constraint".
+  const chipArgs = React.useMemo<ChipArgs>(
+    () => ({
+      driverIds: driverIds.size ? [...driverIds].sort() : undefined,
+      carrierIds: carrierIds.size ? [...carrierIds].sort() : undefined,
+      truckIds: truckIds.size ? [...truckIds].sort() : undefined,
+      vendorIds: vendorIds.size ? [...vendorIds].sort() : undefined,
+      fuelTypes: fuelTypeIds.size ? [...fuelTypeIds].sort() : undefined,
+    }),
+    [driverIds, carrierIds, truckIds, vendorIds, fuelTypeIds],
+  );
+  // Scope handed to the purchases table, which runs its own paginated
+  // query under the same range + chips.
+  const purchaseScope = React.useMemo<PurchaseScope | null>(
+    () =>
+      organizationId
+        ? {
+            organizationId,
+            dateRangeStart: range.start.getTime(),
+            dateRangeEnd: range.end.getTime(),
+            chips: chipArgs,
+          }
+        : null,
+    [organizationId, range.start, range.end, chipArgs],
+  );
 
   // ─── Chart buckets ────────────────────────────────────────────────────
   // Enumerate EVERY week / month in the selected range up-front so empty
@@ -404,8 +409,7 @@ export function FuelReportsClient() {
   // ─── Server aggregate (range + chips) ─────────────────────────────────
   // One query returns totals, prior-period totals, chart buckets, fuel
   // type share, vendor share and exception counts, all under the active
-  // chips. Chip sets are sorted so an unchanged selection is the same
-  // argument object and doesn't refetch.
+  // chips.
   const summary = useAuthQuery(
     api.fuelReports.reportSummary,
     organizationId
@@ -416,11 +420,7 @@ export function FuelReportsClient() {
           bucketStarts,
           priorStart: range.priorStart.getTime(),
           priorEnd: range.priorEnd.getTime(),
-          driverIds: driverIds.size ? [...driverIds].sort() : undefined,
-          carrierIds: carrierIds.size ? [...carrierIds].sort() : undefined,
-          truckIds: truckIds.size ? [...truckIds].sort() : undefined,
-          vendorIds: vendorIds.size ? [...vendorIds].sort() : undefined,
-          fuelTypes: fuelTypeIds.size ? [...fuelTypeIds].sort() : undefined,
+          ...chipArgs,
         }
       : 'skip',
   );
@@ -622,10 +622,11 @@ export function FuelReportsClient() {
               byFuelType={fuelTypeShare}
               trendBuckets={trendBuckets}
               exceptionCounts={exceptionCounts}
-              rawEntries={filteredEntries}
+              purchases={purchaseScope}
+              exportFilename={`fuel-purchases-${rangeId}-${format(now, 'yyyy-MM-dd')}`}
               onOpenEntry={(id, type) => router.push(`/operations/diesel/${id}?type=${type}`)}
               onOpenExceptions={() => setView('overview')}
-              loading={summary === undefined || reportEntries === undefined}
+              loading={summary === undefined}
             />
           )}
 
@@ -872,7 +873,8 @@ function OverviewView({
   byFuelType,
   trendBuckets,
   exceptionCounts,
-  rawEntries,
+  purchases,
+  exportFilename,
   onOpenEntry,
   onOpenExceptions,
   loading,
@@ -894,7 +896,8 @@ function OverviewView({
   byFuelType: Array<{ fuelType: FuelProduct; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
   trendBuckets: Array<{ label: string; spend: number; gallons: number; entries: number; byType: Partial<Record<FuelProduct, number>>; ppgByType: Partial<Record<FuelProduct, number>> }>;
   exceptionCounts: { receipt: number; offcard: number; price: number; unlink: number; total: number };
-  rawEntries: RawEntry[];
+  purchases: PurchaseScope | null;
+  exportFilename: string;
   onOpenEntry: (id: string, type: 'fuel' | 'def') => void;
   onOpenExceptions: () => void;
   loading: boolean;
@@ -997,7 +1000,12 @@ function OverviewView({
         </DSCard>
       </div>
 
-      <FuelPurchasesTable entries={rawEntries} onOpenEntry={onOpenEntry} />
+      <FuelPurchasesTable
+        scope={purchases}
+        totals={{ spend: totalSpend, gallons: totalGallons, entries: totalEntries }}
+        exportFilename={exportFilename}
+        onOpenEntry={onOpenEntry}
+      />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
         <DSCard title="Spend by fuel type">
@@ -1574,54 +1582,47 @@ function ExceptionsCard({
 }
 
 // ─── Fuel purchases table ───────────────────────────────────────────────
-// Recent transactions for the active range. Click a row to open the
-// fuel-entry detail. The footer adds totals across all visible rows.
-interface RawEntry {
-  _id: string;
-  entryDate: number;
-  vendorId: string;
-  vendorName: string;
-  /** Source table — drives the detail-page link. */
-  type: 'fuel' | 'def';
-  fuelType: FuelProduct;
-  driverName?: string;
-  driverId?: string;
-  carrierId?: string;
-  carrierName?: string;
-  truckId?: string;
-  truckUnitId?: string;
-  loadId?: string;
-  loadReference?: string;
-  gallons: number;
-  pricePerGallon: number;
-  totalCost: number;
-  location?: { city: string; state: string };
-  paymentMethod?: string;
-  fuelCardNumber?: string;
-  /** A receipt scan is attached. Drives the "Missing receipt" exception. */
-  hasReceipt: boolean;
+// Transactions for the active range + chips, paged 50 at a time and
+// sorted on the server by any column. Click a row to open the fuel-entry
+// detail. The footer shows RANGE totals from the aggregate query, not a
+// sum of the rows on screen, so it always agrees with the KPI cards.
+// Export fetches every row in scope once and writes a CSV.
+
+/** Filter chips as report-query args (`is any of` per list). */
+type ChipArgs = {
+  driverIds?: string[];
+  carrierIds?: string[];
+  truckIds?: string[];
+  vendorIds?: string[];
+  fuelTypes?: string[];
+};
+
+interface PurchaseScope {
+  organizationId: string;
+  dateRangeStart: number;
+  dateRangeEnd: number;
+  chips: ChipArgs;
 }
 
-type PurchaseSortKey =
-  | 'date'
-  | 'vendor'
-  | 'type'
-  | 'driver'
-  | 'gallons'
-  | 'ppg'
-  | 'total'
-  | 'payment';
+type PurchaseRow = FunctionReturnType<typeof api.fuelReports.reportEntries>[number];
+type PurchaseSortKey = FunctionArgs<typeof api.fuelReports.reportPurchases>['sortKey'];
+
+const PURCHASES_PAGE_SIZE = 50;
 
 function FuelPurchasesTable({
-  entries,
+  scope,
+  totals,
+  exportFilename,
   onOpenEntry,
 }: {
-  entries: RawEntry[];
+  scope: PurchaseScope | null;
+  totals: { spend: number; gallons: number; entries: number };
+  exportFilename: string;
   onOpenEntry: (id: string, type: 'fuel' | 'def') => void;
 }) {
-  // Sortable columns — default newest first. Sorting runs over the FULL
-  // loaded pool before the 50-row cap, so "top 50 by total" etc. is
-  // meaningful, not just a reorder of the newest 50.
+  const convex = useConvex();
+  // Sortable columns — default newest first. Sort is a query arg, so a
+  // change re-pages from the top of the new order.
   const [sortKey, setSortKey] = React.useState<PurchaseSortKey>('date');
   const [sortDir, setSortDir] = React.useState<'asc' | 'desc'>('desc');
 
@@ -1637,32 +1638,58 @@ function FuelPurchasesTable({
     }
   };
 
-  const rows = React.useMemo(() => {
-    const dir = sortDir === 'asc' ? 1 : -1;
-    const cmp = (a: RawEntry, b: RawEntry): number => {
-      switch (sortKey) {
-        case 'date':    return a.entryDate - b.entryDate;
-        case 'vendor':  return a.vendorName.localeCompare(b.vendorName);
-        // Canonical product order (Diesel, DEF, …) rather than
-        // alphabetical, so the grouping matches the rest of the page.
-        case 'type':    return FUEL_PRODUCT_ORDER.indexOf(a.fuelType) - FUEL_PRODUCT_ORDER.indexOf(b.fuelType);
-        case 'driver':  return (a.driverName ?? '').localeCompare(b.driverName ?? '');
-        case 'gallons': return a.gallons - b.gallons;
-        case 'ppg':     return a.pricePerGallon - b.pricePerGallon;
-        case 'total':   return a.totalCost - b.totalCost;
-        case 'payment': return (a.paymentMethod ?? '').localeCompare(b.paymentMethod ?? '');
-      }
-    };
-    return [...entries]
-      .sort((a, b) => {
-        const c = cmp(a, b);
-        // Tie-break newest first so equal keys stay in a stable, useful order.
-        return c !== 0 ? dir * c : b.entryDate - a.entryDate;
-      })
-      .slice(0, 50);
-  }, [entries, sortKey, sortDir]);
-  const sumGal = rows.reduce((s, r) => s + r.gallons, 0);
-  const sumTotal = rows.reduce((s, r) => s + r.totalCost, 0);
+  const { results: rows, status, loadMore } = useAuthPaginatedQuery(
+    api.fuelReports.reportPurchases,
+    scope
+      ? {
+          organizationId: scope.organizationId,
+          dateRangeStart: scope.dateRangeStart,
+          dateRangeEnd: scope.dateRangeEnd,
+          ...scope.chips,
+          sortKey,
+          sortDir,
+        }
+      : 'skip',
+    { initialNumItems: PURCHASES_PAGE_SIZE },
+  );
+  const firstPageLoading = status === 'LoadingFirstPage';
+
+  const [exporting, setExporting] = React.useState(false);
+  const handleExport = async () => {
+    if (!scope || exporting) return;
+    setExporting(true);
+    try {
+      const all = await convex.query(api.fuelReports.reportEntries, {
+        organizationId: scope.organizationId,
+        dateRangeStart: scope.dateRangeStart,
+        dateRangeEnd: scope.dateRangeEnd,
+        ...scope.chips,
+      });
+      exportToCSV<PurchaseRow>(
+        all,
+        [
+          { header: 'Date', accessor: (r) => format(new Date(r.entryDate), 'yyyy-MM-dd HH:mm') },
+          { header: 'Vendor', accessor: (r) => r.vendorName },
+          { header: 'City', accessor: (r) => r.location?.city },
+          { header: 'State', accessor: (r) => r.location?.state },
+          { header: 'Type', accessor: (r) => fuelProductLabel(r.fuelType) },
+          { header: 'Driver', accessor: (r) => r.driverName },
+          { header: 'Carrier', accessor: (r) => r.carrierName },
+          { header: 'Truck', accessor: (r) => r.truckUnitId },
+          { header: 'Load', accessor: (r) => r.loadReference },
+          { header: 'Gallons', accessor: (r) => r.gallons },
+          { header: '$/gal', accessor: (r) => r.pricePerGallon },
+          { header: 'Total', accessor: (r) => r.totalCost },
+          { header: 'Payment', accessor: (r) => r.paymentMethod },
+          { header: 'Card last 4', accessor: (r) => (r.fuelCardNumber ? r.fuelCardNumber.slice(-4) : '') },
+          { header: 'Receipt on file', accessor: (r) => (r.hasReceipt ? 'Yes' : 'No') },
+        ],
+        exportFilename,
+      );
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const grid = '92px 1.5fr 122px 1.4fr 84px 80px 96px 1fr';
   const cols: Array<{ key: PurchaseSortKey; label: string; right?: boolean }> = [
@@ -1683,11 +1710,20 @@ function FuelPurchasesTable({
       action={
         <div className="flex items-center gap-3">
           <span className="num text-[11.5px] text-[var(--text-tertiary)]">
-            {entries.length > rows.length
-              ? `${rows.length} of ${entries.length}`
-              : `${rows.length} recent`}
+            {firstPageLoading
+              ? ''
+              : totals.entries > rows.length
+                ? `${rows.length} of ${frN(totals.entries)}`
+                : `${rows.length} in range`}
           </span>
-          <WBtn size="sm" leading="export">Export</WBtn>
+          <WBtn
+            size="sm"
+            leading="export"
+            onClick={handleExport}
+            disabled={!scope || exporting || totals.entries === 0}
+          >
+            {exporting ? 'Exporting…' : 'Export'}
+          </WBtn>
         </div>
       }
     >
@@ -1726,7 +1762,11 @@ function FuelPurchasesTable({
         })}
       </div>
 
-      {rows.length === 0 ? (
+      {firstPageLoading ? (
+        <div className="py-7 text-center text-[12.5px] text-[var(--text-tertiary)]">
+          Loading…
+        </div>
+      ) : rows.length === 0 ? (
         <div className="py-7 text-center text-[12.5px] text-[var(--text-tertiary)]">
           No fuel purchases in this range.
         </div>
@@ -1842,7 +1882,28 @@ function FuelPurchasesTable({
         })
       )}
 
-      {rows.length > 0 && (
+      {(status === 'CanLoadMore' || status === 'LoadingMore') && (
+        <div
+          className="flex items-center justify-center gap-3"
+          style={{ padding: '8px 14px', borderBottom: '1px solid var(--border-hairline)' }}
+        >
+          <WBtn
+            size="xs"
+            variant="ghost"
+            onClick={() => loadMore(PURCHASES_PAGE_SIZE)}
+            disabled={status === 'LoadingMore'}
+          >
+            {status === 'LoadingMore'
+              ? 'Loading…'
+              : `Load ${Math.min(PURCHASES_PAGE_SIZE, totals.entries - rows.length)} more`}
+          </WBtn>
+          <span className="num text-[11px] text-[var(--text-tertiary)]">
+            {frN(totals.entries - rows.length)} not shown
+          </span>
+        </div>
+      )}
+
+      {!firstPageLoading && totals.entries > 0 && (
         <div
           className="grid items-center"
           style={{
@@ -1851,18 +1912,18 @@ function FuelPurchasesTable({
             minHeight: 40,
           }}
         >
-          <div className="px-3.5 py-2 text-[12px] font-bold">Total</div>
+          <div className="px-3.5 py-2 text-[12px] font-bold">Range total</div>
           <div />
           <div />
           <div className="px-3.5 py-2 text-right text-[11px] text-[var(--text-tertiary)]">
-            {rows.length} purchase{rows.length === 1 ? '' : 's'}
+            {frN(totals.entries)} purchase{totals.entries === 1 ? '' : 's'}
           </div>
           <div className="num text-right px-3.5 py-2 text-[12.5px] font-semibold">
-            {sumGal.toFixed(1)}
+            {totals.gallons.toFixed(1)}
           </div>
           <div />
           <div className="num text-right px-3.5 py-2 text-[13px] font-bold" style={{ color: 'var(--accent)' }}>
-            {frMoney(sumTotal)}
+            {frMoney(totals.spend)}
           </div>
           <div />
         </div>
