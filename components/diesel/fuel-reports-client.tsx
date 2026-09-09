@@ -56,6 +56,21 @@ import { nicePriceTicks } from '@/lib/charts/price-ticks';
 
 const FLEET_MPG = 6.4;
 
+/**
+ * The five exception rules the server counts (fuelReports.exceptionsFor).
+ * Subtitles describe the actual rule, not an aspiration.
+ */
+const EXCEPTION_RULES = [
+  { id: 'receipt',  label: 'Missing receipt scan',   sub: 'No scan attached to the entry',            icon: 'file-text',  tone: 'warn'   },
+  { id: 'offcard',  label: 'Paid off fuel card',     sub: 'Cash, check, or card on file',             icon: 'doc-dollar', tone: 'warn'   },
+  { id: 'price',    label: 'Price anomaly',          sub: 'Over 5% or 25¢ above nearby fills',        icon: 'alert',      tone: 'danger' },
+  { id: 'unlink',   label: 'Not linked to a load',   sub: 'No load reference on the entry',           icon: 'package',    tone: 'muted'  },
+  { id: 'mismatch', label: 'Price × gallons ≠ total', sub: 'Recorded total disagrees with the math', icon: 'alert',      tone: 'danger' },
+] as const;
+type ExceptionId = (typeof EXCEPTION_RULES)[number]['id'];
+type ExceptionCounts = Record<ExceptionId, number> & { total: number };
+type PriceTierCounts = { state: number; fleet: number; range: number; none: number };
+
 // Fixed per-product series colors — color follows the entity, so a
 // filter that changes which products appear never repaints survivors.
 // The set was validated (CVD separation, normal-vision floor, ≥3:1
@@ -316,6 +331,14 @@ export function FuelReportsClient() {
           label: ((v.name as string) ?? 'Unknown') as string,
         })),
       },
+      {
+        id: 'exception',
+        label: 'Exception',
+        icon: 'alert',
+        kind: 'enum',
+        operator: 'is any of',
+        options: EXCEPTION_RULES.map((r) => ({ value: r.id, label: r.label })),
+      },
     ];
   }, [driversList, trucksList, carriersList, vendorsList]);
 
@@ -344,6 +367,20 @@ export function FuelReportsClient() {
     const chip = filters.find((c) => c.propId === 'fuelType');
     return new Set(chip?.values ?? []);
   }, [filters]);
+  const exceptionIds = React.useMemo(() => {
+    const chip = filters.find((c) => c.propId === 'exception');
+    return new Set(chip?.values ?? []);
+  }, [filters]);
+
+  // "Review →" on the exceptions card: scope the page to that rule via
+  // the same chip a user could set by hand, so it shows in the filter
+  // bar and clears with everything else.
+  const reviewException = React.useCallback((id: ExceptionId) => {
+    setFilters((cur) => [
+      ...cur.filter((c) => c.propId !== 'exception'),
+      { propId: 'exception', op: 'is any of', values: [id] },
+    ]);
+  }, []);
   // Chip sets as query args. Sorted so an unchanged selection is the same
   // argument value and doesn't refetch; undefined when a chip is empty so
   // the server treats it as "no constraint".
@@ -354,8 +391,9 @@ export function FuelReportsClient() {
       truckIds: truckIds.size ? [...truckIds].sort() : undefined,
       vendorIds: vendorIds.size ? [...vendorIds].sort() : undefined,
       fuelTypes: fuelTypeIds.size ? [...fuelTypeIds].sort() : undefined,
+      exceptions: exceptionIds.size ? [...exceptionIds].sort() : undefined,
     }),
-    [driverIds, carrierIds, truckIds, vendorIds, fuelTypeIds],
+    [driverIds, carrierIds, truckIds, vendorIds, fuelTypeIds, exceptionIds],
   );
   // Scope handed to the purchases table, which runs its own paginated
   // query under the same range + chips.
@@ -477,9 +515,11 @@ export function FuelReportsClient() {
   // Exception counts — four rules evaluated server-side over the filtered
   // pool: missing receipt scan, paid off fuel card, price > $0.20/gal
   // above the product's period average, not linked to a load.
-  const exceptionCounts = summary?.exceptions ?? {
-    receipt: 0, offcard: 0, price: 0, unlink: 0, total: 0,
+  const exceptionCounts: ExceptionCounts = summary?.exceptions ?? {
+    receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0,
   };
+  const priceTiers: PriceTierCounts = summary?.priceTiers ?? { state: 0, fleet: 0, range: 0, none: 0 };
+  const peersCapped = summary?.peersCapped ?? false;
 
   const filtersActive = filters.some((c) => c.values.length > 0);
 
@@ -624,11 +664,13 @@ export function FuelReportsClient() {
               byFuelType={fuelTypeShare}
               trendBuckets={trendBuckets}
               exceptionCounts={exceptionCounts}
+              priceTiers={priceTiers}
+              peersCapped={peersCapped}
               truncated={summary?.truncated ?? false}
               purchases={purchaseScope}
               exportFilename={`fuel-purchases-${rangeId}-${format(now, 'yyyy-MM-dd')}`}
               onOpenEntry={(id, type) => router.push(`/operations/diesel/${id}?type=${type}`)}
-              onOpenExceptions={() => setView('overview')}
+              onReviewException={reviewException}
               loading={summary === undefined}
             />
           )}
@@ -826,7 +868,7 @@ function ScopeLine({
   filterProps: FilterProperty[];
 }) {
   const parts: string[] = [];
-  for (const id of ['fuelType', 'driver', 'carrier', 'truck', 'vendor'] as const) {
+  for (const id of ['fuelType', 'driver', 'carrier', 'truck', 'vendor', 'exception'] as const) {
     const chip = filters.find((c) => c.propId === id);
     if (!chip || !chip.values.length) continue;
     const prop = filterProps.find((p) => p.id === id);
@@ -876,11 +918,13 @@ function OverviewView({
   byFuelType,
   trendBuckets,
   exceptionCounts,
+  priceTiers,
+  peersCapped,
   truncated,
   purchases,
   exportFilename,
   onOpenEntry,
-  onOpenExceptions,
+  onReviewException,
   loading,
 }: {
   range: RangeOption;
@@ -899,13 +943,16 @@ function OverviewView({
   byVendor: Array<{ vendorId: string; vendorName: string; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
   byFuelType: Array<{ fuelType: FuelProduct; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
   trendBuckets: Array<{ label: string; spend: number; gallons: number; entries: number; byType: Partial<Record<FuelProduct, number>>; ppgByType: Partial<Record<FuelProduct, number>> }>;
-  exceptionCounts: { receipt: number; offcard: number; price: number; unlink: number; total: number };
+  exceptionCounts: ExceptionCounts;
+  priceTiers: PriceTierCounts;
+  /** Benchmark peers just outside the range were capped; edge fills may use a coarser tier. */
+  peersCapped: boolean;
   /** The range exceeded the server read cap; figures cover the newest rows only. */
   truncated: boolean;
   purchases: PurchaseScope | null;
   exportFilename: string;
   onOpenEntry: (id: string, type: 'fuel' | 'def') => void;
-  onOpenExceptions: () => void;
+  onReviewException: (id: ExceptionId) => void;
   loading: boolean;
 }) {
   const fmtPct = (p: number) =>
@@ -1022,7 +1069,12 @@ function OverviewView({
             </span>
           }
         >
-          <ExceptionsCard counts={exceptionCounts} onReview={onOpenExceptions} />
+          <ExceptionsCard
+            counts={exceptionCounts}
+            priceTiers={priceTiers}
+            peersCapped={peersCapped}
+            onReview={onReviewException}
+          />
         </DSCard>
       </div>
 
@@ -1571,33 +1623,36 @@ function ComboTooltip({
 // when its count is zero so the eye picks the active rules first.
 function ExceptionsCard({
   counts,
+  priceTiers,
+  peersCapped,
   onReview,
 }: {
-  counts: { receipt: number; offcard: number; price: number; unlink: number; total: number };
-  onReview: () => void;
+  counts: ExceptionCounts;
+  priceTiers: PriceTierCounts;
+  peersCapped: boolean;
+  onReview: (id: ExceptionId) => void;
 }) {
-  const rows: Array<{
-    id: keyof typeof counts;
-    icon: 'file-text' | 'doc-dollar' | 'alert' | 'package';
-    label: string;
-    sub: string;
-    tone: 'warn' | 'danger' | 'muted';
-  }> = [
-    { id: 'receipt', icon: 'file-text',  tone: 'warn',   label: 'Missing receipt scan', sub: 'Required for IFTA' },
-    { id: 'offcard', icon: 'doc-dollar', tone: 'warn',   label: 'Paid off fuel card',   sub: 'Reimbursement pending' },
-    { id: 'price',   icon: 'alert',      tone: 'danger', label: 'Price anomaly',        sub: '> +$0.20/gal vs lane' },
-    { id: 'unlink',  icon: 'package',    tone: 'muted',  label: 'Not linked to a load', sub: 'Local / unassigned' },
-  ];
   const toneColor = { warn: '#A66800', danger: '#C33C3C', muted: 'var(--text-tertiary)' } as const;
   const toneBg = {
     warn: 'rgba(245,158,11,0.10)',
     danger: 'rgba(239,68,68,0.10)',
     muted: 'var(--bg-surface-2)',
   } as const;
+  // Which peer set judged the flagged fills — tells you whether the
+  // benchmark had real neighbours to lean on.
+  const tierNote = (() => {
+    const parts: string[] = [];
+    if (priceTiers.state) parts.push(`${priceTiers.state} vs same state`);
+    if (priceTiers.fleet) parts.push(`${priceTiers.fleet} vs fleet`);
+    if (priceTiers.range) parts.push(`${priceTiers.range} vs range`);
+    if (peersCapped) parts.push('edge peers capped');
+    return parts.join(' · ');
+  })();
   return (
     <div className="flex flex-col">
-      {rows.map((e, i) => {
+      {EXCEPTION_RULES.map((e, i) => {
         const n = counts[e.id];
+        const sub = e.id === 'price' && n > 0 && tierNote ? `${e.sub} · ${tierNote}` : e.sub;
         return (
           <div
             key={e.id}
@@ -1622,7 +1677,7 @@ function ExceptionsCard({
             </div>
             <div className="flex-1 min-w-0">
               <div className="text-[12.5px] font-medium truncate">{e.label}</div>
-              <div className="text-[11px] text-[var(--text-tertiary)] mt-0.5">{e.sub}</div>
+              <div className="text-[11px] text-[var(--text-tertiary)] mt-0.5">{sub}</div>
             </div>
             <span
               className="num text-[15px] font-semibold"
@@ -1633,7 +1688,8 @@ function ExceptionsCard({
             {n > 0 && (
               <button
                 type="button"
-                onClick={onReview}
+                onClick={() => onReview(e.id)}
+                title={`Show only purchases flagged: ${e.label}`}
                 className="focus-ring text-[11.5px] font-medium bg-transparent border-0 cursor-pointer"
                 style={{ padding: '2px 4px', color: 'var(--accent)' }}
               >
@@ -1661,6 +1717,7 @@ type ChipArgs = {
   truckIds?: string[];
   vendorIds?: string[];
   fuelTypes?: string[];
+  exceptions?: string[];
 };
 
 interface PurchaseScope {
@@ -1745,6 +1802,10 @@ function FuelPurchasesTable({
           { header: 'Load', accessor: (r) => r.loadReference },
           { header: 'Gallons', accessor: (r) => r.gallons },
           { header: '$/gal', accessor: (r) => r.pricePerGallon },
+          { header: 'Benchmark $/gal', accessor: (r) => r.priceBenchmark ?? '' },
+          { header: 'Δ vs benchmark', accessor: (r) => (r.priceBenchmark == null ? '' : r.priceDelta.toFixed(3)) },
+          { header: 'Benchmark tier', accessor: (r) => (r.priceBenchmark == null ? '' : r.priceTier) },
+          { header: 'Exceptions', accessor: (r) => r.exceptions.join(' ') },
           { header: 'Total', accessor: (r) => r.totalCost },
           { header: 'Payment', accessor: (r) => r.paymentMethod },
           { header: 'Card last 4', accessor: (r) => (r.fuelCardNumber ? r.fuelCardNumber.slice(-4) : '') },
@@ -1931,6 +1992,15 @@ function FuelPurchasesTable({
               <div className="num text-right px-3.5 py-2 text-[12.5px]">{r.gallons.toFixed(1)}</div>
               <div className="num text-right px-3.5 py-2 text-[12.5px] text-[var(--text-secondary)]">
                 ${r.pricePerGallon.toFixed(3)}
+                {r.exceptions.includes('price') && r.priceBenchmark != null && (
+                  <div
+                    className="text-[10.5px] mt-0.5"
+                    style={{ color: '#C33C3C' }}
+                    title={`Benchmark: median of ${r.pricePeers} nearby ${r.priceTier === 'state' ? 'same-state' : r.priceTier === 'fleet' ? 'fleet' : 'range'} fills`}
+                  >
+                    +${r.priceDelta.toFixed(2)} vs ${r.priceBenchmark.toFixed(2)}
+                  </div>
+                )}
               </div>
               <div className="num text-right px-3.5 py-2 text-[13px] font-semibold">
                 {frMoney(r.totalCost)}

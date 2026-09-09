@@ -224,6 +224,126 @@ describe('reportSummary', () => {
     expect(res.exceptions.total).toBe(6);
   });
 
+  it('benchmarks price anomalies against the unfiltered pool, so filters never move the bar', async () => {
+    const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
+    const { cheap, pricey, ada, bob } = await t.run(async (ctx) => ({
+      cheap: await seedVendor(ctx, 'Cheap Stop'),
+      pricey: await seedVendor(ctx, 'Pricey Stop'),
+      ada: await seedDriver(ctx, 'Ada'),
+      bob: await seedDriver(ctx, 'Bob'),
+    }));
+    await t.run(async (ctx) => {
+      // Four fills around $4.00 at the cheap vendor …
+      for (let d = 0; d < 4; d++) {
+        await insertFuel(ctx, { vendorId: cheap, entryDate: T0 + d * DAY, gallons: 100, ppg: 4 + d * 0.01, driverId: ada });
+      }
+      // … and one at $4.60 at the pricey vendor, same week.
+      await insertFuel(ctx, { vendorId: pricey, entryDate: T0 + 2 * DAY, gallons: 100, ppg: 4.6, driverId: bob });
+    });
+    const base = {
+      organizationId: ORG,
+      dateRangeStart: T0,
+      dateRangeEnd: T0 + 7 * DAY,
+      bucketStarts: [T0],
+    };
+
+    const all = await t.query(api.fuelReports.reportSummary, base);
+    expect(all.exceptions.price).toBe(1);
+    expect(all.priceTiers.fleet).toBe(1);
+
+    // Filtered to the pricey vendor alone: the fill is still judged
+    // against the cheap fills and stays flagged. Under a filtered
+    // benchmark it would be compared to itself and vanish.
+    const vendorOnly = await t.query(api.fuelReports.reportSummary, { ...base, vendorIds: [pricey] });
+    expect(vendorOnly.totals.entries).toBe(1);
+    expect(vendorOnly.exceptions.price).toBe(1);
+
+    const bobOnly = await t.query(api.fuelReports.reportSummary, { ...base, driverIds: [bob] });
+    expect(bobOnly.exceptions.price).toBe(1);
+
+    // The exception chip scopes totals and rows to the flagged fills.
+    const flagged = await t.query(api.fuelReports.reportSummary, { ...base, exceptions: ['price'] });
+    expect(flagged.totals.entries).toBe(1);
+    expect(flagged.totals.spend).toBeCloseTo(460);
+
+    // The prior period is assessed too, so the price chip carries into
+    // the KPI deltas instead of zeroing the prior totals.
+    await t.run(async (ctx) => {
+      for (let d = 0; d < 4; d++) {
+        await insertFuel(ctx, { vendorId: cheap, entryDate: T0 - 7 * DAY + d * DAY, gallons: 100, ppg: 4, driverId: ada });
+      }
+      await insertFuel(ctx, { vendorId: pricey, entryDate: T0 - 5 * DAY, gallons: 50, ppg: 4.7, driverId: bob });
+    });
+    const withPrior = await t.query(api.fuelReports.reportSummary, {
+      ...base, exceptions: ['price'], priorStart: T0 - 7 * DAY, priorEnd: T0 - 1,
+    });
+    expect(withPrior.totals.entries).toBe(1);
+    expect(withPrior.prior?.entries).toBe(1);
+    expect(withPrior.prior?.spend).toBeCloseTo(235);
+
+    const { bucketStarts: _unused, ...rangeArgs } = base;
+    void _unused;
+    const page = await t.query(api.fuelReports.reportPurchases, {
+      ...rangeArgs, exceptions: ['price'], sortKey: 'date', sortDir: 'desc',
+      paginationOpts: { numItems: 10, cursor: null },
+    });
+    expect(page.page).toHaveLength(1);
+    const row = page.page[0];
+    expect(row.vendorName).toBe('Pricey Stop');
+    expect(row.exceptions).toContain('price');
+    expect(row.priceTier).toBe('fleet');
+    expect(row.priceBenchmark).toBeCloseTo(4.015, 3);
+    expect(row.priceDelta).toBeCloseTo(0.585, 3);
+  });
+
+  it('keeps the NEAREST peers when the window after the range overflows its cap', async () => {
+    const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
+    const vendorId = await t.run(async (ctx) => seedVendor(ctx, 'Pilot'));
+    const END = T0 + DAY;
+    await t.run(async (ctx) => {
+      // One fill in range, alone — all its peers come from after the range.
+      await insertFuel(ctx, { vendorId, entryDate: END, gallons: 100, ppg: 4.6 });
+      // 300 fills at $4.00 in the day right after the range …
+      for (let i = 0; i < 300; i++) {
+        await insertFuel(ctx, { vendorId, entryDate: END + 60_000 * (i + 1), gallons: 100, ppg: 4 });
+      }
+      // … and 300 at $9.00 two days later, still inside the 3-day window.
+      for (let i = 0; i < 300; i++) {
+        await insertFuel(ctx, { vendorId, entryDate: END + 2 * DAY + 60_000 * (i + 1), gallons: 100, ppg: 9 });
+      }
+    });
+    // Reading that window newest-first would keep the $9 fills and call
+    // $4.60 cheap. The nearest 300 are the $4 fills, so it is flagged.
+    const res = await t.query(api.fuelReports.reportEntries, {
+      organizationId: ORG, dateRangeStart: T0, dateRangeEnd: END,
+    });
+    expect(res.rows).toHaveLength(1);
+    expect(res.rows[0].priceBenchmark).toBeCloseTo(4, 3);
+    expect(res.rows[0].exceptions).toContain('price');
+  });
+
+  it('flags a total that disagrees with price × gallons as a mismatch, not a price anomaly', async () => {
+    const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
+    const vendorId = await t.run(async (ctx) => seedVendor(ctx, 'Pilot'));
+    await t.run(async (ctx) => {
+      for (let d = 0; d < 3; d++) {
+        await insertFuel(ctx, { vendorId, entryDate: T0 + d * DAY, gallons: 100, ppg: 4 });
+      }
+      const now = Date.now();
+      await ctx.db.insert('fuelEntries', {
+        organizationId: ORG, entryDate: T0 + 1 * DAY, vendorId,
+        gallons: 100, pricePerGallon: 4, totalCost: 450, // should be 400
+        createdAt: now, updatedAt: now, createdBy: USER,
+      });
+    });
+    const res = await t.query(api.fuelReports.reportSummary, {
+      organizationId: ORG, dateRangeStart: T0, dateRangeEnd: T0 + 7 * DAY, bucketStarts: [T0],
+    });
+    expect(res.exceptions.mismatch).toBe(1);
+    expect(res.exceptions.price).toBe(0);
+    expect(res.exceptions.total).toBe(4 + 4 + 1); // receipt + unlink on all four, plus the mismatch
+  });
+
   it('drops rows dated before the first bucket from the chart but not the totals', async () => {
     const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
     const vendorId = await t.run(async (ctx) => seedVendor(ctx, 'Pilot'));
