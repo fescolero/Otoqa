@@ -5,6 +5,13 @@ import type { Doc, Id } from './_generated/dataModel';
 import { loadReferenceOf } from './lib/loadReference';
 import { assertCallerOwnsOrg } from './lib/auth';
 import { DEFAULT_FUEL_TYPE, FUEL_PRODUCT_ORDER, type FuelProduct } from './lib/fuelTypes';
+import {
+  assessPrices,
+  isTotalMismatch,
+  PRICE_ANOMALY,
+  type PriceAssessment,
+  type PriceTier,
+} from './lib/fuelAnomaly';
 
 export const fuelByDriver = query({
   args: {
@@ -640,6 +647,8 @@ const reportFilterArgs = {
   truckIds: v.optional(v.array(v.string())),
   vendorIds: v.optional(v.array(v.string())),
   fuelTypes: v.optional(v.array(v.string())),
+  /** Exception rule ids (see EXCEPTION_IDS); a row matches if ANY applies. */
+  exceptions: v.optional(v.array(v.string())),
 };
 
 type ReportFilters = {
@@ -648,28 +657,95 @@ type ReportFilters = {
   truckIds?: string[];
   vendorIds?: string[];
   fuelTypes?: string[];
+  exceptions?: string[];
 };
+
+/** The five exception rules the reports page can count and filter by. */
+export const EXCEPTION_IDS = ['receipt', 'offcard', 'price', 'unlink', 'mismatch'] as const;
+export type ExceptionId = (typeof EXCEPTION_IDS)[number];
+
+/** Which rules a row trips. `price` needs its assessment. */
+function exceptionsFor(row: RangeRow, price: PriceAssessment | undefined): ExceptionId[] {
+  const { entry } = row;
+  const out: ExceptionId[] = [];
+  if (!entry.receiptStorageId) out.push('receipt');
+  if (entry.paymentMethod && entry.paymentMethod !== 'FUEL_CARD') out.push('offcard');
+  if (price?.flagged) out.push('price');
+  if (!entry.loadId) out.push('unlink');
+  if (isTotalMismatch(entry)) out.push('mismatch');
+  return out;
+}
 
 /**
  * Narrow the pool to rows matching every active chip. A chip on an
  * optional relation (driver / carrier / truck) excludes rows that have
  * no value — "Driver is any of X" should not show unassigned fills.
+ * The exception chip needs the price assessments (built from the
+ * UNFILTERED pool, so filtering never moves the benchmark).
  */
-function applyReportFilters(rows: RangeRow[], f: ReportFilters): RangeRow[] {
+function applyReportFilters(
+  rows: RangeRow[],
+  f: ReportFilters,
+  assess?: Map<string, PriceAssessment>,
+): RangeRow[] {
   const driver = f.driverIds?.length ? new Set(f.driverIds) : null;
   const carrier = f.carrierIds?.length ? new Set(f.carrierIds) : null;
   const truck = f.truckIds?.length ? new Set(f.truckIds) : null;
   const vendor = f.vendorIds?.length ? new Set(f.vendorIds) : null;
   const product = f.fuelTypes?.length ? new Set(f.fuelTypes) : null;
-  if (!driver && !carrier && !truck && !vendor && !product) return rows;
-  return rows.filter(({ entry, product: p }) => {
+  const exception = f.exceptions?.length ? new Set(f.exceptions) : null;
+  if (!driver && !carrier && !truck && !vendor && !product && !exception) return rows;
+  return rows.filter((row) => {
+    const { entry, product: p } = row;
     if (driver && (!entry.driverId || !driver.has(entry.driverId))) return false;
     if (carrier && (!entry.carrierId || !carrier.has(entry.carrierId))) return false;
     if (truck && (!entry.truckId || !truck.has(entry.truckId))) return false;
     if (vendor && !vendor.has(entry.vendorId)) return false;
     if (product && !product.has(p)) return false;
+    if (exception) {
+      const hits = exceptionsFor(row, assess?.get(entry._id as string));
+      if (!hits.some((id) => exception.has(id))) return false;
+    }
     return true;
   });
+}
+
+const ANOMALY_WINDOW_MS = PRICE_ANOMALY.windowDays * 86_400_000;
+
+/**
+ * Load the report range plus the anomaly window on each side, assess
+ * every fill in that pool against its peers, then hand back only the
+ * in-range rows. The pool is never filtered — benchmarks must mean the
+ * same thing whatever chips are active — and the widening gives fills
+ * at the range edges their neighbours.
+ */
+async function loadAssessedRange(
+  ctx: QueryCtx,
+  organizationId: string,
+  dateRangeStart: number,
+  dateRangeEnd: number,
+) {
+  const pool = await loadRangeRows(
+    ctx,
+    organizationId,
+    dateRangeStart - ANOMALY_WINDOW_MS,
+    dateRangeEnd + ANOMALY_WINDOW_MS,
+  );
+  const assess = assessPrices(
+    pool.rows.map(({ entry, product }) => ({
+      id: entry._id as string,
+      product,
+      entryDate: entry.entryDate,
+      pricePerGallon: entry.pricePerGallon,
+      gallons: entry.gallons,
+      totalCost: entry.totalCost,
+      state: entry.location?.state,
+    })),
+  );
+  const rows = pool.rows.filter(
+    (r) => r.entry.entryDate >= dateRangeStart && r.entry.entryDate <= dateRangeEnd,
+  );
+  return { rows, assess, truncated: pool.truncated };
 }
 
 function sumRows(rows: RangeRow[]) {
@@ -718,12 +794,12 @@ export const reportSummary = query({
 
     const hasPrior = args.priorStart !== undefined && args.priorEnd !== undefined;
     const [range, priorRange] = await Promise.all([
-      loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd),
+      loadAssessedRange(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd),
       hasPrior
         ? loadRangeRows(ctx, args.organizationId, args.priorStart!, args.priorEnd!)
         : Promise.resolve(null),
     ]);
-    const rows = applyReportFilters(range.rows, args);
+    const rows = applyReportFilters(range.rows, args, range.assess);
     // A partial prior window would make the delta meaningless; drop it.
     const prior =
       priorRange && !priorRange.truncated ? sumRows(applyReportFilters(priorRange.rows, args)) : null;
@@ -771,23 +847,21 @@ export const reportSummary = query({
       byVendor.set(vKey, vAgg);
     }
 
-    // Price anomalies compare within the SAME product — DEF runs a
-    // different price band than diesel, so a blended average would flag
-    // normal entries as soon as multiple products are in scope.
-    const avgByType = new Map<FuelProduct, number>();
-    for (const [t, agg] of byType) {
-      avgByType.set(t, agg.gallons > 0 ? agg.totalCost / agg.gallons : 0);
-    }
-    const exceptions = { receipt: 0, offcard: 0, price: 0, unlink: 0, total: 0 };
-    for (const { entry, product } of rows) {
-      if (!entry.receiptStorageId) exceptions.receipt++;
-      if (entry.paymentMethod && entry.paymentMethod !== 'FUEL_CARD') exceptions.offcard++;
-      const typeAvg = avgByType.get(product) ?? 0;
-      if (typeAvg > 0 && entry.pricePerGallon > typeAvg + 0.2) exceptions.price++;
-      if (!entry.loadId) exceptions.unlink++;
+    // Exceptions are counted over the rows IN SCOPE, but the price
+    // benchmark behind `price` came from the unfiltered pool (see
+    // loadAssessedRange), so a flag means the same thing at every filter.
+    // priceTiers says which peer set judged each flagged fill — the
+    // instrumentation for deciding whether an external benchmark is worth
+    // adding.
+    const exceptions = { receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0 };
+    const priceTiers: Record<PriceTier, number> = { state: 0, fleet: 0, range: 0, none: 0 };
+    for (const row of rows) {
+      const a = range.assess.get(row.entry._id as string);
+      for (const id of exceptionsFor(row, a)) exceptions[id]++;
+      if (a?.flagged) priceTiers[a.tier]++;
     }
     exceptions.total =
-      exceptions.receipt + exceptions.offcard + exceptions.price + exceptions.unlink;
+      exceptions.receipt + exceptions.offcard + exceptions.price + exceptions.unlink + exceptions.mismatch;
 
     const vendorDocs = await Promise.all(
       [...byVendor.keys()].map((id) => ctx.db.get(id as Id<'fuelVendors'>)),
@@ -800,6 +874,13 @@ export const reportSummary = query({
       prior,
       /** The range exceeded MAX_RANGE_ROWS; figures cover the newest rows only. */
       truncated: range.truncated,
+      priceTiers,
+      priceRule: {
+        windowDays: PRICE_ANOMALY.windowDays,
+        minPeers: PRICE_ANOMALY.minPeers,
+        pct: PRICE_ANOMALY.pct,
+        floor: PRICE_ANOMALY.floor,
+      },
       buckets,
       byType: [...byType.entries()]
         .map(([fuelType, d]) => ({
@@ -867,7 +948,8 @@ async function resolveRowNames(ctx: QueryCtx, rows: RangeRow[]) {
 
 type RowNames = Awaited<ReturnType<typeof resolveRowNames>>;
 
-function projectRow({ entry, type, product }: RangeRow, names: RowNames) {
+function projectRow(row: RangeRow, names: RowNames, price: PriceAssessment | undefined) {
+  const { entry, type, product } = row;
   return {
     _id: entry._id as string,
     type,
@@ -890,6 +972,14 @@ function projectRow({ entry, type, product }: RangeRow, names: RowNames) {
     paymentMethod: entry.paymentMethod,
     fuelCardNumber: entry.fuelCardNumber,
     hasReceipt: entry.receiptStorageId !== undefined,
+    /** Peer benchmark this fill was judged against (null: no peers). */
+    priceBenchmark: price?.benchmark ?? null,
+    priceDelta: price?.delta ?? 0,
+    pricePct: price?.pct ?? 0,
+    priceTier: (price?.tier ?? 'none') as PriceTier,
+    pricePeers: price?.peers ?? 0,
+    /** Every exception rule this row trips. */
+    exceptions: exceptionsFor(row, price),
   };
 }
 
@@ -909,11 +999,13 @@ export const reportEntries = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.organizationId);
-    const range = await loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd);
-    const rows = applyReportFilters(range.rows, args);
+    const range = await loadAssessedRange(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd);
+    const rows = applyReportFilters(range.rows, args, range.assess);
     const names = await resolveRowNames(ctx, rows);
     return {
-      rows: rows.map((r) => projectRow(r, names)).sort((a, b) => b.entryDate - a.entryDate),
+      rows: rows
+        .map((r) => projectRow(r, names, range.assess.get(r.entry._id as string)))
+        .sort((a, b) => b.entryDate - a.entryDate),
       truncated: range.truncated,
     };
   },
@@ -957,10 +1049,8 @@ export const reportPurchases = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.organizationId);
-    const rows = applyReportFilters(
-      (await loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd)).rows,
-      args,
-    );
+    const range = await loadAssessedRange(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd);
+    const rows = applyReportFilters(range.rows, args, range.assess);
 
     // Names needed to sort. Cheap: one get per distinct vendor / driver.
     const vendorIds = new Set(rows.map((r) => r.entry.vendorId));
@@ -1000,7 +1090,7 @@ export const reportPurchases = query({
     const names = await resolveRowNames(ctx, pageRows);
 
     return {
-      page: pageRows.map((r) => projectRow(r, names)),
+      page: pageRows.map((r) => projectRow(r, names, range.assess.get(r.entry._id as string))),
       isDone: nextOffset >= rows.length,
       continueCursor: nextOffset >= rows.length ? '' : String(nextOffset),
       splitCursor: null,
