@@ -73,7 +73,7 @@ type ExceptionId = (typeof EXCEPTION_RULES)[number]['id'];
 const REVIEWED = 'reviewed';
 type ExceptionFilterId = ExceptionId | typeof REVIEWED;
 type ExceptionCounts = Record<ExceptionId, number> & { total: number; reviewed: number };
-type PriceTierCounts = { state: number; fleet: number; range: number; none: number };
+type PriceTierCounts = { state: number; fleet: number; thin: number; none: number };
 
 // Fixed per-product series colors — color follows the entity, so a
 // filter that changes which products appear never repaints survivors.
@@ -525,7 +525,7 @@ export function FuelReportsClient() {
   const exceptionCounts: ExceptionCounts = summary?.exceptions ?? {
     receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0, reviewed: 0,
   };
-  const priceTiers: PriceTierCounts = summary?.priceTiers ?? { state: 0, fleet: 0, range: 0, none: 0 };
+  const priceTiers: PriceTierCounts = summary?.priceTiers ?? { state: 0, fleet: 0, thin: 0, none: 0 };
   const peersCapped = summary?.peersCapped ?? false;
 
   const filtersActive = filters.some((c) => c.values.length > 0);
@@ -1651,7 +1651,6 @@ function ExceptionsCard({
     const parts: string[] = [];
     if (priceTiers.state) parts.push(`${priceTiers.state} vs same state`);
     if (priceTiers.fleet) parts.push(`${priceTiers.fleet} vs fleet`);
-    if (priceTiers.range) parts.push(`${priceTiers.range} vs range`);
     if (peersCapped) parts.push('edge peers capped');
     return parts.join(' · ');
   })();
@@ -2024,7 +2023,7 @@ function FuelPurchasesTable({
                   <div
                     className="text-[10.5px] mt-0.5"
                     style={{ color: '#C33C3C' }}
-                    title={`Benchmark: median of ${r.pricePeers} nearby ${r.priceTier === 'state' ? 'same-state' : r.priceTier === 'fleet' ? 'fleet' : 'range'} fills`}
+                    title={`Benchmark: median of ${r.pricePeers} ${r.priceTier === 'state' ? 'same-state' : 'fleet'} fills within 3 days`}
                   >
                     +${r.priceDelta.toFixed(2)} vs ${r.priceBenchmark.toFixed(2)}
                   </div>

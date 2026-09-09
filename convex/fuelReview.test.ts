@@ -46,7 +46,10 @@ describe('setReview', () => {
     expect((await t.run(async (ctx) => ctx.db.get(fuel)))?.review).toBeUndefined();
 
     const audit = await t.run(async (ctx) =>
-      ctx.db.query('auditLog').filter((q) => q.eq(q.field('entityId'), fuel)).collect(),
+      ctx.db
+        .query('auditLog')
+        .withIndex('by_org_entity', (q) => q.eq('organizationId', ORG).eq('entityType', 'fuelEntry').eq('entityId', fuel))
+        .take(10),
     );
     expect(audit.map((a) => a.description)).toEqual(['Marked Reviewed OK', 'Review cleared']);
   });

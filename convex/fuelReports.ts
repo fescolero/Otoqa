@@ -933,7 +933,7 @@ export const reportSummary = query({
     // Reviewed rows trip no rule; they are counted apart so the card can
     // say how many flags a person has already cleared.
     const exceptions = { receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0, reviewed: 0 };
-    const priceTiers: Record<PriceTier, number> = { state: 0, fleet: 0, range: 0, none: 0 };
+    const priceTiers: Record<PriceTier, number> = { state: 0, fleet: 0, thin: 0, none: 0 };
     for (const row of rows) {
       if (row.entry.review) { exceptions.reviewed++; continue; }
       const a = range.assess.get(row.entry._id as string);

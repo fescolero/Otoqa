@@ -78,12 +78,14 @@ describe('assessPrices', () => {
     expect(assessPrices(sparse).get('probe')?.tier).toBe('fleet');
   });
 
-  it('falls back to the whole range when the window is too thin, and to none when alone', () => {
-    const rows = [fill('a', 0, 4), fill('b', 20, 4), fill('c', 40, 4), fill('x', 60, 4.5)];
+  it('reports a thin window for context but never flags on it; none when alone', () => {
+    // Two neighbours within the window, fewer than the three a tier
+    // needs: the benchmark is shown, the fill is not flagged — and fills
+    // outside the window never count, however sparse the pool.
+    const rows = [fill('a', 0, 4), fill('b', 20, 4), fill('c', 58, 4), fill('d', 59, 4), fill('x', 60, 4.5)];
     const out = assessPrices(rows);
-    expect(out.get('x')?.tier).toBe('range');
-    expect(out.get('x')?.flagged).toBe(true);
-    const alone = assessPrices([fill('only', 0, 9.99)]);
+    expect(out.get('x')).toMatchObject({ tier: 'thin', peers: 2, benchmark: 4, flagged: false });
+    const alone = assessPrices([fill('only', 0, 9.99), fill('far', 30, 4)]);
     expect(alone.get('only')).toMatchObject({ tier: 'none', benchmark: null, flagged: false });
   });
 
@@ -148,6 +150,13 @@ describe('assessOne', () => {
     const me = rows[3];
     expect(assessOne(me, rows).assessment).toEqual(bulk);
     expect(assessOne(me, rows.slice(0, 3)).assessment).toEqual(bulk);
+
+    // Thin window: the reports assess over a wide range, the detail page
+    // over the window alone — same answer either way.
+    const sparse = [fill('old', 0, 3.5), fill('n1', 30, 4.0), fill('n2', 31, 4.2), fill('t', 32, 6.0)];
+    const wide = assessPrices(sparse).get('t');
+    expect(wide).toMatchObject({ tier: 'thin', peers: 2, benchmark: 4.1, flagged: false });
+    expect(assessOne(sparse[3], sparse.slice(1, 3)).assessment).toEqual(wide);
   });
 });
 

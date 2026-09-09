@@ -196,14 +196,15 @@ describe('reportSummary', () => {
         trackingStatus: 'Pending', customerId, fleet: 'Default', units: 'Pallets',
         workosOrgId: ORG, createdBy: USER, createdAt: now, updatedAt: now,
       });
-      // Baseline diesel @ $4, fuel card, receipt, load: clean.
-      for (let i = 0; i < 4; i++) {
+      // Baseline diesel @ $4, fuel card, receipt, load: clean. Days 1–4,
+      // so three of them sit inside the outlier's ±3-day window.
+      for (let i = 1; i <= 4; i++) {
         await insertFuel(ctx, {
           vendorId, entryDate: T0 + i * DAY, gallons: 100, ppg: 4,
           paymentMethod: 'FUEL_CARD', receiptStorageId: receipt, loadId,
         });
       }
-      // Outlier diesel @ $4.50 (> avg + 0.20), cash, no receipt, no load.
+      // Outlier diesel @ $4.50 (> median + 25¢), cash, no receipt, no load.
       await insertFuel(ctx, {
         vendorId, entryDate: T0 + 5 * DAY, gallons: 10, ppg: 4.5, paymentMethod: 'CASH',
       });

@@ -840,7 +840,7 @@ function peerScope(check: NonNullable<PriceCheckData>, state?: string): string {
   switch (a.tier) {
     case 'state': return `${n} in ${state?.toUpperCase() ?? 'the same state'} within ${rule.windowDays} days`;
     case 'fleet': return `${n} across the fleet within ${rule.windowDays} days`;
-    case 'range': return `the only ${n} within ${rule.windowDays} days (fewer than ${rule.minPeers}, so a rough guide)`;
+    case 'thin': return `the only ${n} within ${rule.windowDays} days`;
     default: return n;
   }
 }
@@ -897,6 +897,16 @@ function PriceCheck({
     tone = 'muted';
     verdict = (
       <>No other {fuelProductLabel(check.product).toLowerCase()} fills within {rule.windowDays} days to compare against.</>
+    );
+  } else if (a.tier === 'thin') {
+    // Too few neighbours to judge: show them, draw no conclusion.
+    tone = 'muted';
+    verdict = (
+      <>
+        Only {peerScope(check, state).replace(/^the only /, '')} — fewer than the {rule.minPeers} needed to judge
+        this price. They ran <span className="num">${a.benchmark.toFixed(3)}</span>/gal against{' '}
+        <span className="num">${ppg.toFixed(3)}</span> here.
+      </>
     );
   } else if (a.flagged) {
     tone = a.pct >= 0.25 ? 'danger' : 'warn';

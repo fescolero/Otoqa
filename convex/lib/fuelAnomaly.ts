@@ -13,8 +13,13 @@
  *
  *   state — same product, same state, within ±WINDOW days
  *   fleet — same product, any state,  within ±WINDOW days
- *   range — same product, every other fill in the pool
- *   none  — nothing to compare against (the fill is alone)
+ *   thin  — same product, within ±WINDOW days, but fewer than the minimum:
+ *           a benchmark is still reported for context, never a flag
+ *   none  — nothing within the window to compare against
+ *
+ * The benchmark depends on nothing but the fill and the fills within the
+ * window around it — never on how wide a report range happens to be —
+ * so the reports page and an entry's detail page always agree.
  *
  * A fill is flagged when it exceeds the benchmark by more than the larger
  * of a fixed floor and a percentage — a fixed cents figure means different
@@ -41,7 +46,7 @@ export const PRICE_ANOMALY = {
 /** price × gallons should equal the recorded total, within a few cents. */
 export const TOTAL_MISMATCH = { abs: 0.05, pct: 0.005 } as const;
 
-export type PriceTier = 'state' | 'fleet' | 'range' | 'none';
+export type PriceTier = 'state' | 'fleet' | 'thin' | 'none';
 
 export interface AnomalyInput {
   id: string;
@@ -101,28 +106,27 @@ function judge(
     pct: benchmark > 0 ? delta / benchmark : 0,
     tier,
     peers: peers.length,
-    flagged: delta > priceLimit(benchmark, opts),
+    // A thin peer set is shown, never trusted: one odd neighbour would
+    // flag a normal fill.
+    flagged: tier !== 'thin' && delta > priceLimit(benchmark, opts),
   };
 }
 
 /**
- * Pick the peer set for one fill: `windowed` are the same-product fills
- * within the anomaly window (the fill itself excluded), `group` every
- * same-product fill in the pool. Tiers fall through in the order the
- * module comment gives.
+ * Pick the peer set for one fill from `windowed`, the same-product fills
+ * within the anomaly window (the fill itself excluded). Tiers fall
+ * through in the order the module comment gives.
  */
 function pickPeers(
   me: AnomalyInput,
   windowed: AnomalyInput[],
-  group: AnomalyInput[],
   opts: typeof PRICE_ANOMALY,
 ): { tier: PriceTier; peers: AnomalyInput[] } {
   const myState = normState(me.state);
   const statePeers = myState ? windowed.filter((p) => normState(p.state) === myState) : [];
   if (statePeers.length >= opts.minPeers) return { tier: 'state', peers: statePeers };
   if (windowed.length >= opts.minPeers) return { tier: 'fleet', peers: windowed };
-  const rest = group.filter((p) => p.id !== me.id);
-  if (rest.length > 0) return { tier: 'range', peers: rest };
+  if (windowed.length > 0) return { tier: 'thin', peers: windowed };
   return { tier: 'none', peers: [] };
 }
 
@@ -154,7 +158,7 @@ export function assessPrices(
       while (hi < group.length && group[hi].entryDate <= me.entryDate + windowMs) hi++;
       const windowed: AnomalyInput[] = [];
       for (let j = lo; j < hi; j++) if (j !== i) windowed.push(group[j]);
-      const { tier, peers } = pickPeers(me, windowed, group, opts);
+      const { tier, peers } = pickPeers(me, windowed, opts);
       out.set(me.id, judge(me, peers, tier, opts));
     }
   }
@@ -173,9 +177,10 @@ export function assessOne(
   opts: typeof PRICE_ANOMALY = PRICE_ANOMALY,
 ): { assessment: PriceAssessment; peers: AnomalyInput[] } {
   const windowMs = opts.windowDays * DAY_MS;
-  const group = pool.filter((p) => p.product === me.product && p.id !== me.id);
-  const windowed = group.filter((p) => Math.abs(p.entryDate - me.entryDate) <= windowMs);
-  const { tier, peers } = pickPeers(me, windowed, group, opts);
+  const windowed = pool.filter(
+    (p) => p.product === me.product && p.id !== me.id && Math.abs(p.entryDate - me.entryDate) <= windowMs,
+  );
+  const { tier, peers } = pickPeers(me, windowed, opts);
   const sorted = [...peers].sort(
     (a, b) => Math.abs(a.entryDate - me.entryDate) - Math.abs(b.entryDate - me.entryDate),
   );
