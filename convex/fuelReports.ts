@@ -767,7 +767,19 @@ async function loadAssessedRange(
       state: entry.location?.state,
     })),
   );
-  return { rows: main.rows, assess, truncated: main.truncated };
+  return {
+    rows: main.rows,
+    assess,
+    truncated: main.truncated,
+    /**
+     * A side window overflowed its cap. The nearest SIDE_WINDOW_ROWS
+     * fills per table are still there, and in-range fills still supply
+     * peers, so benchmarks stay in the right neighbourhood — but a fill
+     * close to the range edge may be judged by a coarser tier (fleet
+     * instead of same state) than it would with every neighbour loaded.
+     */
+    peersCapped: before.truncated || after.truncated,
+  };
 }
 
 function sumRows(rows: RangeRow[]) {
@@ -900,6 +912,8 @@ export const reportSummary = query({
       prior,
       /** The range exceeded MAX_RANGE_ROWS; figures cover the newest rows only. */
       truncated: range.truncated,
+      /** Benchmark peers near the range edges were capped; see loadAssessedRange. */
+      peersCapped: range.peersCapped,
       priceTiers,
       priceRule: {
         windowDays: PRICE_ANOMALY.windowDays,

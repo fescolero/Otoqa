@@ -519,6 +519,7 @@ export function FuelReportsClient() {
     receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0,
   };
   const priceTiers: PriceTierCounts = summary?.priceTiers ?? { state: 0, fleet: 0, range: 0, none: 0 };
+  const peersCapped = summary?.peersCapped ?? false;
 
   const filtersActive = filters.some((c) => c.values.length > 0);
 
@@ -664,6 +665,7 @@ export function FuelReportsClient() {
               trendBuckets={trendBuckets}
               exceptionCounts={exceptionCounts}
               priceTiers={priceTiers}
+              peersCapped={peersCapped}
               truncated={summary?.truncated ?? false}
               purchases={purchaseScope}
               exportFilename={`fuel-purchases-${rangeId}-${format(now, 'yyyy-MM-dd')}`}
@@ -917,6 +919,7 @@ function OverviewView({
   trendBuckets,
   exceptionCounts,
   priceTiers,
+  peersCapped,
   truncated,
   purchases,
   exportFilename,
@@ -942,6 +945,8 @@ function OverviewView({
   trendBuckets: Array<{ label: string; spend: number; gallons: number; entries: number; byType: Partial<Record<FuelProduct, number>>; ppgByType: Partial<Record<FuelProduct, number>> }>;
   exceptionCounts: ExceptionCounts;
   priceTiers: PriceTierCounts;
+  /** Benchmark peers just outside the range were capped; edge fills may use a coarser tier. */
+  peersCapped: boolean;
   /** The range exceeded the server read cap; figures cover the newest rows only. */
   truncated: boolean;
   purchases: PurchaseScope | null;
@@ -1064,7 +1069,12 @@ function OverviewView({
             </span>
           }
         >
-          <ExceptionsCard counts={exceptionCounts} priceTiers={priceTiers} onReview={onReviewException} />
+          <ExceptionsCard
+            counts={exceptionCounts}
+            priceTiers={priceTiers}
+            peersCapped={peersCapped}
+            onReview={onReviewException}
+          />
         </DSCard>
       </div>
 
@@ -1614,10 +1624,12 @@ function ComboTooltip({
 function ExceptionsCard({
   counts,
   priceTiers,
+  peersCapped,
   onReview,
 }: {
   counts: ExceptionCounts;
   priceTiers: PriceTierCounts;
+  peersCapped: boolean;
   onReview: (id: ExceptionId) => void;
 }) {
   const toneColor = { warn: '#A66800', danger: '#C33C3C', muted: 'var(--text-tertiary)' } as const;
@@ -1633,6 +1645,7 @@ function ExceptionsCard({
     if (priceTiers.state) parts.push(`${priceTiers.state} vs same state`);
     if (priceTiers.fleet) parts.push(`${priceTiers.fleet} vs fleet`);
     if (priceTiers.range) parts.push(`${priceTiers.range} vs range`);
+    if (peersCapped) parts.push('edge peers capped');
     return parts.join(' · ');
   })();
   return (
