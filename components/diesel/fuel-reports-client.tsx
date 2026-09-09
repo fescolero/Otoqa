@@ -1300,12 +1300,14 @@ function ComboChart({
   // One trend line per product: collect that product's data points
   // (buckets where it was purchased) and connect them in order — gaps
   // are bridged so the line reads as a continuous trend.
-  const priceLines = products.map((t) => {
+  // Each product's line runs through the horizontal centre of ITS bar
+  // in every bucket — the bucket centre falls between grouped bars.
+  const priceLines = products.map((t, k) => {
     const pts = data.flatMap((d, i) => {
       const v = d.ppgByType[t];
       if (v == null) return [];
       return [{
-        x: padL + slot * i + slot / 2,
+        x: padL + slot * i + (slot - groupW) / 2 + k * subSlot + subSlot / 2,
         y: padT + chartH - ((v - ppgMin) / ppgSpan) * chartH,
         label: d.label,
         value: v,
