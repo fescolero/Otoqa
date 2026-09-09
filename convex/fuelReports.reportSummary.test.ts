@@ -2,6 +2,7 @@ import { convexTest } from 'convex-test';
 import { describe, it, expect } from 'vitest';
 import schema from './schema';
 import type { Id } from './_generated/dataModel';
+import type { MutationCtx } from './_generated/server';
 import { api } from './_generated/api';
 
 /**
@@ -15,9 +16,7 @@ const USER = 'user_rs_test';
 
 const DAY = 86_400_000;
 const T0 = 1_700_000_000_000;
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function seedVendor(ctx: any, name: string): Promise<Id<'fuelVendors'>> {
+async function seedVendor(ctx: MutationCtx, name: string): Promise<Id<'fuelVendors'>> {
   const now = Date.now();
   return await ctx.db.insert('fuelVendors', {
     organizationId: ORG,
@@ -28,9 +27,7 @@ async function seedVendor(ctx: any, name: string): Promise<Id<'fuelVendors'>> {
     createdBy: USER,
   });
 }
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function seedDriver(ctx: any, first: string): Promise<Id<'drivers'>> {
+async function seedDriver(ctx: MutationCtx, first: string): Promise<Id<'drivers'>> {
   const now = Date.now();
   return await ctx.db.insert('drivers', {
     firstName: first, lastName: 'Driver', email: `${first}@t.co`, phone: '+15550000003',
@@ -41,8 +38,7 @@ async function seedDriver(ctx: any, first: string): Promise<Id<'drivers'>> {
 }
 
 async function insertFuel(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ctx: any,
+  ctx: MutationCtx,
   opts: {
     vendorId: Id<'fuelVendors'>;
     entryDate: number;
@@ -73,8 +69,7 @@ async function insertFuel(
 }
 
 async function insertDef(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ctx: any,
+  ctx: MutationCtx,
   opts: { vendorId: Id<'fuelVendors'>; entryDate: number; gallons: number; ppg: number },
 ): Promise<void> {
   const now = Date.now();
@@ -124,6 +119,7 @@ describe('reportSummary', () => {
     // DEF is never a taxable gallon.
     expect(res.totals.fuelGallons).toBeCloseTo(151);
     expect(res.prior).toBeNull();
+    expect(res.truncated).toBe(false);
 
     expect(res.byType.map((x) => x.fuelType)).toEqual(['DIESEL', 'DEF']);
     expect(res.byVendor).toHaveLength(1);

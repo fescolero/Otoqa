@@ -42,6 +42,7 @@ import {
 } from '@/components/web';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { api } from '@/convex/_generated/api';
+import { MAX_RANGE_ROWS } from '@/convex/fuelReports';
 import {
   FUEL_PRODUCT_ORDER,
   fuelProductLabel,
@@ -622,6 +623,7 @@ export function FuelReportsClient() {
               byFuelType={fuelTypeShare}
               trendBuckets={trendBuckets}
               exceptionCounts={exceptionCounts}
+              truncated={summary?.truncated ?? false}
               purchases={purchaseScope}
               exportFilename={`fuel-purchases-${rangeId}-${format(now, 'yyyy-MM-dd')}`}
               onOpenEntry={(id, type) => router.push(`/operations/diesel/${id}?type=${type}`)}
@@ -873,6 +875,7 @@ function OverviewView({
   byFuelType,
   trendBuckets,
   exceptionCounts,
+  truncated,
   purchases,
   exportFilename,
   onOpenEntry,
@@ -896,6 +899,8 @@ function OverviewView({
   byFuelType: Array<{ fuelType: FuelProduct; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
   trendBuckets: Array<{ label: string; spend: number; gallons: number; entries: number; byType: Partial<Record<FuelProduct, number>>; ppgByType: Partial<Record<FuelProduct, number>> }>;
   exceptionCounts: { receipt: number; offcard: number; price: number; unlink: number; total: number };
+  /** The range exceeded the server read cap; figures cover the newest rows only. */
+  truncated: boolean;
   purchases: PurchaseScope | null;
   exportFilename: string;
   onOpenEntry: (id: string, type: 'fuel' | 'def') => void;
@@ -914,6 +919,26 @@ function OverviewView({
 
   return (
     <div className="flex flex-col gap-4">
+      {truncated && (
+        <div
+          role="status"
+          className="flex items-center gap-2.5 rounded-md"
+          style={{
+            padding: '9px 12px',
+            background: 'rgba(245,158,11,0.10)',
+            border: '1px solid rgba(245,158,11,0.35)',
+            color: '#A66800',
+            fontSize: 12.5,
+          }}
+        >
+          <WIcon name="alert" size={14} />
+          <span>
+            This range holds more than {frN(MAX_RANGE_ROWS)} purchases per product.
+            Figures below cover the newest {frN(MAX_RANGE_ROWS)} only — narrow the
+            date range for complete numbers.
+          </span>
+        </div>
+      )}
       {/* KPI row — totals only. Spend / gallons / purchases are true
           subtotals: they re-scope cleanly under any filter combination.
           Avg $/gal is the one ratio, and it only shows a value when the
@@ -1604,7 +1629,7 @@ interface PurchaseScope {
   chips: ChipArgs;
 }
 
-type PurchaseRow = FunctionReturnType<typeof api.fuelReports.reportEntries>[number];
+type PurchaseRow = FunctionReturnType<typeof api.fuelReports.reportEntries>['rows'][number];
 type PurchaseSortKey = FunctionArgs<typeof api.fuelReports.reportPurchases>['sortKey'];
 
 const PURCHASES_PAGE_SIZE = 50;
@@ -1659,7 +1684,7 @@ function FuelPurchasesTable({
     if (!scope || exporting) return;
     setExporting(true);
     try {
-      const all = await convex.query(api.fuelReports.reportEntries, {
+      const { rows: all } = await convex.query(api.fuelReports.reportEntries, {
         organizationId: scope.organizationId,
         dateRangeStart: scope.dateRangeStart,
         dateRangeEnd: scope.dateRangeEnd,

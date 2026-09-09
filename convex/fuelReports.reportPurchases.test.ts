@@ -2,6 +2,7 @@ import { convexTest } from 'convex-test';
 import { describe, it, expect } from 'vitest';
 import schema from './schema';
 import type { Id } from './_generated/dataModel';
+import type { MutationCtx } from './_generated/server';
 import { api } from './_generated/api';
 
 /**
@@ -14,18 +15,14 @@ const ORG = 'org_rp_test';
 const USER = 'user_rp_test';
 const DAY = 86_400_000;
 const T0 = 1_700_000_000_000;
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function seedVendor(ctx: any, name: string): Promise<Id<'fuelVendors'>> {
+async function seedVendor(ctx: MutationCtx, name: string): Promise<Id<'fuelVendors'>> {
   const now = Date.now();
   return await ctx.db.insert('fuelVendors', {
     organizationId: ORG, name, isActive: true,
     createdAt: now, updatedAt: now, createdBy: USER,
   });
 }
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function seedDriver(ctx: any, first: string): Promise<Id<'drivers'>> {
+async function seedDriver(ctx: MutationCtx, first: string): Promise<Id<'drivers'>> {
   const now = Date.now();
   return await ctx.db.insert('drivers', {
     firstName: first, lastName: 'Driver', email: `${first}@t.co`, phone: '+15550000004',
@@ -36,8 +33,7 @@ async function seedDriver(ctx: any, first: string): Promise<Id<'drivers'>> {
 }
 
 async function insertFuel(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ctx: any,
+  ctx: MutationCtx,
   opts: { vendorId: Id<'fuelVendors'>; entryDate: number; gallons: number; ppg?: number; driverId?: Id<'drivers'> },
 ): Promise<void> {
   const now = Date.now();
@@ -50,8 +46,7 @@ async function insertFuel(
 }
 
 async function insertDef(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ctx: any,
+  ctx: MutationCtx,
   opts: { vendorId: Id<'fuelVendors'>; entryDate: number; gallons: number },
 ): Promise<void> {
   const now = Date.now();
@@ -152,7 +147,8 @@ describe('reportPurchases', () => {
     expect(pilotAda.isDone).toBe(true);
 
     const defOnly = await t.query(api.fuelReports.reportEntries, { ...RANGE, fuelTypes: ['DEF'] });
-    expect(defOnly.map((r) => r.gallons)).toEqual([4]);
+    expect(defOnly.rows.map((r) => r.gallons)).toEqual([4]);
+    expect(defOnly.truncated).toBe(false);
 
     const summary = await t.query(api.fuelReports.reportSummary, {
       ...RANGE, vendorIds: [pilot], driverIds: [ada], bucketStarts: [T0],

@@ -2,7 +2,9 @@ import { convexTest } from 'convex-test';
 import { describe, it, expect } from 'vitest';
 import schema from './schema';
 import type { Id } from './_generated/dataModel';
+import type { MutationCtx } from './_generated/server';
 import { api } from './_generated/api';
+import { MAX_RANGE_ROWS } from './fuelReports';
 
 /**
  * Tests for fuelReports.reportEntries — the unpaginated row feed behind
@@ -17,9 +19,7 @@ const USER = 'user_re_test';
 
 const RANGE_START = 1_700_000_000_000;
 const RANGE_END = 1_700_999_999_999;
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function seedVendor(ctx: any, org = ORG): Promise<Id<'fuelVendors'>> {
+async function seedVendor(ctx: MutationCtx, org = ORG): Promise<Id<'fuelVendors'>> {
   const now = Date.now();
   return await ctx.db.insert('fuelVendors', {
     organizationId: org,
@@ -32,8 +32,7 @@ async function seedVendor(ctx: any, org = ORG): Promise<Id<'fuelVendors'>> {
 }
 
 async function insertFuel(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ctx: any,
+  ctx: MutationCtx,
   vendorId: Id<'fuelVendors'>,
   opts: {
     entryDate: number;
@@ -63,8 +62,7 @@ async function insertFuel(
 }
 
 async function insertDef(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ctx: any,
+  ctx: MutationCtx,
   vendorId: Id<'fuelVendors'>,
   opts: { entryDate: number },
 ): Promise<Id<'defEntries'>> {
@@ -93,7 +91,7 @@ describe('reportEntries', () => {
       }
     });
 
-    const rows = await t.query(api.fuelReports.reportEntries, {
+    const { rows } = await t.query(api.fuelReports.reportEntries, {
       organizationId: ORG,
       dateRangeStart: RANGE_START,
       dateRangeEnd: RANGE_END,
@@ -103,6 +101,41 @@ describe('reportEntries', () => {
     // Newest first, like listCombined.
     expect(rows[0].entryDate).toBe(RANGE_START + (COUNT - 1) * 60_000);
     expect(rows[rows.length - 1].entryDate).toBe(RANGE_START);
+  });
+
+  it('bounds the read at MAX_RANGE_ROWS per table, keeping the newest rows and flagging it', async () => {
+    const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
+    const vendorId = await t.run(async (ctx) => seedVendor(ctx));
+    const COUNT = MAX_RANGE_ROWS + 5;
+    await t.run(async (ctx) => {
+      for (let i = 0; i < COUNT; i++) {
+        await insertFuel(ctx, vendorId, { entryDate: RANGE_START + i * 1000 });
+      }
+      // DEF is bounded independently and is nowhere near the cap.
+      await insertDef(ctx, vendorId, { entryDate: RANGE_START });
+    });
+
+    const res = await t.query(api.fuelReports.reportEntries, {
+      organizationId: ORG,
+      dateRangeStart: RANGE_START,
+      dateRangeEnd: RANGE_END,
+    });
+
+    expect(res.truncated).toBe(true);
+    expect(res.rows).toHaveLength(MAX_RANGE_ROWS + 1);
+    // The oldest fuel rows are the ones dropped.
+    const fuelDates = res.rows.filter((r) => r.type === 'fuel').map((r) => r.entryDate);
+    expect(Math.min(...fuelDates)).toBe(RANGE_START + 5 * 1000);
+    expect(Math.max(...fuelDates)).toBe(RANGE_START + (COUNT - 1) * 1000);
+
+    const summary = await t.query(api.fuelReports.reportSummary, {
+      organizationId: ORG,
+      dateRangeStart: RANGE_START,
+      dateRangeEnd: RANGE_END,
+      bucketStarts: [RANGE_START],
+    });
+    expect(summary.truncated).toBe(true);
+    expect(summary.totals.entries).toBe(MAX_RANGE_ROWS + 1);
   });
 
   it('merges fuel and DEF rows, tags the source, and projects lookups', async () => {
@@ -128,7 +161,7 @@ describe('reportEntries', () => {
       await insertDef(ctx, vendorId, { entryDate: RANGE_START + 2 });
     });
 
-    const rows = await t.query(api.fuelReports.reportEntries, {
+    const { rows } = await t.query(api.fuelReports.reportEntries, {
       organizationId: ORG,
       dateRangeStart: RANGE_START,
       dateRangeEnd: RANGE_END,
@@ -156,7 +189,7 @@ describe('reportEntries', () => {
       await insertFuel(ctx, vendorId, { entryDate: RANGE_START + 2 });
     });
 
-    const rows = await t.query(api.fuelReports.reportEntries, {
+    const { rows } = await t.query(api.fuelReports.reportEntries, {
       organizationId: ORG,
       dateRangeStart: RANGE_START,
       dateRangeEnd: RANGE_END,
@@ -179,7 +212,7 @@ describe('reportEntries', () => {
       await insertFuel(ctx, otherVendorId, { entryDate: RANGE_START + 5, org: OTHER_ORG });
     });
 
-    const rows = await t.query(api.fuelReports.reportEntries, {
+    const { rows } = await t.query(api.fuelReports.reportEntries, {
       organizationId: ORG,
       dateRangeStart: RANGE_START,
       dateRangeEnd: RANGE_END,

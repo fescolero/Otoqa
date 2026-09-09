@@ -576,12 +576,24 @@ type RangeRow = {
   product: FuelProduct;
 };
 
+/**
+ * Upper bound on rows read per product table per range. A Convex query
+ * may scan a bounded number of documents per transaction; reportSummary
+ * reads two tables for the range AND two for the prior period, plus
+ * lookups, so the cap keeps the worst case well inside that budget.
+ * Reads run newest-first, so when a range exceeds the cap it is the
+ * OLDEST rows that fall out, and every caller surfaces `truncated` so
+ * the page can say the figures are partial rather than silently
+ * under-report.
+ */
+export const MAX_RANGE_ROWS = 3000;
+
 async function loadRangeRows(
   ctx: QueryCtx,
   organizationId: string,
   dateRangeStart: number,
   dateRangeEnd: number,
-): Promise<RangeRow[]> {
+): Promise<{ rows: RangeRow[]; truncated: boolean }> {
   const [fuelEntries, defEntriesList] = await Promise.all([
     ctx.db
       .query('fuelEntries')
@@ -590,7 +602,8 @@ async function loadRangeRows(
           .gte('entryDate', dateRangeStart)
           .lte('entryDate', dateRangeEnd)
       )
-      .collect(),
+      .order('desc')
+      .take(MAX_RANGE_ROWS + 1),
     ctx.db
       .query('defEntries')
       .withIndex('by_organization_and_date', (q) =>
@@ -598,20 +611,26 @@ async function loadRangeRows(
           .gte('entryDate', dateRangeStart)
           .lte('entryDate', dateRangeEnd)
       )
-      .collect(),
+      .order('desc')
+      .take(MAX_RANGE_ROWS + 1),
   ]);
-  return [
-    ...fuelEntries.map((entry) => ({
-      entry,
-      type: 'fuel' as const,
-      product: (entry.fuelType ?? DEFAULT_FUEL_TYPE) as FuelProduct,
-    })),
-    ...defEntriesList.map((entry) => ({
-      entry,
-      type: 'def' as const,
-      product: 'DEF' as FuelProduct,
-    })),
-  ];
+  const truncated =
+    fuelEntries.length > MAX_RANGE_ROWS || defEntriesList.length > MAX_RANGE_ROWS;
+  return {
+    truncated,
+    rows: [
+      ...fuelEntries.slice(0, MAX_RANGE_ROWS).map((entry) => ({
+        entry,
+        type: 'fuel' as const,
+        product: (entry.fuelType ?? DEFAULT_FUEL_TYPE) as FuelProduct,
+      })),
+      ...defEntriesList.slice(0, MAX_RANGE_ROWS).map((entry) => ({
+        entry,
+        type: 'def' as const,
+        product: 'DEF' as FuelProduct,
+      })),
+    ],
+  };
 }
 
 /** Filter-chip args shared by the report queries. Each list is `is any of`. */
@@ -698,14 +717,16 @@ export const reportSummary = query({
     await assertCallerOwnsOrg(ctx, args.organizationId);
 
     const hasPrior = args.priorStart !== undefined && args.priorEnd !== undefined;
-    const [rangeRows, priorRows] = await Promise.all([
+    const [range, priorRange] = await Promise.all([
       loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd),
       hasPrior
         ? loadRangeRows(ctx, args.organizationId, args.priorStart!, args.priorEnd!)
-        : Promise.resolve([] as RangeRow[]),
+        : Promise.resolve(null),
     ]);
-    const rows = applyReportFilters(rangeRows, args);
-    const prior = hasPrior ? sumRows(applyReportFilters(priorRows, args)) : null;
+    const rows = applyReportFilters(range.rows, args);
+    // A partial prior window would make the delta meaningless; drop it.
+    const prior =
+      priorRange && !priorRange.truncated ? sumRows(applyReportFilters(priorRange.rows, args)) : null;
 
     // ── Buckets ──
     const starts = [...args.bucketStarts].sort((a, b) => a - b);
@@ -777,6 +798,8 @@ export const reportSummary = query({
     return {
       totals: sumRows(rows),
       prior,
+      /** The range exceeded MAX_RANGE_ROWS; figures cover the newest rows only. */
+      truncated: range.truncated,
       buckets,
       byType: [...byType.entries()]
         .map(([fuelType, d]) => ({
@@ -874,7 +897,8 @@ function projectRow({ entry, type, product }: RangeRow, names: RowNames) {
  * Every fuel + DEF entry in the range under the active chips, projected
  * down to the fields the reports page needs. No pagination — this is the
  * CSV export source, fetched once on click, not a live subscription.
- * Rows are sorted newest first.
+ * Rows are sorted newest first; `truncated` says the range exceeded
+ * MAX_RANGE_ROWS and only the newest rows are included.
  */
 export const reportEntries = query({
   args: {
@@ -885,12 +909,13 @@ export const reportEntries = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.organizationId);
-    const rows = applyReportFilters(
-      await loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd),
-      args,
-    );
+    const range = await loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd);
+    const rows = applyReportFilters(range.rows, args);
     const names = await resolveRowNames(ctx, rows);
-    return rows.map((r) => projectRow(r, names)).sort((a, b) => b.entryDate - a.entryDate);
+    return {
+      rows: rows.map((r) => projectRow(r, names)).sort((a, b) => b.entryDate - a.entryDate),
+      truncated: range.truncated,
+    };
   },
 });
 
@@ -933,7 +958,7 @@ export const reportPurchases = query({
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.organizationId);
     const rows = applyReportFilters(
-      await loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd),
+      (await loadRangeRows(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd)).rows,
       args,
     );
 
