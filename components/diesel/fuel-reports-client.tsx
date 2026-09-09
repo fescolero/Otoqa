@@ -12,11 +12,13 @@
  *     IFTA      — hero strip + jurisdiction reconciliation table
  *     By vehicle — KPIs + fuel-economy table
  *
- * Real data: api.fuelReports.monthlySummary / fuelByVendor / fuelByDriver /
- * fuelByTruck / costPerMile, plus driver / truck / carrier / vendor lookups
- * for the FilterBar options. IFTA jurisdiction data + exception classifiers
- * land as a follow-up — those views show banner notes when no real source
- * exists yet.
+ * Real data: api.fuelReports.reportSummary (totals, prior-period totals,
+ * chart buckets, fuel type + vendor share and exception counts, all
+ * aggregated server-side under the active filter chips), reportEntries
+ * (rows for the purchases table), fuelByDriver / fuelByTruck / costPerMile
+ * for the by-vehicle view, plus driver / truck / carrier / vendor lookups
+ * for the FilterBar options. IFTA jurisdiction data lands as a follow-up —
+ * that view shows banner notes when no real source exists yet.
  */
 
 'use client';
@@ -228,35 +230,17 @@ export function FuelReportsClient() {
       }
     : ('skip' as const);
 
-  const summary = useAuthQuery(api.fuelReports.monthlySummary, baseArgs);
-  const byVendor = useAuthQuery(api.fuelReports.fuelByVendor, baseArgs);
-  const byFuelType = useAuthQuery(api.fuelReports.fuelByType, baseArgs);
+  // By-vehicle view only. The overview is fed by reportSummary below.
   const byDriver = useAuthQuery(api.fuelReports.fuelByDriver, baseArgs);
   const byTruck = useAuthQuery(api.fuelReports.fuelByTruck, baseArgs);
   const cpm = useAuthQuery(api.fuelReports.costPerMile, baseArgs);
 
-  // Prior-period totals power the "vs prior period" deltas on KPI cards.
-  const priorArgs = organizationId
-    ? {
-        organizationId,
-        dateRangeStart: range.priorStart.getTime(),
-        dateRangeEnd: range.priorEnd.getTime(),
-      }
-    : ('skip' as const);
-  const priorSummary = useAuthQuery(api.fuelReports.monthlySummary, priorArgs);
-
-  // Individual entries drive: weekly chart bars, exception counts, the
-  // Fuel purchases table. The summary query gives us monthly aggregates
-  // only — for weekly granularity + per-entry exception classification we
-  // need the raw rows. reportEntries returns EVERY fuel + DEF entry in the
-  // range (lean projection, no pagination), so the chart, the exception
-  // counts and the filter chips all operate on the complete pool. This
-  // replaced a single 500-row page of listCombined, which silently dropped
-  // everything older than the newest 500 entries — visible as bars that
-  // faded out on the left of the chart for busy ranges, and as filtered
-  // totals that only covered part of the period.
+  // Raw rows feed ONLY the Fuel purchases table now. Every aggregate
+  // surface (KPIs, chart, exceptions, shares) comes from reportSummary,
+  // which buckets and filters on the server, so the page no longer has
+  // to carry every entry over the wire to draw a bar. The table still
+  // pulls the full range here until it moves to a paginated query.
   const reportEntries = useAuthQuery(api.fuelReports.reportEntries, baseArgs);
-  const entriesLoading = baseArgs !== 'skip' && reportEntries === undefined;
   const rawEntries: RawEntry[] = React.useMemo(() => reportEntries ?? [], [reportEntries]);
 
   // Lookup data for the FilterBar options.
@@ -338,11 +322,11 @@ export function FuelReportsClient() {
     ];
   }, [driversList, trucksList, carriersList, vendorsList]);
 
-  // ─── Apply filter chips client-side ───────────────────────────────────
-  // The Convex queries above pull entries for the whole org in the chosen
-  // date range. The Driver/Carrier/Truck/Vendor chips then narrow that
-  // pool here so every downstream surface (KPIs, chart, exceptions,
-  // vendor share, fuel purchases) reacts to a single set of filters.
+  // ─── Filter chips ─────────────────────────────────────────────────────
+  // One set of chips scopes every surface. The sets go to reportSummary
+  // (KPIs, chart, exceptions, shares — filtered on the server) and are
+  // also applied to the raw rows below for the purchases table, using
+  // the same `is any of` semantics.
   const driverIds = React.useMemo(() => {
     const chip = filters.find((c) => c.propId === 'driver');
     return new Set(chip?.values ?? []);
@@ -366,10 +350,9 @@ export function FuelReportsClient() {
   const anyChip =
     driverIds.size + carrierIds.size + truckIds.size + vendorIds.size + fuelTypeIds.size > 0;
 
-  // Apply chip filters to the raw entry pool. Each chip operates as
-  // `is any of` — match the entry if its id is in the selected set.
-  // Vendor / driver / truck / carrier all match on the underlying _id
-  // stored on the entry; the chips emit those ids directly.
+  // Purchases-table rows under the same chips. Match the entry if its id
+  // is in the selected set; a chip on an optional relation excludes rows
+  // with no value, mirroring applyReportFilters on the server.
   const filteredEntries = React.useMemo(() => {
     if (!anyChip) return rawEntries;
     return rawEntries.filter((e) => {
@@ -382,66 +365,22 @@ export function FuelReportsClient() {
     });
   }, [rawEntries, anyChip, driverIds, vendorIds, truckIds, carrierIds, fuelTypeIds]);
 
-  // ─── KPIs (Overview) ──────────────────────────────────────────────────
-  // Headline totals cover EVERY product bought at the pump — fuel AND
-  // DEF — so the unfiltered page equals the sum of all Fuel type filter
-  // options. When no chips are active we trust the server-side
-  // aggregates. When chips ARE active we recompute from the filtered raw
-  // entries (the full range — see reportEntries above) so the KPIs match
-  // the visible chart / table.
-  const totals = summary?.totals;
-  let totalSpend: number;
-  let totalGallons: number;
-  let totalEntries: number;
-  if (anyChip) {
-    totalSpend = filteredEntries.reduce((s, e) => s + (e.totalCost ?? 0), 0);
-    totalGallons = filteredEntries.reduce((s, e) => s + (e.gallons ?? 0), 0);
-    totalEntries = filteredEntries.length;
-  } else {
-    totalSpend = (totals?.totalFuelCost ?? 0) + (totals?.totalDefCost ?? 0);
-    totalGallons = (totals?.totalFuelGallons ?? 0) + (totals?.totalDefGallons ?? 0);
-    totalEntries = (totals?.totalFuelEntries ?? 0) + (totals?.totalDefEntries ?? 0);
-  }
-  // IFTA cares about road fuel only — DEF is an additive, never a
-  // taxable gallon, so the IFTA surfaces get a DEF-free figure.
-  const iftaGallons = anyChip
-    ? filteredEntries.reduce((s, e) => (e.fuelType === 'DEF' ? s : s + (e.gallons ?? 0)), 0)
-    : (totals?.totalFuelGallons ?? 0);
-
-  // Prior-period totals → deltas. We can only compare apples-to-apples
-  // when no filter is active (the prior summary is org-wide); skip
-  // deltas under a filtered scope to avoid misleading numbers.
-  const prior = priorSummary?.totals;
-  const priorSpend = anyChip ? 0 : (prior?.totalFuelCost ?? 0) + (prior?.totalDefCost ?? 0);
-  const priorGallons = anyChip ? 0 : (prior?.totalFuelGallons ?? 0) + (prior?.totalDefGallons ?? 0);
-  const priorEntries = anyChip ? 0 : (prior?.totalFuelEntries ?? 0) + (prior?.totalDefEntries ?? 0);
-  const spendDeltaPct = priorSpend > 0 ? ((totalSpend - priorSpend) / priorSpend) * 100 : 0;
-  const gallonsDeltaPct = priorGallons > 0 ? ((totalGallons - priorGallons) / priorGallons) * 100 : 0;
-  const entriesDeltaPct = priorEntries > 0 ? ((totalEntries - priorEntries) / priorEntries) * 100 : 0;
-
-  // ─── Trend buckets ────────────────────────────────────────────────────
-  // The chart enumerates EVERY bucket in the selected range up-front so
-  // empty weeks/months still render as zero-height bars with their date
-  // labels intact. Without this, a sparse month produced just 3-4 bars
-  // sitting inside a wide empty card.
-  const trendBuckets = React.useMemo(() => {
-    type Bucket = {
-      key: string;
-      label: string;
-      spend: number;
-      byType: Partial<Record<FuelProduct, number>>;
-      gallonsByType: Partial<Record<FuelProduct, number>>;
-      entries: number;
-    };
-
-    // Step 1 — enumerate every bucket between range.start and range.end.
-    const buckets = new Map<string, Bucket>();
+  // ─── Chart buckets ────────────────────────────────────────────────────
+  // Enumerate EVERY week / month in the selected range up-front so empty
+  // periods still render as zero-height bars with their date labels
+  // intact. This runs on the client because the boundaries are local
+  // time — the server can't know the user's zone — and the bucket start
+  // instants are then handed to reportSummary, which assigns each row to
+  // the last bucket starting on or before it.
+  const bucketDefs = React.useMemo(() => {
+    const defs: Array<{ start: number; label: string }> = [];
     if (range.granularity === 'month') {
       const cur = new Date(range.start.getFullYear(), range.start.getMonth(), 1);
       while (cur <= range.end) {
-        const key = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}`;
-        const label = cur.toLocaleDateString('en-US', { month: 'short' });
-        buckets.set(key, { key, label, spend: 0, byType: {}, gallonsByType: {}, entries: 0 });
+        defs.push({
+          start: cur.getTime(),
+          label: cur.toLocaleDateString('en-US', { month: 'short' }),
+        });
         cur.setMonth(cur.getMonth() + 1);
       }
     } else {
@@ -451,151 +390,109 @@ export function FuelReportsClient() {
       const dow = cur.getDay();
       cur.setDate(cur.getDate() - ((dow + 6) % 7));
       while (cur <= range.end) {
-        const key = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`;
-        const label = cur.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        buckets.set(key, { key, label, spend: 0, byType: {}, gallonsByType: {}, entries: 0 });
+        defs.push({
+          start: cur.getTime(),
+          label: cur.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        });
         cur.setDate(cur.getDate() + 7);
       }
     }
+    return defs;
+  }, [range.start, range.end, range.granularity]);
+  const bucketStarts = React.useMemo(() => bucketDefs.map((b) => b.start), [bucketDefs]);
 
-    // Step 2 — drop each entry into its bucket, split by product so the
-    // chart can stack spend by fuel type.
-    for (const e of filteredEntries) {
-      const d = new Date(e.entryDate);
-      d.setHours(0, 0, 0, 0);
-      let key: string;
-      if (range.granularity === 'month') {
-        key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      } else {
-        const dow = d.getDay();
-        d.setDate(d.getDate() - ((dow + 6) % 7));
-        key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      }
-      const cur = buckets.get(key);
-      if (!cur) continue; // entry outside the enumerated range (shouldn't happen).
-      cur.spend += e.totalCost;
-      cur.byType[e.fuelType] = (cur.byType[e.fuelType] ?? 0) + e.totalCost;
-      cur.gallonsByType[e.fuelType] = (cur.gallonsByType[e.fuelType] ?? 0) + e.gallons;
-      cur.entries += 1;
-    }
-
-    // Step 3 — sort + project to chart shape. Per-product $/gal is
-    // gallons-weighted (cost ÷ gallons), one value per product per
-    // bucket; products absent from a bucket just have no point there.
-    return [...buckets.values()]
-      .sort((a, b) => a.key.localeCompare(b.key))
-      .map((b) => {
-        const ppgByType: Partial<Record<FuelProduct, number>> = {};
-        for (const [t, gal] of Object.entries(b.gallonsByType) as Array<[FuelProduct, number]>) {
-          if (gal > 0) ppgByType[t] = (b.byType[t] ?? 0) / gal;
+  // ─── Server aggregate (range + chips) ─────────────────────────────────
+  // One query returns totals, prior-period totals, chart buckets, fuel
+  // type share, vendor share and exception counts, all under the active
+  // chips. Chip sets are sorted so an unchanged selection is the same
+  // argument object and doesn't refetch.
+  const summary = useAuthQuery(
+    api.fuelReports.reportSummary,
+    organizationId
+      ? {
+          organizationId,
+          dateRangeStart: range.start.getTime(),
+          dateRangeEnd: range.end.getTime(),
+          bucketStarts,
+          priorStart: range.priorStart.getTime(),
+          priorEnd: range.priorEnd.getTime(),
+          driverIds: driverIds.size ? [...driverIds].sort() : undefined,
+          carrierIds: carrierIds.size ? [...carrierIds].sort() : undefined,
+          truckIds: truckIds.size ? [...truckIds].sort() : undefined,
+          vendorIds: vendorIds.size ? [...vendorIds].sort() : undefined,
+          fuelTypes: fuelTypeIds.size ? [...fuelTypeIds].sort() : undefined,
         }
-        return {
-          label: b.label,
-          spend: b.spend,
-          gallons: Object.values(b.gallonsByType).reduce((s, g) => s + (g ?? 0), 0),
-          entries: b.entries,
-          byType: b.byType,
-          ppgByType,
-        };
-      });
-  }, [filteredEntries, range.start, range.end, range.granularity]);
+      : 'skip',
+  );
 
-  // Exception classifier — counts per rule, computed from filtered entries.
-  // Same rules as the design's <FrExceptions/>:
-  //   1. receipt — no receipt scan on file (hasReceipt from the server)
-  //   2. offcard — paymentMethod !== 'FUEL_CARD'
-  //   3. price   — > $0.20/gal above the period's average
-  //   4. unlink  — no loadId on the entry
-  const exceptionCounts = React.useMemo(() => {
-    if (filteredEntries.length === 0) {
-      return { receipt: 0, offcard: 0, price: 0, unlink: 0, total: 0 };
-    }
-    // Price anomalies compare within the SAME product — DEF runs a
-    // different price band than diesel, so a blended average would
-    // flag normal entries as soon as multiple products are in scope.
-    const typeAgg = new Map<FuelProduct, { cost: number; gallons: number }>();
-    for (const e of filteredEntries) {
-      const cur = typeAgg.get(e.fuelType) ?? { cost: 0, gallons: 0 };
-      cur.cost += e.totalCost ?? 0;
-      cur.gallons += e.gallons ?? 0;
-      typeAgg.set(e.fuelType, cur);
-    }
-    const avgByType = new Map<FuelProduct, number>();
-    for (const [t, agg] of typeAgg) {
-      avgByType.set(t, agg.gallons > 0 ? agg.cost / agg.gallons : 0);
-    }
-    let receipt = 0, offcard = 0, price = 0, unlink = 0;
-    for (const e of filteredEntries) {
-      if (!e.hasReceipt) receipt++;
-      if (e.paymentMethod && e.paymentMethod !== 'FUEL_CARD') offcard++;
-      const typeAvg = avgByType.get(e.fuelType) ?? 0;
-      if (typeAvg > 0 && e.pricePerGallon > typeAvg + 0.20) price++;
-      if (!e.loadId) unlink++;
-    }
-    return { receipt, offcard, price, unlink, total: receipt + offcard + price + unlink };
-  }, [filteredEntries]);
+  // ─── KPIs (Overview) ──────────────────────────────────────────────────
+  // Headline totals cover EVERY product bought at the pump — fuel AND
+  // DEF — so the unfiltered page equals the sum of all Fuel type filter
+  // options. Filtered or not, the numbers come from the same server pass
+  // that built the chart, so they always agree.
+  const totalSpend = summary?.totals.spend ?? 0;
+  const totalGallons = summary?.totals.gallons ?? 0;
+  const totalEntries = summary?.totals.entries ?? 0;
+  // IFTA cares about road fuel only — DEF is an additive, never a
+  // taxable gallon, so the IFTA surfaces get a DEF-free figure.
+  const iftaGallons = summary?.totals.fuelGallons ?? 0;
+
+  // Prior-period totals → deltas. The prior window is filtered by the
+  // same chips, so the comparison holds under a filtered scope too.
+  const priorSpend = summary?.prior?.spend ?? 0;
+  const priorGallons = summary?.prior?.gallons ?? 0;
+  const priorEntries = summary?.prior?.entries ?? 0;
+  const spendDeltaPct = priorSpend > 0 ? ((totalSpend - priorSpend) / priorSpend) * 100 : 0;
+  const gallonsDeltaPct = priorGallons > 0 ? ((totalGallons - priorGallons) / priorGallons) * 100 : 0;
+  const entriesDeltaPct = priorEntries > 0 ? ((totalEntries - priorEntries) / priorEntries) * 100 : 0;
+
+  // ─── Trend buckets ────────────────────────────────────────────────────
+  // Project the server buckets onto the chart shape. Per-product $/gal is
+  // gallons-weighted (cost ÷ gallons), one value per product per bucket;
+  // products absent from a bucket just have no point there. Until the
+  // query answers, every bucket is zero so the axis still lays out.
+  const trendBuckets = React.useMemo(() => {
+    const byStart = new Map((summary?.buckets ?? []).map((b) => [b.start, b]));
+    return bucketDefs.map((def) => {
+      const b = byStart.get(def.start);
+      const byType = (b?.spendByType ?? {}) as Partial<Record<FuelProduct, number>>;
+      const gallonsByType = (b?.gallonsByType ?? {}) as Partial<Record<FuelProduct, number>>;
+      const ppgByType: Partial<Record<FuelProduct, number>> = {};
+      for (const [t, gal] of Object.entries(gallonsByType) as Array<[FuelProduct, number]>) {
+        if (gal > 0) ppgByType[t] = (byType[t] ?? 0) / gal;
+      }
+      return {
+        label: def.label,
+        spend: b?.spend ?? 0,
+        gallons: b?.gallons ?? 0,
+        entries: b?.entries ?? 0,
+        byType,
+        ppgByType,
+      };
+    });
+  }, [bucketDefs, summary]);
+
+  // Exception counts — four rules evaluated server-side over the filtered
+  // pool: missing receipt scan, paid off fuel card, price > $0.20/gal
+  // above the product's period average, not linked to a load.
+  const exceptionCounts = summary?.exceptions ?? {
+    receipt: 0, offcard: 0, price: 0, unlink: 0, total: 0,
+  };
 
   const filtersActive = filters.some((c) => c.values.length > 0);
 
-  // Vendor share — when chips are active, recompute from filteredEntries so
-  // the bars reflect the scoped pool. Otherwise use the server aggregate.
-  const vendorShare = React.useMemo(() => {
-    if (!anyChip) {
-      return ((byVendor ?? []) as Array<{ vendorId: string; vendorName: string; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>);
-    }
-    const m = new Map<string, { vendorId: string; vendorName: string; gallons: number; totalCost: number; ppgSum: number; entries: number }>();
-    for (const e of filteredEntries) {
-      const cur = m.get(e.vendorId) ?? {
-        vendorId: e.vendorId,
-        vendorName: e.vendorName,
-        gallons: 0,
-        totalCost: 0,
-        ppgSum: 0,
-        entries: 0,
-      };
-      cur.gallons += e.gallons;
-      cur.totalCost += e.totalCost;
-      cur.ppgSum += e.pricePerGallon;
-      cur.entries += 1;
-      m.set(e.vendorId, cur);
-    }
-    return [...m.values()]
-      .map((v) => ({
-        vendorId: v.vendorId,
-        vendorName: v.vendorName,
-        gallons: v.gallons,
-        totalCost: v.totalCost,
-        avgPricePerGallon: v.entries > 0 ? v.ppgSum / v.entries : 0,
-        entries: v.entries,
-      }))
-      .sort((a, b) => b.totalCost - a.totalCost);
-  }, [anyChip, byVendor, filteredEntries]);
-
-  // Fuel-type share — same server/client split as vendor share: trust the
-  // org-wide aggregate when no chips are active, recompute from the
-  // filtered pool when they are.
-  const fuelTypeShare = React.useMemo(() => {
-    if (!anyChip) {
-      return ((byFuelType ?? []) as Array<{ fuelType: FuelProduct; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>);
-    }
-    const m = new Map<FuelProduct, { fuelType: FuelProduct; gallons: number; totalCost: number; entries: number }>();
-    for (const e of filteredEntries) {
-      const cur = m.get(e.fuelType) ?? { fuelType: e.fuelType, gallons: 0, totalCost: 0, entries: 0 };
-      cur.gallons += e.gallons;
-      cur.totalCost += e.totalCost;
-      cur.entries += 1;
-      m.set(e.fuelType, cur);
-    }
-    return [...m.values()]
-      .map((t) => ({
-        fuelType: t.fuelType,
-        gallons: t.gallons,
-        totalCost: t.totalCost,
-        avgPricePerGallon: t.gallons > 0 ? t.totalCost / t.gallons : 0,
-        entries: t.entries,
-      }))
-      .sort((a, b) => b.totalCost - a.totalCost);
-  }, [anyChip, byFuelType, filteredEntries]);
+  // Vendor and fuel-type share come from the same filtered pass.
+  const vendorShare = React.useMemo(() => summary?.byVendor ?? [], [summary]);
+  const fuelTypeShare = React.useMemo(
+    () => (summary?.byType ?? []) as Array<{
+      fuelType: FuelProduct;
+      gallons: number;
+      totalCost: number;
+      avgPricePerGallon: number;
+      entries: number;
+    }>,
+    [summary],
+  );
 
   // Sparklines track the ON-SCREEN scope (range + filters) via the trend
   // buckets, so the little curves always agree with the big numbers.
@@ -627,11 +524,11 @@ export function FuelReportsClient() {
   ];
 
   const handleExportFuel = () => {
-    if (!byVendor || byVendor.length === 0) {
+    if (vendorShare.length === 0) {
       return;
     }
     exportToCSV(
-      byVendor,
+      vendorShare,
       [
         { header: 'Vendor', accessor: (r) => r.vendorName },
         { header: 'Gallons', accessor: (r) => r.gallons },
@@ -728,7 +625,7 @@ export function FuelReportsClient() {
               rawEntries={filteredEntries}
               onOpenEntry={(id, type) => router.push(`/operations/diesel/${id}?type=${type}`)}
               onOpenExceptions={() => setView('overview')}
-              loading={summary === undefined || entriesLoading}
+              loading={summary === undefined || reportEntries === undefined}
             />
           )}
 
