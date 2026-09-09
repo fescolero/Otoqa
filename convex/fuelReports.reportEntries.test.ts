@@ -113,6 +113,11 @@ describe('reportEntries', () => {
       }
       // DEF is bounded independently and is nowhere near the cap.
       await insertDef(ctx, vendorId, { entryDate: RANGE_START });
+      // Fills just AFTER the range feed the anomaly benchmark only. Being
+      // newest they must never displace requested in-range rows.
+      for (let i = 0; i < 10; i++) {
+        await insertFuel(ctx, vendorId, { entryDate: RANGE_END + 1 + i * 1000 });
+      }
     });
 
     const res = await t.query(api.fuelReports.reportEntries, {
@@ -123,6 +128,7 @@ describe('reportEntries', () => {
 
     expect(res.truncated).toBe(true);
     expect(res.rows).toHaveLength(MAX_RANGE_ROWS + 1);
+    expect(res.rows.every((r) => r.entryDate <= RANGE_END)).toBe(true);
     // The oldest fuel rows are the ones dropped.
     const fuelDates = res.rows.filter((r) => r.type === 'fuel').map((r) => r.entryDate);
     expect(Math.min(...fuelDates)).toBe(RANGE_START + 5 * 1000);

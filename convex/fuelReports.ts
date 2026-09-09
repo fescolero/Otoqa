@@ -600,6 +600,7 @@ async function loadRangeRows(
   organizationId: string,
   dateRangeStart: number,
   dateRangeEnd: number,
+  cap: number = MAX_RANGE_ROWS,
 ): Promise<{ rows: RangeRow[]; truncated: boolean }> {
   const [fuelEntries, defEntriesList] = await Promise.all([
     ctx.db
@@ -610,7 +611,7 @@ async function loadRangeRows(
           .lte('entryDate', dateRangeEnd)
       )
       .order('desc')
-      .take(MAX_RANGE_ROWS + 1),
+      .take(cap + 1),
     ctx.db
       .query('defEntries')
       .withIndex('by_organization_and_date', (q) =>
@@ -619,19 +620,18 @@ async function loadRangeRows(
           .lte('entryDate', dateRangeEnd)
       )
       .order('desc')
-      .take(MAX_RANGE_ROWS + 1),
+      .take(cap + 1),
   ]);
-  const truncated =
-    fuelEntries.length > MAX_RANGE_ROWS || defEntriesList.length > MAX_RANGE_ROWS;
+  const truncated = fuelEntries.length > cap || defEntriesList.length > cap;
   return {
     truncated,
     rows: [
-      ...fuelEntries.slice(0, MAX_RANGE_ROWS).map((entry) => ({
+      ...fuelEntries.slice(0, cap).map((entry) => ({
         entry,
         type: 'fuel' as const,
         product: (entry.fuelType ?? DEFAULT_FUEL_TYPE) as FuelProduct,
       })),
-      ...defEntriesList.slice(0, MAX_RANGE_ROWS).map((entry) => ({
+      ...defEntriesList.slice(0, cap).map((entry) => ({
         entry,
         type: 'def' as const,
         product: 'DEF' as FuelProduct,
@@ -713,11 +713,27 @@ function applyReportFilters(
 const ANOMALY_WINDOW_MS = PRICE_ANOMALY.windowDays * 86_400_000;
 
 /**
- * Load the report range plus the anomaly window on each side, assess
- * every fill in that pool against its peers, then hand back only the
- * in-range rows. The pool is never filtered — benchmarks must mean the
- * same thing whatever chips are active — and the widening gives fills
- * at the range edges their neighbours.
+ * Rows read per product table for EACH side window (the anomaly window
+ * just before the range and just after it). These rows only serve as
+ * benchmark peers, so a small cap is enough — 300 fills in three days is
+ * a hundred a day — and it keeps the whole query inside the per-call
+ * read budget even when the main range and the prior period are both
+ * at MAX_RANGE_ROWS.
+ */
+const SIDE_WINDOW_ROWS = 300;
+
+/**
+ * Load the report range, assess every in-range fill against its peers,
+ * and hand back the in-range rows with their assessments.
+ *
+ * Peers come from the range itself plus the anomaly window on each
+ * side, so fills at the range edges still have neighbours. The side
+ * windows are read SEPARATELY, each under its own small cap: reading
+ * one widened span newest-first would let the after-window's rows
+ * consume the main cap and push requested in-range rows out.
+ *
+ * The pool is never filtered — benchmarks must mean the same thing
+ * whatever chips are active.
  */
 async function loadAssessedRange(
   ctx: QueryCtx,
@@ -725,14 +741,18 @@ async function loadAssessedRange(
   dateRangeStart: number,
   dateRangeEnd: number,
 ) {
-  const pool = await loadRangeRows(
-    ctx,
-    organizationId,
-    dateRangeStart - ANOMALY_WINDOW_MS,
-    dateRangeEnd + ANOMALY_WINDOW_MS,
-  );
+  const [main, before, after] = await Promise.all([
+    loadRangeRows(ctx, organizationId, dateRangeStart, dateRangeEnd),
+    loadRangeRows(
+      ctx, organizationId, dateRangeStart - ANOMALY_WINDOW_MS, dateRangeStart - 1, SIDE_WINDOW_ROWS,
+    ),
+    loadRangeRows(
+      ctx, organizationId, dateRangeEnd + 1, dateRangeEnd + ANOMALY_WINDOW_MS, SIDE_WINDOW_ROWS,
+    ),
+  ]);
+  const pool = [...main.rows, ...before.rows, ...after.rows];
   const assess = assessPrices(
-    pool.rows.map(({ entry, product }) => ({
+    pool.map(({ entry, product }) => ({
       id: entry._id as string,
       product,
       entryDate: entry.entryDate,
@@ -742,10 +762,7 @@ async function loadAssessedRange(
       state: entry.location?.state,
     })),
   );
-  const rows = pool.rows.filter(
-    (r) => r.entry.entryDate >= dateRangeStart && r.entry.entryDate <= dateRangeEnd,
-  );
-  return { rows, assess, truncated: pool.truncated };
+  return { rows: main.rows, assess, truncated: main.truncated };
 }
 
 function sumRows(rows: RangeRow[]) {
@@ -793,16 +810,20 @@ export const reportSummary = query({
     await assertCallerOwnsOrg(ctx, args.organizationId);
 
     const hasPrior = args.priorStart !== undefined && args.priorEnd !== undefined;
-    const [range, priorRange] = await Promise.all([
-      loadAssessedRange(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd),
-      hasPrior
-        ? loadRangeRows(ctx, args.organizationId, args.priorStart!, args.priorEnd!)
-        : Promise.resolve(null),
-    ]);
+    const range = await loadAssessedRange(ctx, args.organizationId, args.dateRangeStart, args.dateRangeEnd);
     const rows = applyReportFilters(range.rows, args, range.assess);
-    // A partial prior window would make the delta meaningless; drop it.
-    const prior =
-      priorRange && !priorRange.truncated ? sumRows(applyReportFilters(priorRange.rows, args)) : null;
+
+    // Prior period for the KPI deltas, filtered by the same chips — which
+    // means it needs its own price assessments so an Exception chip on
+    // "price" matches prior rows too. Skipped when the main range is
+    // truncated (a delta against a partial period is meaningless, and
+    // not reading it keeps the call inside the read budget), and dropped
+    // when the prior window itself is truncated.
+    let prior: ReturnType<typeof sumRows> | null = null;
+    if (hasPrior && !range.truncated) {
+      const p = await loadAssessedRange(ctx, args.organizationId, args.priorStart!, args.priorEnd!);
+      if (!p.truncated) prior = sumRows(applyReportFilters(p.rows, args, p.assess));
+    }
 
     // ── Buckets ──
     const starts = [...args.bucketStarts].sort((a, b) => a - b);

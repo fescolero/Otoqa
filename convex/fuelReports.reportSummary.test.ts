@@ -266,6 +266,21 @@ describe('reportSummary', () => {
     expect(flagged.totals.entries).toBe(1);
     expect(flagged.totals.spend).toBeCloseTo(460);
 
+    // The prior period is assessed too, so the price chip carries into
+    // the KPI deltas instead of zeroing the prior totals.
+    await t.run(async (ctx) => {
+      for (let d = 0; d < 4; d++) {
+        await insertFuel(ctx, { vendorId: cheap, entryDate: T0 - 7 * DAY + d * DAY, gallons: 100, ppg: 4, driverId: ada });
+      }
+      await insertFuel(ctx, { vendorId: pricey, entryDate: T0 - 5 * DAY, gallons: 50, ppg: 4.7, driverId: bob });
+    });
+    const withPrior = await t.query(api.fuelReports.reportSummary, {
+      ...base, exceptions: ['price'], priorStart: T0 - 7 * DAY, priorEnd: T0 - 1,
+    });
+    expect(withPrior.totals.entries).toBe(1);
+    expect(withPrior.prior?.entries).toBe(1);
+    expect(withPrior.prior?.spend).toBeCloseTo(235);
+
     const { bucketStarts: _unused, ...rangeArgs } = base;
     void _unused;
     const page = await t.query(api.fuelReports.reportPurchases, {
