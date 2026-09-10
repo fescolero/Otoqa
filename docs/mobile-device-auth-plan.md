@@ -65,7 +65,7 @@ What we get: one-tap sign-in with no code entry, the structural removal of the f
 
 - No SMS sending capability (Clerk sends the OTP today). No Twilio anywhere in Convex.
 - No Universal Links / App Links. The driver app has only the `otoqa-driver` custom scheme (`apps/driver/app.json`); dispatch has `otoqa-dispatch`. Custom schemes are not tappable in iOS Messages.
-- No org-members table in Convex and no WorkOS webhooks. Membership and roles live only in WorkOS tokens.
+- No authoritative membership data in Convex and no WorkOS webhooks. `orgMembers` exists but is a display-name directory synced on web login (no role, permissions, or status); carrier-side roles live in `userIdentityLinks` keyed by Clerk user id. Roles and permissions for members reach Convex only inside WorkOS tokens.
 - `convex/lib/permissions.ts` `isPermitted`: a token with **no** `permissions` claim is treated as pre-RBAC and granted full access. A new issuer that omits the claim gets admin.
 
 ---
