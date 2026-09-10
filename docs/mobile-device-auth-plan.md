@@ -1,6 +1,6 @@
 # Mobile Device Auth — Replace Clerk with device-bound credentials
 
-> Status: **v0.1 rough draft** — captures the 2026-09-10 discussion end to end. Nothing here is built. Open questions in §4 need answers before schema work starts; everything else is a decision already taken (§3) or a fact verified in the codebase or PostHog (§1).
+> Status: **v0.2 rough draft, schema-reviewed** — captures the 2026-09-10 discussion end to end. Nothing here is built. Open questions in §4 need answers before schema work starts; everything else is a decision already taken (§3) or a fact verified in the codebase or PostHog (§1). v0.2 reworked §5–§6 after a review for reactivity, tech debt, and platform-wide effects (findings in §23).
 >
 > Scope: **Otoqa Driver** and **Otoqa Dispatch** mobile apps, the web **Settings → Mobile access** page, and the platform console's mobile tooling. The web app and the staff console **stay on WorkOS**.
 > Backend: the single shared Convex deployment (topology unchanged).
@@ -113,7 +113,7 @@ What we get: one-tap sign-in with no code entry, the structural removal of the f
 
 | # | Question | Options / notes |
 |---|---|---|
-| OQ-1 | **Membership source of truth in Convex for members.** | (a) WorkOS webhooks → `orgMemberships` mirror + backfill + drift handling (right long-term answer; own workstream). (b) At refresh, call `workos.userManagement.listOrganizationMemberships` (already used in ~20 places), one call per device per 12h; if WorkOS is down, reissue on last-known claims for a bounded grace (e.g. 48h). Recommendation: ship (b) first, build (a) as the follow-on, then flip D12 to DB authorization. |
+| OQ-1 | **Membership source of truth in Convex for members.** | A partial mirror already exists: `orgMembers` (WorkOS member directory, synced on web login in `app/callback/route.ts`, used for display-name resolution in 7 files). Carrier-side membership lives in `userIdentityLinks` (role OWNER/ADMIN/MEMBER, keyed by Clerk user id). (a) Evolve `orgMembers` into the single membership table for both org kinds (§5.3) and make it authoritative via WorkOS webhooks. (b) Until webhooks land, at refresh call `workos.userManagement.listOrganizationMemberships` (already used in ~20 places), one call per device per 12h; if WorkOS is down, reissue on last-known claims for a bounded grace (e.g. 48h). Recommendation: the table evolution is **in scope** (it's forced by `clerkUserId` going away); webhooks are the follow-on; ship (b) in between. |
 | OQ-2 | **One person, two roles.** A carrier owner who also drives (owner mode today). One session carrying both kinds, or two sessions? | Recommendation: one credential per *person + org*, `kind` claim carries a set (`["driver","member"]`). The dispatch-app split plan (D1/D5 there) removes owner mode from the Driver app after a migration window, which simplifies this. |
 | OQ-3 | **Drivers who work for more than one carrier** (via `carrierPartnerships`). One credential per driver-and-org pair, or one per person with an org picker? | Recommendation: per driver-and-org pair; the app only ever shows one org. Verify how many such drivers exist before deciding. |
 | OQ-4 | **Who may send SMS enrollment links.** Carrier admins only; or also dispatchers in the web app; or platform support staff. | Recommendation: anyone holding the new `mobile_access:manage` permission, plus platform support (audited). |
@@ -124,6 +124,8 @@ What we get: one-tap sign-in with no code entry, the structural removal of the f
 | OQ-9 | **JWKS hosting.** Convex HTTP action vs static file on Vercel. | Either works; Convex caches JWKS. Static on Vercel avoids even the HTTP-action calls. |
 | OQ-10 | **Enrollment token TTLs.** SMS 15 min? QR 2 min? | Anyone can photograph a screen; QR must be short. |
 | OQ-11 | **Dormancy window** before a session is marked dormant (no refresh for N days). | 90 days proposed. |
+| OQ-12 | **Org identifier in the token for carrier-only orgs.** They have no `workosOrgId`; today they're matched by `clerkOrgId`. | Recommendation: `org_id` = `organizations._id` string for carrier-only orgs, matching the existing `assertCallerInCarrierOrg` match set (`clerkOrgId`/`workosOrgId`/`_id`). Do **not** introduce a fourth identifier. Consolidating 57 tables keyed by `workosOrgId` onto `_id` is a separate platform migration, out of scope. |
+| OQ-13 | **Replace the shared static key on `POST /v1/mobile/locations`** (`MOBILE_LOCATION_API_KEY`, one secret for every device) with the per-device JWT? | Recommendation: yes, as a follow-on (W13). The plan makes it possible; it isn't required for launch. |
 
 ---
 
@@ -136,62 +138,83 @@ What we get: one-tap sign-in with no code entry, the structural removal of the f
 | `driver` | Company drivers, carrier drivers | SMS | `drivers._id` (+ org) |
 | `member` | In-house dispatchers, org admins, carrier owners with web access | QR (self-enroll from web session) | WorkOS user id + org id |
 
-`identity.subject` in the new token is an Otoqa-issued stable id (the `devicePrincipals` row id or `drivers._id` / WorkOS user id, see OQ-2), **never** the phone number and never the Clerk user id.
+`identity.subject` in the new token is `drivers._id` for drivers and the WorkOS user id for members, disambiguated by the `kind` claim. **No new "principals" table** — it would be a join on every request for nothing. Never the phone number, never the Clerk user id.
 
-### 5.2 New tables (Convex)
+### 5.2 Design rules for the new tables
+
+These come from the review in §23 and from precedents already in the codebase (`driverSessions.getSessionFreshness` is polled one-shot "so GPS ping writes don't cascade reactive invalidations across the dashboard"; `carrierMobile` comments on "reactive invalidation storms").
+
+1. **The document read on every authenticated request is written only on revoke.** In Convex, every query that reads a document subscribes to it. If the auth helper reads a session doc, then any write to that doc re-runs every live query subscription for that device. So the doc the helper reads must contain nothing that changes on refresh, on request, or on heartbeat. Rotation state, last-seen, last-refresh all live elsewhere.
+2. **`sid` is the session document's Convex id.** The helper does `ctx.db.get(normalizeId(sid))`, one primary-key read, no index scan. Invalid or foreign ids fail closed.
+3. **Nothing auth-related is added to `drivers`.** It's the hot, PII-bearing table read across the platform. The existing `clerkUserId`/`clerkSync*` fields come off it (§16).
+4. **No duplicate of existing state.** Push tokens already live on `driverSessions` (`pushToken`, `pushTokenPlatform`, `by_push_token`, server-authoritative). Do not add `pushToken` to `devices`. Moving push registration from "per shift" to "per device" is a sensible later consolidation, tracked in §23, not part of this plan.
+5. **Org references follow the existing convention.** 57 tables key by the WorkOS org id string, 4 by `v.id('organizations')`. New tables carry **both** `organizationId: v.id('organizations')` (for joins) and `orgKey: string` (the same value the token's `org_id` carries, see OQ-12) so org-scoped indexes work for carrier-only orgs too. Do not invent a new identifier.
+6. **Small tables, narrow indexes, one purpose each.** Per-org device lists are tens of rows; per-token lookups are single-row by hash.
+7. **Every field that will be dropped later is optional from day one**, and every drop is a numbered migration in `convex/migrations/` that unsets the field before the schema change (Convex validates schema on deploy).
+
+### 5.3 New tables (Convex)
 
 ```
-devices
+devices                                  // one row per enrolled install; written on enroll, revoke, dormancy, throttled last-seen
   principalKind: 'driver' | 'member'
   driverId?: Id<'drivers'>
   workosUserId?: string
   organizationId: Id<'organizations'>
-  workosOrgId: string
+  orgKey: string                          // == token org_id (workosOrgId, or organizations._id for carrier-only orgs)
   platform: 'ios' | 'android'
-  deviceName: string            // "iPhone 15", "Pixel 8"
+  deviceName: string
   appId: 'driver' | 'dispatch'
   appVersion, osVersion
-  installId: string             // per-install random id, regenerated on reinstall
-  pushToken?: string            // merge with existing server-authoritative push registration
+  installId: string                       // per-install random id; regenerated on reinstall
   enrolledAt, enrolledVia: 'sms' | 'qr' | 'code' | 'clerk_migration'
-  lastSeenAt, lastRefreshAt
+  lastSeenAt?: number                     // written at most once/hour by a throttled client mutation, never from the auth helper
   status: 'active' | 'revoked' | 'dormant'
   revokedAt?, revokedBy?, revokedReason?
+  .index('by_driver', ['driverId'])
+  .index('by_workos_user', ['workosUserId'])
+  .index('by_orgkey_status', ['orgKey', 'status'])       // settings page + revoke-all
+  .index('by_status_lastseen', ['status', 'lastSeenAt'])  // dormancy sweep
 
-deviceSessions
+deviceSessions                           // THE doc the auth helper reads. Written ONLY on create and revoke.
   deviceId: Id<'devices'>
-  sessionId: string             // goes into the JWT `sid` claim
-  refreshTokenHash: string      // sha-256; never store raw
-  previousRefreshTokenHash?: string   // replay grace window
-  previousValidUntil?: number
-  accessExpiresAt, refreshExpiresAt
-  status: 'active' | 'rotated' | 'revoked'
-  createdAt, rotatedAt
+  principalKind, driverId?, workosUserId?, organizationId, orgKey   // denormalized so the helper needs no second read
+  status: 'active' | 'revoked'
+  revokedAt?, revokedReason?: 'admin' | 'sign_out' | 'driver_deactivated' | 'member_removed' | 'device_replaced' | 'dormant'
+  .index('by_device', ['deviceId'])
+  // no by_session_id: sid IS the _id
 
-enrollmentTokens
-  tokenHash: string             // sha-256 of the one-time token; raw token only ever in the link/QR
-  principalKind, driverId?, workosUserId?, organizationId
+deviceRefreshTokens                      // rotation state; read only by the refresh action, never by queries
+  sessionId: Id<'deviceSessions'>
+  tokenHash: string                       // sha-256; raw never stored
+  status: 'active' | 'superseded'
+  supersededAt?: number                   // replay grace: a superseded token is accepted for GRACE_MS after this and returns the same successor pair
+  successorId?: Id<'deviceRefreshTokens'>
+  expiresAt
+  .index('by_hash', ['tokenHash'])
+  .index('by_session', ['sessionId'])
+  .index('by_status_expires', ['status', 'expiresAt'])   // cleanup
+
+enrollmentTokens                         // single-use; read by exchange (by hash) and by the settings page (by org)
+  tokenHash: string
+  principalKind, driverId?, workosUserId?, organizationId, orgKey
   channel: 'sms' | 'qr' | 'code' | 'clerk_migration'
-  createdBy: string             // member subject or 'system'
+  createdBy: string
   expiresAt
   usedAt?, usedByDeviceId?
-  deliveryStatus?: 'queued' | 'sent' | 'delivered' | 'failed' | 'undelivered'   // from Twilio status webhooks
+  deliveryStatus?: 'queued' | 'sent' | 'delivered' | 'failed' | 'undelivered' | 'opted_out'   // Twilio status callback
   twilioMessageSid?
-
-orgMemberships (OQ-1 option a — later)
-  workosUserId, workosOrgId, organizationId
-  role, permissions[]
-  status: 'active' | 'inactive'
-  syncedAt
+  .index('by_hash', ['tokenHash'])
+  .index('by_orgkey_created', ['orgKey', 'expiresAt'])
+  .index('by_expires', ['expiresAt'])                     // cleanup
 ```
 
-Indexes: `devices.by_driver`, `devices.by_workos_user_org`, `devices.by_org_status`; `deviceSessions.by_session_id`, `by_refresh_hash`, `by_previous_refresh_hash`; `enrollmentTokens.by_token_hash`, `by_org_created`, `by_expires`.
+### 5.4 Existing tables: evolve, don't fork
 
-### 5.3 Changes to existing tables
-
-- `userIdentityLinks`: `clerkUserId` stops being the primary key. Add `principalId`/`driverId`; keep `clerkUserId` optional for the migration window; drop after decommission.
-- `drivers`: `clerkUserId`, `clerkSyncStatus`, `clerkSyncError`, attempts — deprecate, then drop.
-- Push-token registration keys off the new subject/device, not the Clerk user.
+- **`orgMembers` becomes the single membership table** for both org kinds (today: WorkOS directory synced on web login, keyed by WorkOS org id string, used for display names). Add: `organizationRef: v.id('organizations')`, `orgKey`, `principalKind`, `driverId?`, `role`, `permissions?: string[]`, `status: 'active' | 'inactive'`, `source: 'workos' | 'local'`, `syncedAt`. Make the existing `organizationId` (WorkOS string) optional. Indexes: `by_driver`, `by_orgkey_status`, keep `by_org_user`. Carrier owners/admins/members migrate in from `userIdentityLinks` with `source: 'local'`. Display-name consumers (7 files) are unaffected.
+- **`userIdentityLinks` is retired**, not extended. Its two jobs — map an external auth id to an org, and hold carrier-side roles — are covered by the token (`sub`, `org_id`, `kind`) and by `orgMembers`. Extending it with a new key would leave two membership tables forever. 22 files reference it; they collapse onto one `orgMembers` lookup. `getUserRoles` Methods 1/2/3 (link by Clerk id, phone fallback, partnership fallback) become one indexed read.
+- **`organizations.clerkOrgId`** (68 references) is dropped after decommission; carrier-only orgs are identified by `_id`. `orgType` comments ("Mobile only (Clerk)") updated.
+- **`drivers`**: `clerkUserId`, `clerkSyncStatus`, `clerkSyncError`, `clerkSyncAttempts` — optional already; drop via migration after decommission.
+- **`driverSessions.pushToken`** unchanged.
 
 ---
 
@@ -223,8 +246,8 @@ iat, exp (12h), nbf
 
 1. Client holds `accessToken` (memory + readable storage) and `refreshToken` (keychain).
 2. Convex `setAuth` token callback: return cached access token unless within N minutes of `exp` or `forceRefreshToken` is set **and** the last refresh was more than a few seconds ago (debounce).
-3. `POST refresh` (Convex action): look up by `refreshTokenHash`; if not found, look up `previousRefreshTokenHash` within `previousValidUntil` (grace window, e.g. 60s) and return the *same* new pair that was issued; otherwise reject with `session_revoked` / `session_unknown`.
-4. Rotate: new refresh token, previous hash retained for the grace window, `lastRefreshAt` updated on the device.
+3. `POST refresh` (Convex action): look up `deviceRefreshTokens.by_hash`. `active` → proceed. `superseded` within `GRACE_MS` of `supersededAt` → return the successor's pair again (network-retry replay). Anything else → `session_unknown`. Then `ctx.db.get(sessionId)`; `status !== 'active'` → `session_revoked`.
+4. Rotate: insert the successor token, mark the old one `superseded` with `supersededAt` and `successorId`. **Nothing on `deviceSessions` is written.** `devices.lastSeenAt` is not touched here either; the client's throttled heartbeat mutation owns it.
 5. Members (D12/OQ-1): re-read role/permissions at refresh (WorkOS call or mirror); if the membership is gone → revoke session, return `member_removed`.
 6. Response codes drive the app UI (§11.4): `ok`, `session_revoked`, `member_removed`, `device_dormant`, `server_unreachable` (client-side).
 
@@ -240,7 +263,9 @@ Persistence facts: iOS keychain items usually survive app deletion; Android Keys
 
 ### 6.5 Revocation
 
-- `requireCallerIdentity` / `getCallerOrgId` / `assertCallerInCarrierOrg` read `sid` and look up `deviceSessions.by_session_id`; `status !== 'active'` → `ConvexError('SessionRevoked')`. One indexed read; the same doc on every call, so query subscriptions stay cheap.
+- `requireCallerIdentity` / `getCallerOrgId` / `assertCallerInCarrierOrg` read `sid`, `normalizeId('deviceSessions', sid)` (fail closed on garbage), `ctx.db.get`, `status !== 'active'` → `ConvexError('SessionRevoked')`. One primary-key read. Because that doc is written only on create and revoke, every query subscription for a device carries one extra dependency that changes at most once in the device's life. Reactive cost: zero in steady state.
+- **Actions** have no `ctx.db`; the helper's action variant does `ctx.runQuery(internal.deviceAuth.sessionStatus, { sid })`. Grep shows no public actions call `getUserIdentity` today, so this is a guard for the future, not a migration.
+- The location ingest route (`/v1/mobile/locations`) uses a shared static key today and does not go through the helper; OQ-13 tracks moving it to the device JWT.
 - Triggers: admin revoke on the settings page; driver deactivated/deleted → revoke all that driver's sessions (replaces `scheduleDeleteClerkUser`); member removed/deactivated in WorkOS → revoke (webhook, or caught at next refresh under OQ-1b); enrolling a new device when one-device policy applies (OQ-6); explicit sign-out.
 
 ---
@@ -304,7 +329,9 @@ Single use. Bound to the first device that redeems it. Rate limited per token ha
 3. **Staff guard.** `requirePlatformStaff` compares issuer strings; the new issuer must never equal `STAFF_ISSUER`. Add a test.
 4. **Audit attribution.** `name`, `email` claims must be present; ~424 `userName` uses depend on it.
 5. **Member authorization source.** Per D12/OQ-1: claims at first, DB later. Wrap in one helper so the switch is a one-line change.
-6. **Phone fallback lookups** (`by_phone`, `normalizePhoneForMatch`) become migration-only and are removed at decommission.
+6. **Phone fallback lookups** (`by_phone`, `normalizePhoneForMatch`) become migration-only and are removed at decommission. The `drivers.by_phone` index stays (import/dedupe use it); only its auth use goes.
+7. **One caller helper, enforced by lint.** All 29 `identity.subject` reads and every `ctx.auth.getUserIdentity()` outside `convex/lib/auth.ts` route through `resolveCaller(ctx)` returning `{ kind, subject, driverId?, workosUserId?, orgKey, organizationId, sessionId, name, email, role?, permissions? }`. Add an ESLint `no-restricted-syntax` rule (the config already uses `no-restricted-imports`) that forbids `ctx.auth.getUserIdentity` and `identity.subject` outside that file. This is what stops a second dual-path helper family from growing.
+8. **All Clerk-compat code lives in one folder** (`convex/legacy/clerk/`: the migration mutation, the Clerk-shape token adapter, the phone fallbacks) so decommission is a folder delete plus one provider line in `auth.config.ts`. Today's dual-path helpers with phone fallback became permanent because nothing fenced them.
 
 ---
 
@@ -432,9 +459,12 @@ Questionnaire answer: "Device-bound credential established through admin-control
 - `convex/clerkSync.ts`, `clerkSyncScheduler.ts`, `clerkSyncHelpers.ts`, all `scheduleXxxClerkUser` call sites, `platform/support.ts` Clerk tools, `maintenance.ts` `syncExistingCarrierOwnersToClerk`.
 - Clerk provider in `auth.config.ts`; `CLERK_*` env vars; Clerk SMS template with the SMS-retriever hash.
 - `@clerk/clerk-expo` in both apps; `expo-sms-retriever` module; `sms-otp.ts`; `auth-token-store.ts`; recovery machine; `(auth)/sign-in.tsx`, `verify.tsx`.
-- `clerkUserId` on `drivers` and `userIdentityLinks`; phone-fallback lookups.
+- `clerkUserId` + `clerkSync*` on `drivers`; the whole `userIdentityLinks` table (after backfill into `orgMembers`); `organizations.clerkOrgId` (68 refs) and the Clerk wording on `orgType`; phone-fallback auth lookups. Each is a numbered migration in `convex/migrations/` that unsets fields before the schema drop.
+- `convex/legacy/clerk/` folder; `CLERK_ISSUER_URL` provider block in `auth.config.ts`.
+- `apps/dispatch/package.json` Clerk dependency (already unused), `expo-auth-session` + `expo-web-browser` (only used by the WorkOS scaffold), `@clerk/clerk-expo` in the driver app.
+- `apps/driver/app/_layout.tsx` `tokenCache` + the keychain-accessibility comment block; `docs/security-review.md` §Auth and the `clerkSync` log-PII findings; `docs/dispatch-app-split-plan.md` D4/D5.
 - PostHog events: `sign_in_*`, `verification_*`, `convex_auth_*` recovery events → replaced by `enroll_*`, `device_auth_*`.
-- Docs: `docs/security-review.md` §Auth, `docs/dispatch-app-split-plan.md` D4/D5.
+- `MOBILE_LOCATION_API_KEY` once OQ-13/W13 ships.
 
 ---
 
@@ -502,10 +532,12 @@ Long-lead items start on day 1 regardless of the spike outcome.
 | W8 | Platform console tools | W3 | 1–2 days |
 | W9 | Silent Clerk migration + PostHog alias + flag | W3, W5 | 2 days |
 | W10 | Native builds (entitlements), device matrix, store submission | W5, W6, W0 | 3–4 days + review |
-| W11 | Membership mirror via WorkOS webhooks + DB authorization (OQ-1a) | W3 | 3–4 days, can follow launch |
-| W12 | Decommission | cutover | 2 days |
+| W11 | WorkOS webhooks making `orgMembers` authoritative + DB authorization for members | W3 | 3–4 days, can follow launch |
+| W12 | Decommission (§16), including the field-drop migrations and the `userIdentityLinks` retirement | cutover | 3 days |
+| W13 | Location ingest on device JWT instead of the shared static key (OQ-13) | W5 | 1 day, follow-on |
+| W14 | `orgMembers` evolution + `userIdentityLinks` backfill + `resolveCaller` helper + lint rule | W2 | 3 days (moved out of W3 because it touches 22 + 29 call sites) |
 
-Roughly 2–3 engineer-weeks of build for the core (W1–W9) plus W0's calendar lead time and store review. W11 can trail.
+Roughly 3 engineer-weeks of build for the core (W1–W9, W14) plus W0's calendar lead time and store review. W11 and W13 can trail.
 
 ---
 
@@ -517,3 +549,62 @@ Roughly 2–3 engineer-weeks of build for the core (W1–W9) plus W0's calendar 
 - **Refresh rotation lockout.** Mitigation: grace window + tests; admin "send new link" is the backstop.
 - **Permission freshness for members** until the mirror exists. Mitigation: refresh-time WorkOS check with bounded grace (OQ-1b); 12h worst case is stated and accepted, or shorten member tokens to 1h until W11 lands.
 - **Convex Auth beta surprises.** Mitigation: the spike is time-boxed; the hand-rolled path is fully specified above.
+
+---
+
+## 23. Schema and platform review (v0.2)
+
+Review of the v0.1 draft against the codebase for reactivity, tech debt, and effects on the rest of the platform. Each finding names what changed in the plan.
+
+### 23.1 Reactivity: the v0.1 design would have re-run every mobile query on every refresh
+
+v0.1 put `refreshTokenHash`, `rotatedAt`, and `lastRefreshAt` on the same `deviceSessions` doc the auth helper reads on every request, and `lastSeenAt` on `devices`. In Convex every query that reads a doc subscribes to it; a write re-runs all of those subscriptions. With ~5 subscribed queries per driver screen, one refresh would have re-executed all of them, and a per-request `lastSeenAt` would have been a self-inflicted invalidation storm of the kind the codebase already guards against (`driverSessions.getSessionFreshness` is deliberately polled; `carrierMobile` comments call it out).
+
+Fixed: `deviceSessions` is written only on create and revoke (§5.2 rule 1); rotation state moved to `deviceRefreshTokens`, read only by the refresh action; `lastSeenAt` is a throttled client heartbeat, never touched by the helper; `sid` is the session doc's `_id` so the helper does a primary-key `get`, no index (§6.5).
+
+### 23.2 Two membership tables were about to become three
+
+`userIdentityLinks` (carrier-side roles, keyed by Clerk user id, 22 files) and `orgMembers` (WorkOS directory synced on web login, 7 files) already overlap. v0.1 added `orgMemberships`. Fixed: evolve `orgMembers` into the single membership table with `source: 'workos' | 'local'`, backfill carriers from `userIdentityLinks`, retire `userIdentityLinks` (§5.4). `getUserRoles` Methods 1/2/3 collapse to one indexed read.
+
+### 23.3 Push tokens would have been duplicated
+
+`driverSessions` already holds `pushToken`/`pushTokenPlatform` with a `by_push_token` index and server-authoritative registration (see `docs/runbooks/dispatch-push-credentials.md`). v0.1 added `pushToken` to `devices`. Removed. Consolidating push registration onto `devices` (per install rather than per shift) is a reasonable later change and is **not** part of this plan.
+
+### 23.4 Org identity: three identifiers already, don't add a fourth
+
+Orgs are referenced by `workosOrgId` (57 tables), `v.id('organizations')` (4 tables), and `clerkOrgId` (68 code references, carrier-only orgs). The token's `org_id` follows the existing match set: `workosOrgId` where present, else `organizations._id` (OQ-12). New tables carry both `organizationId` and `orgKey` (§5.2 rule 5). `clerkOrgId` is dropped at decommission. A platform-wide consolidation onto `_id` is real debt but a separate project.
+
+### 23.5 Nothing goes on `drivers`
+
+The hot, PII-bearing table. v0.1 already avoided adding to it; v0.2 makes it a rule and schedules removal of the four Clerk fields it carries today.
+
+### 23.6 Dual-path helpers become permanent unless fenced
+
+The current `assertCallerInCarrierOrg` / `getUserRoles` phone fallbacks were "temporary" and are now load-bearing. Fixed: one `resolveCaller` helper, an ESLint rule forbidding direct `getUserIdentity`/`identity.subject` use outside `convex/lib/auth.ts`, and all Clerk-compat code in `convex/legacy/clerk/` (§9.7–9.8). Decommission is then a folder delete and one provider line.
+
+### 23.7 Schema drops need migrations, not edits
+
+Convex validates the schema on deploy; a field can't be removed while any document carries it. Every drop (`drivers.clerk*`, `userIdentityLinks`, `organizations.clerkOrgId`) is a numbered script in `convex/migrations/` (the pattern already exists, `001`–`009`) that unsets before the schema change (§5.2 rule 7, W12).
+
+### 23.8 Effects on the rest of the platform
+
+| Area | Effect | Handling |
+|---|---|---|
+| Every authenticated Convex function | one extra primary-key read inside the same transaction | sub-millisecond; doc never changes in steady state |
+| Query subscriptions (mobile) | one extra dependency per subscription | changes only on revoke |
+| Web auth, staff console | none | `isPermitted` legacy rule must keep WorkOS behavior unchanged (§9.1) |
+| Web team page, audit log display names | `orgMembers` gains fields; existing reads unchanged | additive migration |
+| Platform console | Clerk resync tools replaced | W8 |
+| External tracking API, crons, internal functions | none | — |
+| Location ingest route | none until W13 | shared key stays for now |
+| Rate limiter component | new buckets for enroll/refresh/send | shared component, isolated keys |
+| Audit log volume | + enroll/revoke/send events | low |
+| Dispatch split plan | D4/D5 there superseded by D2/D3 here | update that doc at W6 |
+| PostHog | subject changes | `$alias` at migration (§14.3) |
+
+### 23.9 Cleanup already owed, surfaced by this review
+
+- `apps/dispatch/package.json` still lists `@clerk/clerk-expo` though `lib/auth` moved to WorkOS.
+- `expo-auth-session` and `expo-web-browser` in dispatch are used only by the never-validated WorkOS scaffold.
+- `convex/clerkSync.ts` logs driver names and phone numbers (flagged in `docs/security-review.md`); it is deleted rather than fixed.
+- `organizations.orgType` comments describe Clerk as the mobile provider.
