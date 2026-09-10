@@ -73,6 +73,12 @@ type ExceptionId = (typeof EXCEPTION_RULES)[number]['id'];
 const REVIEWED = 'reviewed';
 type ExceptionFilterId = ExceptionId | typeof REVIEWED;
 type ExceptionCounts = Record<ExceptionId, number> & { total: number; reviewed: number };
+/** Review status as it fits in the purchases table's Δ column. */
+const REVIEW_SHORT: Record<keyof typeof REVIEW_LABELS, string> = {
+  OK: 'Reviewed',
+  CORRECTED: 'Corrected',
+  DRIVER_FOLLOW_UP: 'Follow-up',
+};
 type PriceTierCounts = { state: number; fleet: number; thin: number; none: number };
 
 // Fixed per-product series colors — color follows the entity, so a
@@ -200,6 +206,12 @@ const frN = (n: number) => Math.round(n).toLocaleString();
 const frMoney = (n: number) =>
   (n < 0 ? '−$' : '$') + Math.abs(Math.round(n)).toLocaleString();
 const frMoney2 = (n: number) => `$${n.toFixed(2)}`;
+/** Signed cents-precision $/gal difference: +$0.35, −$0.12, $0.00. */
+const frDelta = (n: number) => {
+  const cents = Math.round(n * 100) / 100;
+  if (cents === 0) return '$0.00';
+  return (cents < 0 ? '−$' : '+$') + Math.abs(cents).toFixed(2);
+};
 
 // ─── Component ─────────────────────────────────────────────────────────
 export function FuelReportsClient() {
@@ -1782,7 +1794,7 @@ function FuelPurchasesTable({
       setSortKey(key);
       // Numbers and dates start with the big/new end first; text starts A→Z.
       setSortDir(
-        key === 'date' || key === 'gallons' || key === 'ppg' || key === 'total' ? 'desc' : 'asc',
+        key === 'date' || key === 'gallons' || key === 'ppg' || key === 'delta' || key === 'total' ? 'desc' : 'asc',
       );
     }
   };
@@ -1845,7 +1857,7 @@ function FuelPurchasesTable({
     }
   };
 
-  const grid = '92px 1.5fr 122px 1.4fr 84px 80px 96px 1fr';
+  const grid = '92px 1.5fr 122px 1.4fr 84px 80px 86px 96px 1fr';
   const cols: Array<{ key: PurchaseSortKey; label: string; right?: boolean }> = [
     { key: 'date',    label: 'Date' },
     { key: 'vendor',  label: 'Vendor · location' },
@@ -1853,6 +1865,9 @@ function FuelPurchasesTable({
     { key: 'driver',  label: 'Driver · truck' },
     { key: 'gallons', label: 'Gallons', right: true },
     { key: 'ppg',     label: '$/gal',   right: true },
+    // $/gal minus the fill's benchmark (median of nearby same-product
+    // fills). Red when the price rule flags it; muted otherwise.
+    { key: 'delta',   label: 'Δ $/gal', right: true },
     { key: 'total',   label: 'Total',   right: true },
     { key: 'payment', label: 'Payment' },
   ];
@@ -2019,21 +2034,36 @@ function FuelPurchasesTable({
               <div className="num text-right px-3.5 py-2 text-[12.5px]">{r.gallons.toFixed(1)}</div>
               <div className="num text-right px-3.5 py-2 text-[12.5px] text-[var(--text-secondary)]">
                 ${r.pricePerGallon.toFixed(3)}
-                {r.exceptions.includes('price') && r.priceBenchmark != null && (
-                  <div
-                    className="text-[10.5px] mt-0.5"
-                    style={{ color: '#C33C3C' }}
-                    title={`Benchmark: median of ${r.pricePeers} ${r.priceTier === 'state' ? 'same-state' : 'fleet'} fills within 3 days`}
+              </div>
+              <div
+                className="num text-right px-3.5 py-2 text-[12.5px]"
+                title={
+                  r.priceBenchmark == null
+                    ? 'No nearby fills to compare against'
+                    : `Benchmark $${r.priceBenchmark.toFixed(3)}: median of ${r.pricePeers} ${r.priceTier === 'state' ? 'same-state' : 'fleet'} fills within 3 days`
+                }
+              >
+                {r.priceBenchmark == null ? (
+                  <span className="text-[var(--text-tertiary)]">—</span>
+                ) : (
+                  <span
+                    style={
+                      r.exceptions.includes('price')
+                        ? { color: '#C33C3C', fontWeight: 600 }
+                        : { color: 'var(--text-tertiary)' }
+                    }
                   >
-                    +${r.priceDelta.toFixed(2)} vs ${r.priceBenchmark.toFixed(2)}
-                  </div>
+                    {frDelta(r.priceDelta)}
+                  </span>
                 )}
                 {r.review && (
+                  // Short form fits the column; the full label, reviewer
+                  // and note sit in the tooltip.
                   <div
-                    className="text-[10.5px] mt-0.5 text-[var(--text-tertiary)]"
+                    className="text-[10.5px] mt-0.5 text-[var(--text-tertiary)] whitespace-nowrap truncate"
                     title={`${REVIEW_LABELS[r.review.status]}${r.review.reviewedByName ? ` by ${r.review.reviewedByName}` : ''}${r.review.note ? ` — ${r.review.note}` : ''}`}
                   >
-                    {REVIEW_LABELS[r.review.status]}
+                    {REVIEW_SHORT[r.review.status]}
                   </div>
                 )}
               </div>
@@ -2092,6 +2122,7 @@ function FuelPurchasesTable({
           <div className="num text-right px-3.5 py-2 text-[12.5px] font-semibold">
             {totals.gallons.toFixed(1)}
           </div>
+          <div />
           <div />
           <div className="num text-right px-3.5 py-2 text-[13px] font-bold" style={{ color: 'var(--accent)' }}>
             {frMoney(totals.spend)}

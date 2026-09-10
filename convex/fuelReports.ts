@@ -1101,6 +1101,8 @@ export const purchaseSortKeyValidator = v.union(
   v.literal('driver'),
   v.literal('gallons'),
   v.literal('ppg'),
+  /** $/gal minus the fill's benchmark; rows with no benchmark sort as 0. */
+  v.literal('delta'),
   v.literal('total'),
   v.literal('payment'),
 );
@@ -1148,6 +1150,7 @@ export const reportPurchases = query({
     for (const doc of drivers) if (doc) driverName.set(doc._id, `${doc.firstName} ${doc.lastName}`);
 
     const dir = args.sortDir === 'asc' ? 1 : -1;
+    const delta = (r: RangeRow) => range.assess.get(r.entry._id as string)?.delta ?? 0;
     const cmp = (a: RangeRow, b: RangeRow): number => {
       switch (args.sortKey) {
         case 'date':    return a.entry.entryDate - b.entry.entryDate;
@@ -1158,6 +1161,7 @@ export const reportPurchases = query({
         case 'driver':  return (a.entry.driverId ? driverName.get(a.entry.driverId) ?? '' : '').localeCompare(b.entry.driverId ? driverName.get(b.entry.driverId) ?? '' : '');
         case 'gallons': return a.entry.gallons - b.entry.gallons;
         case 'ppg':     return a.entry.pricePerGallon - b.entry.pricePerGallon;
+        case 'delta':   return delta(a) - delta(b);
         case 'total':   return a.entry.totalCost - b.entry.totalCost;
         case 'payment': return (a.entry.paymentMethod ?? '').localeCompare(b.entry.paymentMethod ?? '');
       }

@@ -156,3 +156,26 @@ describe('reportPurchases', () => {
     expect(summary.totals.entries).toBe(pilotAda.page.length);
   });
 });
+
+describe('reportPurchases delta sort', () => {
+  it('orders by $/gal minus benchmark, biggest overpay first', async () => {
+    const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
+    const vendorId = await t.run(async (ctx) => seedVendor(ctx, 'Pilot'));
+    await t.run(async (ctx) => {
+      // Four fills on neighbouring days: three at $4 and one at $4.90.
+      // Each is judged against the other three, so the $4.90 fill sits
+      // +$0.90 over and the $4 fills sit slightly under their median.
+      await insertFuel(ctx, { vendorId, entryDate: T0 + 1 * DAY, gallons: 10, ppg: 4 });
+      await insertFuel(ctx, { vendorId, entryDate: T0 + 2 * DAY, gallons: 10, ppg: 4.9 });
+      await insertFuel(ctx, { vendorId, entryDate: T0 + 3 * DAY, gallons: 10, ppg: 4 });
+      await insertFuel(ctx, { vendorId, entryDate: T0 + 4 * DAY, gallons: 10, ppg: 4 });
+    });
+    const page = await t.query(api.fuelReports.reportPurchases, {
+      ...RANGE, sortKey: 'delta', sortDir: 'desc', paginationOpts: { numItems: 10, cursor: null },
+    });
+    expect(page.page[0].pricePerGallon).toBe(4.9);
+    expect(page.page[0].priceDelta).toBeCloseTo(0.9);
+    expect(page.page[0].exceptions).toContain('price');
+    expect(page.page.slice(1).every((r) => r.priceDelta <= 0)).toBe(true);
+  });
+});
