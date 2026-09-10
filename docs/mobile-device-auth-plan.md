@@ -240,7 +240,7 @@ orgMemberships                           // D18: the ONE membership table, both 
   orgKey: string
   principalKind: 'member'
   workosUserId?: string                   // WorkOS-backed orgs
-  driverId?: Id<'drivers'>                // owner-operators who also drive (OQ-2)
+  driverId?: Id<'drivers'>                // owner-operators who also drive (D24)
   role: 'OWNER' | 'ADMIN' | 'MEMBER' | string   // carrier roles today; WorkOS role slug for WorkOS orgs
   permissions?: string[]
   status: 'active' | 'inactive'
@@ -255,7 +255,7 @@ orgMemberships                           // D18: the ONE membership table, both 
 
 ### 5.4 Existing tables
 
-- **`orgMemberships` replaces both `orgMembers` and `userIdentityLinks`.** `orgMembers` readers (8 sites, mostly through `getMemberDisplayMap` in `convex/orgMembers.ts:77`) repoint to `orgMemberships` by `orgKey` + `workosUserId`. The login-time sync (`lib/sync-org-members.ts` → `orgMembers.syncMembers`) writes `orgMemberships` with `source: 'workos'` and **only upserts, never deletes** (OQ-1). `userIdentityLinks` (50 non-test references; 12 in `carrierPartnerships.ts` including a full-table `.collect()` at `:2350`) backfills into `orgMemberships` with `source: 'local'`, then the table is dropped.
+- **`orgMemberships` replaces both `orgMembers` and `userIdentityLinks`.** `orgMembers` readers (8 sites, mostly through `getMemberDisplayMap` in `convex/orgMembers.ts:77`) repoint to `orgMemberships` by `orgKey` + `workosUserId`. The login-time sync (`lib/sync-org-members.ts` → `orgMembers.syncMembers`) writes `orgMemberships` with `source: 'workos'` and **only upserts, never deletes** (D23). `userIdentityLinks` (50 non-test references; 12 in `carrierPartnerships.ts` including a full-table `.collect()` at `:2350`) backfills into `orgMemberships` with `source: 'local'`, then the table is dropped.
 - **`organizations`**: drop `clerkOrgId` and index `by_clerk_org`; update `orgType` comments.
 - **`drivers`**: drop `clerkUserId`, `clerkSyncStatus`, `clerkSyncError`, `clerkSyncedAt` via strip migration.
 - **`orgHealthSnapshots.identityLinkCount`** → `membershipCount`.
@@ -374,7 +374,7 @@ iat, exp (12h), nbf
 4. **Replace `requireCarrierAuth`** (20 sites) with `resolveCaller` requiring `kind ∋ member` and a role check; make it **fail-loud** (today it returns `null` and screens go blank).
 5. **Collapse `getUserRoles`** (Methods 1/2/3) and `resolveClerkCarrierMembership`, `assertCallerInCarrierOrg` Path 2, `requireCapability` Clerk branch to one `orgMemberships` read. `assertCallerInCarrierOrg` Path 1 (org-claim match with **no permission check**) gets a permission check.
 6. **Staff guard.** `requirePlatformStaff` compares issuer strings; add the test twin of `platform/access.test.ts:62-79` for the new issuer.
-7. **Audit attribution.** `name`, `email` on every token; fix `payProfiles.resolveActorName:761` (OQ-14).
+7. **Audit attribution.** `name`, `email` on every token; fix `payProfiles.resolveActorName:761` (D32).
 8. **Location holes (D22).** `driverLocations.batchInsertLocations` deleted; `/v1/mobile/locations` on bearer; `ingestBatch` takes `driverId`/`organizationId` from the caller and verifies `sessionId` ownership. `s3Upload` presign endpoints gain a caller-org / assignment check.
 9. **Phone-fallback auth lookups removed.** `drivers.by_phone` and the import/dedupe uses stay. `carrierPartnerships.ts:2350` full-table scan goes with `userIdentityLinks`.
 10. **One caller helper, enforced by lint.** ESLint `no-restricted-syntax` forbids `ctx.auth.getUserIdentity` outside `convex/lib/auth.ts` and `convex/lib/mobileAuth.ts` (18 sites in 10 files migrate), and forbids `identity.subject` outside those files (21 sites).
@@ -588,7 +588,7 @@ Long-lead items (W0) start on day 1. Everything else lands in the cutover window
 | W8 | Dispatch app (§11.3) | W6 | 2 days |
 | W9 | Web: Mobile access page, driver-profile card, team-route hooks, nav | W5 | 4 days |
 | W10 | Platform console DevicesPanel + support tools | W5 | 1–2 days |
-| W11 | WorkOS webhooks + DB authorization for members (OQ-1a) | W4 | 3 days, trailing |
+| W11 | WorkOS webhooks + DB authorization for members (D23 follow-on) | W4 | 3 days, trailing |
 | W12 | Strip migrations, schema drops, decommission (§16), docs | cutover | 3 days |
 | W13 | `/v1/mobile/locations` on bearer; delete `batchInsertLocations`; `s3Upload` presign checks; `ingestBatch` ownership check (D22) | W6 | 1–2 days, ships with W7 |
 | W14 | Native builds (entitlements, module removal), device matrix, store submission | W7, W8, W0 | 3–4 days + review; trails the cutover |
