@@ -1,6 +1,6 @@
 # Mobile Device Auth — Replace Clerk with device-bound credentials
 
-> Status: **v0.5 draft, adversarially reviewed** — captures the 2026-09-10 discussion end to end. Nothing here is built. v0.2 reworked the schema for reactivity (§23). v0.3 folded in four code audits (§24) and the decision that **there are no active drivers, so the cutover happens in one 24-hour window** (§14). v0.4 converted every open question into a decision (D23–D32). v0.5 is a confidence review of the plan itself (§25): it found a broken refresh-grace design, a privilege-escalation path through the member sync, and a missing brute-force control, and fixed them (D33–D35).
+> Status: **v0.6 draft, second adversarial pass** — captures the 2026-09-10 discussion end to end. Nothing here is built. v0.2 reworked the schema for reactivity (§23). v0.3 folded in four code audits (§24) and the decision that **there are no active drivers, so the cutover happens in one 24-hour window** (§14). v0.4 converted every open question into a decision (D23–D32). v0.5 fixed the refresh-grace design, a privilege-escalation path through the member sync, and a missing brute-force control (D33–D35). v0.6 (§25.4) caught that the `org_id` claim on driver tokens would have opened every org-scoped web function to drivers, and fixed it with D36–D38.
 >
 > Scope: **Otoqa Driver** and **Otoqa Dispatch** mobile apps, the web **Settings → Mobile access** page, and the platform console's mobile tooling. The web app and the staff console **stay on WorkOS**.
 > Backend: the single shared Convex deployment (topology unchanged).
@@ -133,6 +133,9 @@ What gates it externally: Twilio 10DLC registration (weeks) and a store-reviewed
 | D33 *(v0.5)* | **Hand-rolled issuer; the Convex Auth spike (D14) is dropped.** Revisit only if Convex Auth leaves beta and supports custom claims, per-request revocation, and headless token access without wrapping. | Every downstream piece (claim shape, `resolveCaller`, ingest auth, settings page) depends on the token design. Keeping a fork open would have meant designing twice; Convex Auth's magic-link and rotation are the two parts that are cheapest to write ourselves, and its beta status was already the stated risk. |
 | D34 *(v0.5)* | **Membership rows for WorkOS-backed orgs are written only by a Convex Node action that fetches from WorkOS with a server API key.** No public mutation accepts membership data from a client. | `orgMembers.syncMembers` is public and trusts its payload today; with `role`/`permissions` on the row and the row authorizing mobile requests, that would be a privilege escalation. |
 | D35 *(v0.5)* | **Refresh-token reuse detection revokes the session.** A superseded token presented outside the grace window, or an invalidated successor, ends the whole family. | Standard rotation security; also fixes the v0.4 grace design, which assumed the server could re-return a token it never stored. |
+| D36 *(v0.6)* | **A driver token is never an org member.** The shared org-member helpers (`requireCallerOrgId`, `requireCallerIdentity`, `assertCallerOwnsOrg`, `assertOrgPermission`) throw for `kind: ['driver']` tokens from our issuer; `getCallerOrgId` returns null for them. Driver access is granted only by explicit `resolveCaller({ allow: ['driver'] })` calls. | Without this, giving drivers an `org_id` claim (D16) would have opened every org-scoped web function — loads, customers, driver PII — to any enrolled driver. Preserves today's behavior, where a driver token fails those helpers for lack of an org claim. |
+| D37 *(v0.6)* | **Carrier roles are mapped to permission slugs at mint time** (`permissionsForCarrierRole`: OWNER/ADMIN → all capabilities, MEMBER → dispatcher preset). | `isPermitted` only understands the `admin` slug and a `permissions` array; carrier `OWNER` tokens would otherwise be denied every dispatch capability. |
+| D38 *(v0.6)* | **Refresh rotation is one atomic mutation**; the action only generates randomness before and signs after. Grace applies to any token in the family within 60s of the last rotation. | Two concurrent headless refreshes (separate JS contexts on Android) must not produce a false reuse revocation. |
 
 ---
 
@@ -261,7 +264,7 @@ orgMemberships                           // D18: the ONE membership table, both 
 ### 5.4 Existing tables
 
 - **`orgMemberships` replaces both `orgMembers` and `userIdentityLinks`.** `orgMembers` readers (8 sites, mostly through `getMemberDisplayMap` in `convex/orgMembers.ts:77`) repoint to `orgMemberships` by `orgKey` + `workosUserId`. `userIdentityLinks` (50 non-test references; 12 in `carrierPartnerships.ts` including a full-table `.collect()` at `:2350`) backfills into `orgMemberships` with `source: 'local'`, then the table is emptied and dropped.
-- **The WorkOS-side rows are written only by Convex itself (v0.5, D34).** Today `orgMembers.syncMembers` is a **public mutation that trusts a client-supplied member array** (`convex/orgMembers.ts:23-40`; the comment there admits it and relies on the payload being display-only). Once the table carries `role`/`permissions` and authorizes mobile requests, any authenticated web member could call it directly and write themselves `admin`. So: `syncMembers` becomes an `internalMutation`; a Convex Node action `orgMemberships.syncFromWorkOS` fetches `listOrganizationMemberships` (role slug per member) and the org's roles → permissions map (`listOrganizationRoles` / environment roles) from the WorkOS REST API using a new `WORKOS_API_KEY` env var on the deployment, then writes through the internal mutation. The web login callback and the "resolve names" client hook call a public action `orgMemberships.requestSync` that takes **no data**, derives the org from the caller's identity, and schedules the Node action. `lib/sync-org-members.ts` and `app/api/organization/members/sync/route.ts` shrink to that trigger. The same Node action serves D23's refresh-time check.
+- **The WorkOS-side rows are written only by Convex itself (v0.5, D34).** Today `orgMembers.syncMembers` is a **public mutation that trusts a client-supplied member array** (`convex/orgMembers.ts:23-40`; the comment there admits it and relies on the payload being display-only). Once the table carries `role`/`permissions` and authorizes mobile requests, any authenticated web member could call it directly and write themselves `admin`. So: `syncMembers` becomes an `internalMutation`; a Convex action `orgMemberships.syncFromWorkOS` (V8 runtime — `fetch` is available there, no `'use node'` and no SDK needed) calls the WorkOS REST API for `listOrganizationMemberships` (role slug per member) and the org's roles → permissions map (`listOrganizationRoles` / environment roles) using a new `WORKOS_API_KEY` env var on the deployment, then writes through the internal mutation. The web login callback and the "resolve names" client hook call a public action `orgMemberships.requestSync` that takes **no data**, derives the org from the caller's identity, and schedules the Node action. `lib/sync-org-members.ts` and `app/api/organization/members/sync/route.ts` shrink to that trigger. The same Node action serves D23's refresh-time check.
 - **`organizations`**: drop `clerkOrgId` and index `by_clerk_org`; update `orgType` comments.
 - **`drivers`**: drop `clerkUserId`, `clerkSyncStatus`, `clerkSyncError`, `clerkSyncedAt` via strip migration.
 - **`orgHealthSnapshots.identityLinkCount`** → `membershipCount`.
@@ -299,11 +302,13 @@ iat, exp (12h), nbf
 
 1. Client holds `accessToken` (memory + SecureStore) and `refreshToken` (SecureStore).
 2. Token callback returns the cached access token unless within N minutes of `exp` or `forceRefreshToken` is set and the last refresh was more than a few seconds ago.
-3. `refresh` action looks up `deviceRefreshTokens.by_hash`, then `ctx.runQuery` session status (`status !== 'active'` → `session_revoked`). Then, by token state:
-   - `active` → rotate (step 4).
-   - `superseded` **within** `GRACE_MS` (60s) of `supersededAt` **and** its successor has never been used → the client's earlier response was lost. Mark that successor `invalidated`, rotate again from this token, return the new pair. (v0.5 fix: v0.4 said "return the successor pair again", which is impossible — raw tokens are never stored.)
-   - `superseded` outside grace, or `invalidated`, or expired → **reuse detected**: revoke the whole session (`deviceSessions.status = 'revoked'`, `revokedReason: 'token_reuse'`), audit it, return `session_revoked`. Presenting a token that should no longer exist means either a replay attack or a cloned credential; the OAuth refresh-rotation recommendation is to kill the family.
-4. Rotate: insert successor (`expiresAt = now + 90 days`, D31), mark old `superseded` with `supersededAt` and `successorId`. **Nothing on `deviceSessions` is written.**
+3. `refresh` action: generate the candidate successor (random bytes + hash) **in the action**, then call **one mutation** `rotateRefreshToken({ presentedHash, successorHash })` that reads state and decides atomically (Convex mutations are serializable; two racing refreshes serialize rather than both rotating). The mutation returns one of:
+   - `rotated` — presented token was `active`: insert successor, mark old `superseded` (`supersededAt`, `successorId`).
+   - `rotated` via grace — presented token was `superseded` or `invalidated` **within `GRACE_MS` (60s) of its family's last rotation**, and no successor in that window has been *used* (`usedAt` unset): mark every unused successor in the window `invalidated`, insert the new successor. This covers both a lost response and two headless tasks refreshing at once (iOS and Android background tasks can run in a separate JS context, so a client-side single-flight is not enough).
+   - `reuse` — presented token was superseded or invalidated **outside** the grace window, or is expired: revoke the session (`revokedReason: 'token_reuse'`), audit, return `session_revoked`. A token that should no longer exist means a replay or a cloned credential; kill the family.
+   The action signs the access token (Web Crypto) only after `rotated`. Session status is read inside the same mutation (`status !== 'active'` → `session_revoked`).
+   (v0.5 fix: v0.4 said "return the successor pair again", which is impossible — raw tokens are never stored. v0.6 fix: v0.5 read, decided, and wrote in separate steps, so two concurrent refreshes could both rotate and one would then be flagged as reuse.)
+4. New successors get `expiresAt = now + 90 days` (D31). Every presented token gets `usedAt` set. **Nothing on `deviceSessions` is written** except by a reuse revocation.
 5. Members: re-read role/permissions per D23; membership gone → revoke, `member_removed`.
 6. Response codes: `ok`, `session_revoked`, `member_removed`, `device_dormant`; client-side `server_unreachable`.
 
@@ -316,6 +321,7 @@ iat, exp (12h), nbf
 | Install id | MMKV plaintext instance | regenerated on reinstall |
 
 - **Never AsyncStorage.** Today's JWT mirror (`auth-token-store.ts` → `storage.ts`) is plaintext AsyncStorage; that file is deleted.
+- **Keep the access token under 2 KB.** `expo-secure-store` warns above 2,048 bytes on iOS and larger values are unreliable. An RS256 JWT with name, email, and a 24-slug `permissions` array is roughly 1.3–1.5 KB. The issuer asserts the size at mint time; if it ever grows (more permission slugs), `permissions` is replaced by `role` + a permissions version and the helper reads permissions from `orgMemberships` (which W11 does anyway).
 - **Not the location-queue MMKV instance**: its AES key sits in SecureStore under the default `WHEN_UNLOCKED`, so it is unreadable from a locked-phone background task. Separate concern; leave it.
 - The dispatch app's SecureStore writes carry no `keychainAccessible` option today; the shared client sets it on both apps.
 - iOS keychain survives app deletion; Android Keystore doesn't. Re-enrollment after reinstall is a first-class path.
@@ -324,6 +330,8 @@ iat, exp (12h), nbf
 
 - `resolveCaller(ctx)` in `convex/lib/mobileAuth.ts` is the **only** mobile auth entry point. It reads `sid`, `normalizeId('deviceSessions', sid)`, `ctx.db.get` (or `ctx.runQuery(internal.deviceAuth.sessionStatus)` when `'db' in ctx` is false), fails closed on `status !== 'active'`, and returns `{ kind, subject, driverId?, membershipId?, workosUserId?, orgKey, organizationId, sessionId, name, email, role?, permissions? }`.
 - The `lib/auth.ts` helpers (`requireCallerOrgId`, `requireCallerIdentity`, `assertCallerOwnsOrg`, `assertOrgPermission`, `getCallerOrgId`) check `identity.issuer`: WorkOS/staff → unchanged, no database; ours → delegate to `resolveCaller` (the runtime ctx branch keeps the `AnyCtx` signature intact for the 22 action call sites).
+- **Those helpers mean "org member", and a driver is never an org member (D36, v0.6).** Today a driver token has no org claim, so every one of the ~530 web-oriented functions behind `requireCallerOrgId` / `assertCallerOwnsOrg` rejects it. The new token carries `org_id` for drivers too; if the helpers accepted it, any driver could call `loads.list`, customer queries, or driver-PII reads scoped to their own org. So for our issuer the helpers require `kind ∋ member` and throw `NotOrgMember` for driver-only tokens; `getCallerOrgId` returns `null` for them, preserving `entityDocuments.canAccessDocument`'s deny. Driver access is only ever granted by functions that call `resolveCaller({ allow: ['driver'] })` explicitly (the 26 former `resolveAuthenticatedDriver` sites, the location ingest, the driver document path). Dual-role tokens (D24) pass the member helpers as members.
+- Org document lookups for our tokens use the `organizationId` claim (`ctx.db.get`), never `organizations.by_organization[workosOrgId]`, so carrier-only orgs resolve without a WorkOS id.
 - Triggers: admin revoke; driver deactivate/delete → revoke all (replaces `scheduleDeleteClerkUser`); member deactivate/delete in the web team routes → revoke via `ConvexHttpClient` with the caller's WorkOS token (same mechanism `lib/sync-org-members.ts` already uses); one-device policy (D28); explicit sign-out; dormancy sweep.
 
 ---
@@ -336,9 +344,9 @@ iat, exp (12h), nbf
 
 Abuse controls (v0.5): Convex exposes no client IP (`http.ts:102-109`), so per-IP limiting is impossible and the typed code is the brute-force surface. Controls, all through named limits on the existing `RateLimiter` instance, consumed via an `internalMutation` like `consumeRateLimit`:
 - **Global failed-enrollment bucket**: 60 failures/min platform-wide. When it trips, every `/enroll` returns 429 for the window and a platform alert fires (`platform/alerts`). An 8-character base32 code is 40 bits; at 60 guesses/min against a 15-minute token the success probability is ~1e-9, and the alert makes any attempt visible.
-- **Per-token/code bucket**: 5 attempts, then the token is burned (`usedAt` set, `deliveryStatus` unchanged) and the admin sees "code locked, resend".
-- **Uniform responses**: invalid, expired, used, and burned all return the same 400 body and similar latency; nothing distinguishes "no such code" from "expired code".
-- Refresh gets its own bucket keyed by `sid` (10/min) so a misbehaving client can't hammer rotation.
+- **Per-`installId` bucket**: 10 failures/min. `installId` is client-supplied, so this only throttles a naive client, but it keeps one misbehaving device from consuming the global bucket. (v0.6: the v0.5 "burn a code after 5 attempts" was meaningless — a wrong guess matches no code, so there is nothing to attribute it to.)
+- **Uniform responses**: invalid, expired, and used all return the same 400 body and similar latency; nothing distinguishes "no such code" from "expired code".
+- Refresh gets its own bucket keyed by the session id resolved from the presented token (10/min) so a misbehaving client can't hammer rotation.
 
 ### 7.2 SMS (drivers, carriers)
 
@@ -352,7 +360,7 @@ Abuse controls (v0.5): Convex exposes no client IP (`http.ts:102-109`), so per-I
 - Settings page → "Add this phone": token minted **for the current user only**, TTL 2 min, rendered as a QR encoding the https link **and** shown as a code.
 - Day one: the app's "Scan QR" button (`expo-camera` is already in the driver app; add to dispatch) reads the token directly, so the camera-app Universal Link path is not required.
 - Convex reactivity shows the device appear live with a "This wasn't me — revoke" button.
-- Claims copied from the member's live WorkOS session.
+- The mint mutation runs under the member's WorkOS identity and stores only `membershipId` on the enrollment token. At exchange time the issuer reads role/permissions from the `orgMemberships` row (fresh: `requestSync` ran at this login), so no claims are ever copied into `enrollmentTokens`.
 
 ### 7.4 Code entry
 
@@ -393,6 +401,8 @@ Abuse controls (v0.5): Convex exposes no client IP (`http.ts:102-109`), so per-I
 8. **Location holes (D22).** `driverLocations.batchInsertLocations` deleted; `/v1/mobile/locations` on bearer; `ingestBatch` takes `driverId`/`organizationId` from the caller and verifies `sessionId` ownership. `s3Upload` presign endpoints gain a caller-org / assignment check.
 9. **Phone-fallback auth lookups removed.** `drivers.by_phone` and the import/dedupe uses stay. `carrierPartnerships.ts:2350` full-table scan goes with `userIdentityLinks`.
 10. **One caller helper, enforced by lint.** ESLint `no-restricted-syntax` forbids `ctx.auth.getUserIdentity` outside `convex/lib/auth.ts` and `convex/lib/mobileAuth.ts` (18 sites in 10 files migrate), and forbids `identity.subject` outside those files (21 sites).
+11. **Driver tokens never satisfy the org-member helpers (D36).** Test: a `kind: ['driver']` token against `requireCallerOrgId`, `assertCallerOwnsOrg`, `assertOrgPermission`, and one representative web query per helper must throw. This is the single most important regression test in the change.
+12. **Carrier roles map to permissions (D37).** `isPermitted` recognizes only the lowercase `admin` slug and a `permissions` array; carrier memberships carry `OWNER | ADMIN | MEMBER`. Add `permissionsForCarrierRole(role)` in `convex/lib/permissions.ts`: OWNER/ADMIN → every capability slug (today `requireCapability` grants owner-operators everything), MEMBER → the dispatcher preset from the dispatch split plan. The issuer stamps that array into `permissions` for `source: 'local'` members so `resolveOrgForRead` and `assertOrgPermission` need no carrier special case.
 
 ---
 
@@ -401,7 +411,7 @@ Abuse controls (v0.5): Convex exposes no client IP (`http.ts:102-109`), so per-I
 ### 10.1 Settings → Mobile access (new page, D9)
 
 - Route `app/(app)/settings/mobile-access/page.tsx` (client component like its siblings; no shared settings shell exists). Nav item in `components/web/shell/nav.ts` settings section.
-- Sections: **Drivers** (gated `fleet:manage`) and **Team members** (gated `team:manage`) — D19.
+- Sections: **Drivers** (gated `fleet:manage`) and **Team members** (gated `team:manage`) — D19. The nav item carries `area: 'team'` (nav supports one area per item); the page renders whichever sections the caller's permissions allow and an empty state if neither.
 - Per row: name, devices (platform, device name, app + version, enrolled via, last seen, status), last link delivery status, opt-out flag; actions: **Send link (SMS)**, **Show code**, **Revoke device**, **Revoke all**.
 - **Add this phone** (QR + code) for the current member.
 - Reads use one-shot or narrow queries (`devices.by_orgkey_status`); `lastSeenAt` is a throttled write so subscribing here is safe.
@@ -469,7 +479,7 @@ Keep: `DispatchAuthProvider` shape with a single `TokenSource`.
 
 - Account, messaging service, **10DLC brand + campaign** — start week 1.
 - Own short link domain, never a public shortener.
-- STOP/HELP webhook → `opted_out`; status callback → `deliveryStatus`. Both routes follow the EAS-webhook HMAC pattern in `convex/http.ts:229-331`.
+- STOP/HELP webhook → `opted_out`; status callback → `deliveryStatus`. Both routes follow the EAS-webhook shape in `convex/http.ts:229-331` (raw body, constant-time compare, 200-ack), but Twilio's signature is HMAC-SHA1 over the **full request URL plus the sorted form parameters** with the account auth token, not over the body alone. Verify with the exact public URL Twilio was given.
 - Templates EN/ES; org name; first name only.
 - Rate limits per driver (3/h), per org (100/day).
 - International (D29).
@@ -492,7 +502,7 @@ Order of operations, each step green before the next:
 
 1. **Schema push (additive).** New tables; `orgMemberships`; every to-be-dropped field made optional (`userIdentityLinks.clerkUserId` included).
 2. **Backfill.** `userIdentityLinks` → `orgMemberships` (`source: 'local'`); `orgMembers` → `orgMemberships` (`source: 'workos'`). Verify counts; `platform/snapshots` `membershipCount`.
-3. **Deploy functions.** `resolveCaller`, rewritten helpers (§9), issuer + JWKS, enrollment/refresh/revoke, settings page APIs, `/v1/mobile/locations` on bearer, `auth.config.ts` with the new provider and **without** Clerk. Web deploy with the settings page and team-route hooks.
+3. **Deploy functions.** `resolveCaller`, rewritten helpers (§9), issuer + JWKS, enrollment/refresh/revoke, settings page APIs, `/v1/mobile/locations` on bearer, `auth.config.ts` with the new provider and **without** Clerk. Web deploy with the settings page and team-route hooks. From this moment until step 5, internal testers' Clerk sessions are rejected; that is the expected gap, not an incident.
 4. **Apps.** Publish JS via `eas update` (with the `.env.local` rule from the dispatch plan) for both apps; native build submitted in parallel for §11.5.
 5. **Re-enroll internal testers** (QR / code). Verify background location on a locked iPhone, revoke, offline > 12h.
 6. **Strip and empty migrations** (`019_strip_driver_clerk_fields`, `020_strip_org_clerk_org_id`, `021_empty_user_identity_links`, `022_empty_org_members`), each verified with a count, then the schema push dropping `drivers.clerk*`, `organizations.clerkOrgId` + `by_clerk_org`, `userIdentityLinks`, `orgMembers`. Convex refuses to drop a table that still has rows.
@@ -753,3 +763,22 @@ An adversarial pass over v0.4 asking, for each mechanism, "what would make this 
 ### 25.3 What would take it to 9
 
 W1 done (signing + `customJwt` round-trip + WorkOS REST from Convex), the device matrix passed on a preview build including the locked-iPhone background upload, and W11 shipped so member authorization no longer touches WorkOS at refresh.
+
+### 25.4 Second pass (v0.6)
+
+Re-read of the whole document after the v0.5 edits, looking for seams between sections edited independently. Score going in: **7/10** — the v0.5 score of 8 was too generous, because item 1 below was already present in v0.5 and is the most serious finding of any pass. Score after: **8/10**.
+
+| # | Issue in v0.5 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | D16 put `org_id` on every token, and §6.5 had the shared helpers delegate to `resolveCaller` for our issuer — with nothing saying drivers must still fail them. | Today a driver token has no org claim and is rejected by all ~530 functions behind `requireCallerOrgId` / `assertCallerOwnsOrg`. As written, an enrolled driver could have called any org-scoped web query — loads, customers, other drivers' SSN/license data — scoped to their own org. A silent, org-wide authorization regression introduced by the very change meant to tighten auth. | D36: the org-member helpers require `kind ∋ member`; `getCallerOrgId` is null for drivers; driver access only via explicit `resolveCaller({ allow: ['driver'] })`. §9.11 makes it the headline regression test. |
+| 2 | Carrier members carry `OWNER/ADMIN/MEMBER` roles; `isPermitted` recognizes only the lowercase `admin` slug and a `permissions` array. | Owner-operators using the dispatch app would have been denied every capability the moment their tokens went through `resolveOrgForRead` on the claim path. | D37: role → permission-slug map stamped at mint time for `source: 'local'` members. |
+| 3 | The v0.5 refresh flow read state, decided, and wrote in separate steps inside an action. | Two headless tasks refreshing at once (separate JS contexts on Android; the location task and the FCM task both call the headless accessor near expiry) could both rotate; the loser's next refresh would then be flagged as reuse and the driver locked out. | D38: one atomic `rotateRefreshToken` mutation; grace covers the whole family within 60s of the last rotation. |
+| 4 | "Burn a code after 5 attempts" in §7.1. | A wrong guess matches no code, so there is nothing to burn; the control was fictional. | Replaced by a per-`installId` bucket; the global bucket and alert remain the real control. |
+| 5 | Org lookups for carrier-only members. | `resolveOrgForRead` keys `organizations.by_organization` on `workosOrgId`; carrier-only orgs have none. §9.2 said "key on kind first" without saying how the org is then found. | §6.5: our tokens carry the Convex `organizationId` claim; helpers `ctx.db.get` it and never touch the WorkOS-id index. |
+| 6 | Access token in SecureStore with no size bound. | `expo-secure-store` is unreliable above 2 KB on iOS; a member token with 24 permission slugs is ~1.4 KB and would grow with the catalog. | §6.4: mint-time size assertion; fallback to `role` + version with DB-side permissions. |
+| 7 | D34 said "Node action" for the WorkOS REST calls. | Unnecessary: `fetch` works in V8 actions, and Node actions add cold starts. | D34 corrected to a V8 action, no SDK. |
+| 8 | QR flow said "claims copied from the member's live WorkOS session" without saying where they live between mint and exchange. | Storing role/permission claims on `enrollmentTokens` would create a second place authorization data lives. | §7.3: the token stores only `membershipId`; the exchange reads the membership row. |
+| 9 | Twilio webhooks were told to follow the EAS HMAC pattern. | Twilio signs URL + sorted params, not the body; copying the EAS verifier would reject every callback. | §12 corrected. |
+| 10 | Cutover step 3 removes the Clerk provider before step 4 republishes the apps. | Internal testers lose access for the gap; without saying so, someone would treat it as an incident and roll back. | §14 step 3 states the expected gap. |
+
+What still caps the score at 8 is unchanged from §25.2: nothing is built or measured, the authorization rewrite is large, and two external gates sit outside our control. Item 1 above is also the reason the `resolveCaller` diff should get a second reviewer before it merges: the plan now says the right thing, but the mistake was easy to make once and will be easy to make again in code.
