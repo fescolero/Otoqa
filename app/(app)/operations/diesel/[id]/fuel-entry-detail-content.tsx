@@ -30,7 +30,6 @@ import {
   DSCard,
   DSProps,
   DSPropsEditable,
-  type DSPropsEditableItem,
   DetailsFullPage,
   FPCommentsPeek,
   type FPKpi,
@@ -356,7 +355,6 @@ export function FuelEntryDetailContent({ id }: { id: string }) {
           check={priceCheck}
           ppg={ppg}
           gallons={gallons}
-          total={total}
           onOpenPeer={(peerId, peerType) =>
             router.push(`/operations/diesel/${peerId}${peerType === 'def' ? '?type=def' : ''}`)
           }
@@ -868,13 +866,11 @@ function PriceCheck({
   check,
   ppg,
   gallons,
-  total,
   onOpenPeer,
 }: {
   check: PriceCheckData | undefined;
   ppg: number;
   gallons: number;
-  total: number;
   onOpenPeer: (id: string, type: 'fuel' | 'def') => void;
 }) {
   if (check === undefined) {

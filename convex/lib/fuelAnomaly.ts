@@ -66,7 +66,7 @@ export interface PriceAssessment {
   flagged: boolean;
 }
 
-export function median(values: number[]): number {
+function median(values: number[]): number {
   const s = [...values].sort((a, b) => a - b);
   const mid = s.length >> 1;
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
@@ -75,7 +75,7 @@ export function median(values: number[]): number {
 const normState = (s?: string) => (s ? s.trim().toUpperCase() : undefined);
 
 /** How far above `benchmark` a price may sit before it is flagged. */
-export function priceLimit(benchmark: number, opts: typeof PRICE_ANOMALY = PRICE_ANOMALY): number {
+function priceLimit(benchmark: number, opts: typeof PRICE_ANOMALY = PRICE_ANOMALY): number {
   return Math.max(opts.floor, benchmark * opts.pct);
 }
 
