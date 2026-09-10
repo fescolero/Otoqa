@@ -1,6 +1,6 @@
 # Mobile Device Auth — Replace Clerk with device-bound credentials
 
-> Status: **v0.3 rough draft, code-audited** — captures the 2026-09-10 discussion end to end. Nothing here is built. v0.2 reworked the schema for reactivity (§23). v0.3 folds in four code audits (Convex auth consumers, mobile apps, web + platform console, schema + hot paths — §24) and the product-owner decision that **there are no active drivers, so the cutover happens in one 24-hour window** with no dual-provider period, no silent migration, and no rollout flag (§14).
+> Status: **v0.4 draft, all open questions resolved** — captures the 2026-09-10 discussion end to end. Nothing here is built. v0.2 reworked the schema for reactivity (§23). v0.3 folded in four code audits (§24) and the product-owner decision that **there are no active drivers, so the cutover happens in one 24-hour window** (§14). v0.4 converts every open question into a decision (D23–D32); §4 is now an index.
 >
 > Scope: **Otoqa Driver** and **Otoqa Dispatch** mobile apps, the web **Settings → Mobile access** page, and the platform console's mobile tooling. The web app and the staff console **stay on WorkOS**.
 > Backend: the single shared Convex deployment (topology unchanged).
@@ -120,27 +120,41 @@ What gates it externally: Twilio 10DLC registration (weeks) and a store-reviewed
 | D20 *(v0.3)* | **Signing: RS256 in the V8 runtime with Web Crypto**, following `fcmWake.ts`. No Node action, no `jose`. JWKS served as a static file. | Proven in-repo; resolves OQ-8/OQ-9. |
 | D21 *(v0.3)* | **One shared identity test fixture** (`convex/_helpers/testIdentity.ts`) and all 47 test files migrate to it in the same window. | 414 inline fixtures with `as never` casts. |
 | D22 *(v0.3)* | **Both location ingest holes close in this change**: `/v1/mobile/locations` on bearer JWT, and `driverLocations.batchInsertLocations` deleted (the HTTP route becomes the only ingest path). | They are the same bug class the security review flagged; the credential makes the fix natural. |
+| D23 *(v0.4, was OQ-1)* | **Member freshness at launch = refresh-time WorkOS check.** On every refresh of a `source: 'workos'` member, call `listOrganizationMemberships` for that user; membership gone or inactive → revoke with `member_removed`; role/permissions re-copied into the new token and into `orgMemberships`. WorkOS unreachable → reissue on last-known claims for at most 48h, then refuse. Login sync stays upsert-only. WorkOS webhooks (W11) trail and make the table authoritative; `resolveCaller` then reads role/permissions from the row instead of the claims, one flag flip. | One call per device per 12h on an endpoint already used in ~20 places; no new infrastructure on the cutover day; bounded staleness stated. |
+| D24 *(v0.4, was OQ-2)* | **One credential per person + org.** `sub` is the member identity; the token carries explicit `driverId` and `membershipId` claims, and `kind` lists both roles. Enrollment resolves the person by phone/email match across `drivers` and `orgMemberships` within the org and links both. | Keeps audit attribution on the member id (display names resolve by WorkOS user id), while driver-gated code checks `driverId`. Owner mode is leaving the driver app anyway. |
+| D25 *(v0.4, was OQ-3)* | **A driver on two carriers is two principals.** `drivers.organizationId` is a single string: each carrier already has its own driver row, so each row is its own `sub` and enrolls its own device credential. No org picker. | Matches the data model that exists; nothing to build. |
+| D26 *(v0.4, was OQ-4)* | **Link senders**: any web user with `fleet:manage` for drivers and `team:manage` for members (D19); platform support with a required reason and `logPlatformAudit`. Dispatch-app users cannot send links. | Mirrors who can already edit those records. |
+| D27 *(v0.4, was OQ-5)* | **Self-service enrollment is built and shipped off.** Org setting in `featureFlags` (`mobile_self_enroll`, default `false`). When on: the driver types a phone number; the server always answers "if this number is on file, you'll get a text" (no enumeration), sends only when it matches an active, non-deleted driver in an org with the flag on, 3 per phone per hour. | Removes the admin support desk at fleet scale; no exposure for orgs that don't opt in. |
+| D28 *(v0.4, was OQ-6)* | **One active device per principal.** A new enrollment revokes the previous session with `device_replaced` and notifies the admin (settings page + audit). Org setting `mobile_max_devices` (default 1) raises it. | Shared phones are not a use case; one device is the safest default and the simplest UI. |
+| D29 *(v0.4, was OQ-7)* | **Phones stored as E.164; Twilio US-only at launch.** `normalizePhoneToE164` moves out of `clerkSync.ts` into `_helpers/phone.ts`; a one-off query on cutover day reports any non-`+1` numbers; Mexico/Canada senders are added when one appears. | The normalizer already assumes US; don't register foreign senders for zero drivers. |
+| D30 *(v0.4, was OQ-10)* | **TTLs: SMS token 15 min, QR token 2 min, typed code same as its token.** A resend invalidates the outstanding token. | Codes are shoulder-surfable; SMS delivery can lag. |
+| D31 *(v0.4, was OQ-11)* | **Dormant after 90 days without a refresh.** Marked by the daily sweep; a later refresh is rejected and the device re-enrolls. | Long enough for seasonal drivers, short enough that a forgotten phone doesn't hold a live credential for a year. |
+| D32 *(v0.4, was OQ-14)* | **Historical Clerk subjects stay as they are.** Fix `payProfiles.resolveActorName` so a non-`user_` id renders "Unknown user", not "System". | No real users; rewriting audit history is worse than a few unresolvable names. |
 
 ---
 
-## 4. Open questions
+## 4. Open questions — all resolved (v0.4)
 
-| # | Question | Options / notes |
+Every question is now a decision in §3. Kept here as the index of what was asked and where it landed.
+
+| # | Question | Resolution |
 |---|---|---|
-| OQ-1 | **Membership freshness for members.** | Login-time sync writes `orgMemberships` (source `workos`) with the caller's live claims. (a) WorkOS webhooks make it authoritative (follow-on, W11): membership created/updated/deleted/deactivated, role changes; signature verification per the Stripe pattern in `convex/http.ts:182-218`. (b) Until then, at refresh call `workos.userManagement.listOrganizationMemberships` for that user; if WorkOS is unreachable, reissue on last-known claims for ≤48h. **Recommendation: (b) at launch, (a) trailing.** The current best-effort login sync must **never delete** rows (a truncated sync would revoke real members). |
-| OQ-2 | **One person, two roles** (owner who also drives). | One credential per person + org; `kind` carries a set. Owner mode leaves the driver app per the dispatch split plan, which simplifies this. |
-| OQ-3 | **Drivers on more than one carrier.** | Per driver-and-org pair. Count them first. |
-| OQ-4 | **Who may send SMS links.** | `fleet:manage` holders (D19), plus platform support (audited, reason required). |
-| OQ-5 | **Self-service fallback for drivers** (type phone → link only if it matches an active driver). | Yes, rate-limited, off by default per org. |
-| OQ-6 | **Devices per principal.** | One by default; new enrollment revokes the previous unless the admin allows multiple. |
-| OQ-7 | **Cross-border numbers.** | Check `drivers.phone`; `normalizePhoneToE164` assumes US. |
-| ~~OQ-8~~ | ~~Signing runtime.~~ **Resolved: V8 + Web Crypto, RS256** (D20). | |
-| ~~OQ-9~~ | ~~JWKS hosting.~~ **Resolved: static file on Vercel** (D20). | |
-| OQ-10 | **Enrollment token TTLs.** | SMS 15 min, QR 2 min. |
-| OQ-11 | **Dormancy window.** | 90 days. |
-| OQ-12 | **Org identifier in the token for carrier-only orgs.** | **Resolved by audit:** `clerkOrgId` is never written; `org._id` is already the carrier external id. `org_id` = `workosOrgId` where present, else `organizations._id`. `organizations.by_clerk_org` index is dropped (used by `lib/orgLookup.ts:21-25` and ~35 sites in `carrierPartnerships.ts`, all of which are edited). |
-| ~~OQ-13~~ | ~~Location ingest on the shared static key.~~ **Resolved: in scope** (D22, W13). | |
-| OQ-14 *(v0.3)* | **Historical rows carrying Clerk subjects** (`auditLog.performedBy`, `loadStops.detourRequestedBy`, `dispatchPushTokens.userKey`, `featureFlags.updatedBy`, `comments.authorId`, `userPreferences.userId`, `supportTickets.reporterSubject`). | With no real users, **leave them**; they resolve to "Unknown user". Fix `payProfiles.resolveActorName:761`'s `startsWith('user_')` heuristic so a `drivers._id` doesn't render as "System". |
+| OQ-1 | Membership freshness for members | **D23** — refresh-time WorkOS check with 48h grace at launch; webhooks (W11) make `orgMemberships` authoritative afterwards. |
+| OQ-2 | One person, two roles | **D24** — one credential per person + org; `sub` = member identity; explicit `driverId` + `membershipId` claims. |
+| OQ-3 | Drivers on more than one carrier | **D25** — each carrier's driver row is its own principal (verified: `drivers.organizationId` is single-valued). |
+| OQ-4 | Who may send SMS links | **D26** — `fleet:manage` / `team:manage` on the web; platform support with reason. |
+| OQ-5 | Self-service enrollment | **D27** — built, off by default per org, non-enumerating, 3/phone/hour. |
+| OQ-6 | Devices per principal | **D28** — one; new enrollment replaces the old; `mobile_max_devices` org setting. |
+| OQ-7 | Cross-border numbers | **D29** — E.164 storage, US-only Twilio sender at launch, cutover-day check for non-`+1`. |
+| OQ-8 | Signing runtime | **D20** — V8 + Web Crypto, RS256. |
+| OQ-9 | JWKS hosting | **D20** — static file. |
+| OQ-10 | Token TTLs | **D30** — SMS 15 min, QR 2 min. |
+| OQ-11 | Dormancy window | **D31** — 90 days. |
+| OQ-12 | Carrier-only org identifier | **Audit** — `clerkOrgId` is never written; `org_id` = `workosOrgId` else `organizations._id`; `by_clerk_org` dropped (`lib/orgLookup.ts:21-25`, ~35 `carrierPartnerships.ts` sites). |
+| OQ-13 | Location ingest static key | **D22** — in scope. |
+| OQ-14 | Historical Clerk subjects | **D32** — leave; fix `resolveActorName`. |
+
+Anything new goes in a fresh row here and a fresh D-number in §3.
 
 ---
 
@@ -153,7 +167,7 @@ What gates it externally: Twilio 10DLC registration (weeks) and a store-reviewed
 | `driver` | Company drivers, carrier drivers | SMS (code on day one) | `drivers._id` |
 | `member` | In-house dispatchers, org admins, carrier owners/admins | QR (self-enroll from web session); SMS for carrier owners without web access | WorkOS user id (WorkOS-backed orgs) or `orgMemberships._id` (carrier-only orgs) |
 
-No "principals" table. Never the phone number, never the Clerk user id.
+No "principals" table. Never the phone number, never the Clerk user id. A person who is both (D24) is a **member** principal whose token also carries `driverId`; a person driving for two carriers (D25) is two driver principals with two credentials.
 
 ### 5.2 Design rules for the new tables
 
@@ -281,7 +295,7 @@ iat, exp (12h), nbf
 2. Token callback returns the cached access token unless within N minutes of `exp` or `forceRefreshToken` is set and the last refresh was more than a few seconds ago.
 3. `refresh` action: `deviceRefreshTokens.by_hash`. `active` → proceed; `superseded` within `GRACE_MS` → return the successor pair again; else `session_unknown`. Then `ctx.runQuery` session status; `status !== 'active'` → `session_revoked`.
 4. Rotate: insert successor, mark old `superseded`. **Nothing on `deviceSessions` is written.**
-5. Members: re-read role/permissions per OQ-1; membership gone → revoke, `member_removed`.
+5. Members: re-read role/permissions per D23; membership gone → revoke, `member_removed`.
 6. Response codes: `ok`, `session_revoked`, `member_removed`, `device_dormant`; client-side `server_unreachable`.
 
 ### 6.4 Storage on device (audit-corrected)
@@ -301,7 +315,7 @@ iat, exp (12h), nbf
 
 - `resolveCaller(ctx)` in `convex/lib/mobileAuth.ts` is the **only** mobile auth entry point. It reads `sid`, `normalizeId('deviceSessions', sid)`, `ctx.db.get` (or `ctx.runQuery(internal.deviceAuth.sessionStatus)` when `'db' in ctx` is false), fails closed on `status !== 'active'`, and returns `{ kind, subject, driverId?, membershipId?, workosUserId?, orgKey, organizationId, sessionId, name, email, role?, permissions? }`.
 - The `lib/auth.ts` helpers (`requireCallerOrgId`, `requireCallerIdentity`, `assertCallerOwnsOrg`, `assertOrgPermission`, `getCallerOrgId`) check `identity.issuer`: WorkOS/staff → unchanged, no database; ours → delegate to `resolveCaller` (the runtime ctx branch keeps the `AnyCtx` signature intact for the 22 action call sites).
-- Triggers: admin revoke; driver deactivate/delete → revoke all (replaces `scheduleDeleteClerkUser`); member deactivate/delete in the web team routes → revoke via `ConvexHttpClient` with the caller's WorkOS token (same mechanism `lib/sync-org-members.ts` already uses); one-device policy (OQ-6); explicit sign-out; dormancy sweep.
+- Triggers: admin revoke; driver deactivate/delete → revoke all (replaces `scheduleDeleteClerkUser`); member deactivate/delete in the web team routes → revoke via `ConvexHttpClient` with the caller's WorkOS token (same mechanism `lib/sync-org-members.ts` already uses); one-device policy (D28); explicit sign-out; dormancy sweep.
 
 ---
 
@@ -316,7 +330,7 @@ iat, exp (12h), nbf
 - Twilio. Body: `<Org>: your Otoqa Driver code is <CODE>. Open the app and enter it, or tap <https://<short-domain>/e/<token>>`.
 - **Day one**: the code is the working path (no Universal Links until the store build lands, §13). The https link works once associated domains ship; until then the landing page shows the code and a store badge.
 - TTL 15 min. One outstanding token per driver. Delivery status via Twilio status callback → `deliveryStatus`. STOP/HELP → `opted_out`, shown on the settings page.
-- Prerequisites with lead time: 10DLC brand + campaign; own short domain; templates (EN/ES); international (OQ-7).
+- Prerequisites with lead time: 10DLC brand + campaign; own short domain; templates (EN/ES); international (D29).
 
 ### 7.3 QR (members)
 
@@ -342,12 +356,12 @@ iat, exp (12h), nbf
 | Normal use | cached access token; refresh ~every 12h while alive; background tasks read SecureStore directly |
 | Offline for days | expired access token must **not** block local features; refresh on reconnect; only a rejected refresh changes auth state |
 | Reinstall on iOS | keychain still holds the refresh token → silent resume |
-| Reinstall on Android / new device | "Contact your admin" screen with admin name + one-tap request (push/email to dispatcher) + code entry; self-service if OQ-5 on |
-| Device transfer | not automatic; new device enrolls, old revoked per OQ-6 |
+| Reinstall on Android / new device | "Contact your admin" screen with admin name + one-tap request (push/email to dispatcher) + code entry; self-service if D27 on |
+| Device transfer | not automatic; new device enrolls, old revoked per D28 |
 | Admin revoke / driver deactivated | next request `SessionRevoked` → app clears local state → "Access removed" |
-| Member removed on the web | team route revokes directly (§6.5); refresh catches anything missed (OQ-1) |
+| Member removed on the web | team route revokes directly (§6.5); refresh catches anything missed (D23) |
 | Sign out | confirmation → `performSignOut` sequence (push token, ping queue, motion service, yard fences) → server revoke. Dispatch gets the same `logout.ts` (it has none today) |
-| Dormant | no refresh for N days → `dormant`; later refresh rejected → re-enroll |
+| Dormant | no refresh for 90 days (D31) → `dormant`; later refresh rejected → re-enroll |
 | Cleanup cron | daily; template `driverSessions.sweepStaleSessionsForAutoTimeout` (`.take(batch)` + self-reschedule) and `entityDocuments:sweepPending` (created-but-never-finalized). Deletes used/expired `enrollmentTokens`, `superseded` refresh tokens past grace, marks dormant devices. Housekeeping only. |
 
 ---
@@ -384,14 +398,14 @@ iat, exp (12h), nbf
 
 ### 10.3 Team page and routes
 
-- `app/api/team/members/[membershipId]/route.ts:69-73,95` (deactivate/reactivate/delete) call `deviceAuth.revokeForMember` through `ConvexHttpClient` with the caller's WorkOS token. Failure of that call is logged, not fatal to the WorkOS action, and the refresh path (OQ-1) is the backstop.
+- `app/api/team/members/[membershipId]/route.ts:69-73,95` (deactivate/reactivate/delete) call `deviceAuth.revokeForMember` through `ConvexHttpClient` with the caller's WorkOS token. Failure of that call is logged, not fatal to the WorkOS action, and the refresh path (D23) is the backstop.
 - Kebab menu gains "Manage devices" → Mobile access page.
 
 ### 10.4 Platform console (`apps/admin`)
 
 - `OrgSupportPanels.tsx` `DriversPanel` + `IdentityLinksPanel` → `DevicesPanel`: list devices per org/driver/member, send link on behalf (audited, reason required), revoke, delivery status. `convex/platform/support.ts` §Identity links + §Clerk resync replaced; `recordActionAudit` union extended. `platform/orgs.getOrgDetail` returns memberships + devices instead of `identityLinks`/`clerkOrgId`.
 
-### 10.5 WorkOS webhooks (OQ-1a, trailing)
+### 10.5 WorkOS webhooks (D23 follow-on, trailing)
 
 - Route in `convex/http.ts` per the Stripe pattern (raw body first, 501 when the secret is missing, 200-ack unknown events). Backfill from `listOrganizationMemberships`. Drift cron.
 
@@ -443,7 +457,7 @@ Keep: `DispatchAuthProvider` shape with a single `TokenSource`.
 - STOP/HELP webhook → `opted_out`; status callback → `deliveryStatus`. Both routes follow the EAS-webhook HMAC pattern in `convex/http.ts:229-331`.
 - Templates EN/ES; org name; first name only.
 - Rate limits per driver (3/h), per org (100/day).
-- International (OQ-7).
+- International (D29).
 
 ---
 
@@ -457,7 +471,7 @@ Keep: `DispatchAuthProvider` shape with a single `TokenSource`.
 
 ## 14. Cutover (24-hour window, no active drivers)
 
-Preconditions: audits done (§24), OQ-1..7, 10, 11 answered, `orgMemberships` backfill script tested against a prod snapshot, all 47 test files on the shared fixture (D21), device matrix passed on preview builds.
+Preconditions: audits done (§24), all open questions resolved (§4, D23–D32), `orgMemberships` backfill script tested against a prod snapshot, all 47 test files on the shared fixture (D21), device matrix passed on preview builds, the cutover-day non-`+1` phone check (D29) run.
 
 Order of operations, each step green before the next:
 
@@ -591,7 +605,7 @@ Roughly **4 engineer-weeks** for W1–W10 + W12–W13 (up from 3; the authorizat
 - **10DLC approval slips.** Mitigation: codes and QR work without SMS; email link interim for drivers with email.
 - **Universal Link flakiness.** Mitigation: code entry always works.
 - **Refresh rotation lockout.** Mitigation: grace window + tests; admin "send new code" backstop.
-- **Permission freshness for members** until W11. Mitigation: refresh-time WorkOS check with bounded grace.
+- **Permission freshness for members** until W11. Mitigation: refresh-time WorkOS check with bounded grace (D23).
 - **Convex Auth beta surprises.** Mitigation: time-boxed spike; hand-rolled path fully specified.
 
 ---
