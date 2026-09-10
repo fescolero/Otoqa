@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { assessOne, assessPrices, diagnosePrice, isTotalMismatch, PRICE_ANOMALY, type AnomalyInput } from './fuelAnomaly';
+import { assessOne, assessPrices, diagnosePrice, PRICE_ANOMALY, type AnomalyInput } from './fuelAnomaly';
 
 const DAY = 86_400_000;
 const T0 = 1_700_000_000_000;
@@ -16,7 +16,6 @@ function fill(
     entryDate: T0 + day * DAY,
     pricePerGallon: ppg,
     gallons: 100,
-    totalCost: ppg * 100,
     ...extra,
   };
 }
@@ -113,15 +112,6 @@ describe('assessPrices', () => {
   });
 });
 
-describe('isTotalMismatch', () => {
-  it('accepts rounding noise and rejects real disagreement', () => {
-    expect(isTotalMismatch({ pricePerGallon: 4.129, gallons: 100.3, totalCost: 414.14 })).toBe(false);
-    expect(isTotalMismatch({ pricePerGallon: 4.129, gallons: 100.3, totalCost: 419.14 })).toBe(true);
-    // Large totals get a proportional tolerance.
-    expect(isTotalMismatch({ pricePerGallon: 4, gallons: 5000, totalCost: 20_060 })).toBe(false);
-  });
-});
-
 describe('assessOne', () => {
   it('judges one fill against the pool and lists its peers nearest first', () => {
     const me = fill('me', 5, 6.5, { state: 'CA' });
@@ -163,29 +153,18 @@ describe('assessOne', () => {
 describe('diagnosePrice', () => {
   const B = 4.2;
   it('spots swapped price and gallons', () => {
-    // 4.199 gal at $97.60/gal — the fields are the wrong way round, total still adds up.
-    const causes = diagnosePrice({ pricePerGallon: 97.6, gallons: 4.199, totalCost: 409.83 }, B);
-    expect(causes[0]).toBe('swapped');
-  });
-  it('spots the receipt total typed into the price field', () => {
-    const causes = diagnosePrice({ pricePerGallon: 409.83, gallons: 97.6, totalCost: 409.83 }, B);
-    expect(causes).toContain('total_as_price');
-    expect(causes).toContain('mismatch');
+    // 4.199 gal at $97.60/gal — the fields are the wrong way round.
+    expect(diagnosePrice({ pricePerGallon: 97.6, gallons: 4.199 }, B)).toEqual(['swapped']);
   });
   it('spots a slipped decimal point', () => {
-    expect(diagnosePrice({ pricePerGallon: 41.99, gallons: 100, totalCost: 4199 }, B)).toContain('decimal');
-    expect(diagnosePrice({ pricePerGallon: 419.9, gallons: 100, totalCost: 41_990 }, B)).toContain('decimal');
+    expect(diagnosePrice({ pricePerGallon: 41.99, gallons: 100 }, B)).toContain('decimal');
+    expect(diagnosePrice({ pricePerGallon: 419.9, gallons: 100 }, B)).toContain('decimal');
   });
   it('spots a fill priced like the other product', () => {
-    const causes = diagnosePrice({ pricePerGallon: 2.95, gallons: 10, totalCost: 29.5 }, B, 2.9);
-    expect(causes).toEqual(['product']);
+    expect(diagnosePrice({ pricePerGallon: 2.95, gallons: 10 }, B, 2.9)).toEqual(['product']);
   });
-  it('reports a plain mismatch on its own, and none when nothing fits', () => {
-    expect(diagnosePrice({ pricePerGallon: 4.3, gallons: 100, totalCost: 500 }, B)).toEqual(['mismatch']);
-    expect(diagnosePrice({ pricePerGallon: 7.69, gallons: 32, totalCost: 246.08 }, B)).toEqual(['none']);
-  });
-  it('still checks the total when there is no benchmark', () => {
-    expect(diagnosePrice({ pricePerGallon: 4.3, gallons: 100, totalCost: 500 }, null)).toEqual(['mismatch']);
-    expect(diagnosePrice({ pricePerGallon: 4.3, gallons: 100, totalCost: 430 }, null)).toEqual(['none']);
+  it('reports none when nothing fits, with or without a benchmark', () => {
+    expect(diagnosePrice({ pricePerGallon: 7.69, gallons: 32 }, B)).toEqual(['none']);
+    expect(diagnosePrice({ pricePerGallon: 7.69, gallons: 32 }, null)).toEqual(['none']);
   });
 });

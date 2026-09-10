@@ -9,7 +9,6 @@ import {
   assessOne,
   assessPrices,
   diagnosePrice,
-  isTotalMismatch,
   PRICE_ANOMALY,
   type AnomalyInput,
   type PriceAssessment,
@@ -668,8 +667,8 @@ type ReportFilters = {
   exceptions?: string[];
 };
 
-/** The five exception rules the reports page can count and filter by. */
-export const EXCEPTION_IDS = ['receipt', 'offcard', 'price', 'unlink', 'mismatch'] as const;
+/** The four exception rules the reports page can count and filter by. */
+export const EXCEPTION_IDS = ['receipt', 'offcard', 'price', 'unlink'] as const;
 export type ExceptionId = (typeof EXCEPTION_IDS)[number];
 /** Exception-filter value that selects reviewed rows (which trip no rule). */
 export const REVIEWED_FILTER = 'reviewed';
@@ -688,7 +687,6 @@ function exceptionsFor(row: RangeRow, price: PriceAssessment | undefined): Excep
   if (entry.paymentMethod && entry.paymentMethod !== 'FUEL_CARD') out.push('offcard');
   if (price?.flagged) out.push('price');
   if (!entry.loadId) out.push('unlink');
-  if (isTotalMismatch(entry)) out.push('mismatch');
   return out;
 }
 
@@ -796,7 +794,6 @@ async function loadAssessedRange(
       entryDate: entry.entryDate,
       pricePerGallon: entry.pricePerGallon,
       gallons: entry.gallons,
-      totalCost: entry.totalCost,
       state: entry.location?.state,
     })),
   );
@@ -932,7 +929,7 @@ export const reportSummary = query({
     // adding.
     // Reviewed rows trip no rule; they are counted apart so the card can
     // say how many flags a person has already cleared.
-    const exceptions = { receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0, reviewed: 0 };
+    const exceptions = { receipt: 0, offcard: 0, price: 0, unlink: 0, total: 0, reviewed: 0 };
     const priceTiers: Record<PriceTier, number> = { state: 0, fleet: 0, thin: 0, none: 0 };
     for (const row of rows) {
       if (row.entry.review) { exceptions.reviewed++; continue; }
@@ -940,8 +937,7 @@ export const reportSummary = query({
       for (const id of exceptionsFor(row, a)) exceptions[id]++;
       if (a?.flagged) priceTiers[a.tier]++;
     }
-    exceptions.total =
-      exceptions.receipt + exceptions.offcard + exceptions.price + exceptions.unlink + exceptions.mismatch;
+    exceptions.total = exceptions.receipt + exceptions.offcard + exceptions.price + exceptions.unlink;
 
     const vendorDocs = await Promise.all(
       [...byVendor.keys()].map((id) => ctx.db.get(id as Id<'fuelVendors'>)),
@@ -1204,7 +1200,6 @@ function toAnomalyInput(row: RangeRow): AnomalyInput {
     entryDate: entry.entryDate,
     pricePerGallon: entry.pricePerGallon,
     gallons: entry.gallons,
-    totalCost: entry.totalCost,
     state: entry.location?.state,
   };
 }
@@ -1261,10 +1256,7 @@ export const entryPriceCheck = query({
     const other = assessOne({ ...me, product: otherProduct }, inputs).assessment;
     const otherBenchmark = other.tier === 'state' || other.tier === 'fleet' ? other.benchmark : null;
 
-    const mismatch = isTotalMismatch(entry);
-    const causes = assessment.flagged || mismatch
-      ? diagnosePrice(me, assessment.benchmark, otherBenchmark)
-      : [];
+    const causes = assessment.flagged ? diagnosePrice(me, assessment.benchmark, otherBenchmark) : [];
 
     const shown = peers.slice(0, PEER_LIST_ROWS);
     const byId = new Map(pool.map((r) => [r.entry._id as string, r]));
@@ -1297,8 +1289,7 @@ export const entryPriceCheck = query({
       }),
       /** The other product's benchmark, when it had a windowed tier behind it. */
       otherBenchmark,
-      mismatch,
-      /** Ordered most likely first; empty when nothing is out of line. */
+      /** Ordered most likely first; empty when the price is not flagged. */
       causes,
       /** Extra dollars on this fill versus the benchmark (0 when not flagged). */
       impact: assessment.flagged && assessment.benchmark !== null ? assessment.delta * entry.gallons : 0,

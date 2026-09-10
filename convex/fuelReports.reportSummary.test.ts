@@ -325,28 +325,6 @@ describe('reportSummary', () => {
     expect(res.rows[0].exceptions).toContain('price');
   });
 
-  it('flags a total that disagrees with price × gallons as a mismatch, not a price anomaly', async () => {
-    const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
-    const vendorId = await t.run(async (ctx) => seedVendor(ctx, 'Pilot'));
-    await t.run(async (ctx) => {
-      for (let d = 0; d < 3; d++) {
-        await insertFuel(ctx, { vendorId, entryDate: T0 + d * DAY, gallons: 100, ppg: 4 });
-      }
-      const now = Date.now();
-      await ctx.db.insert('fuelEntries', {
-        organizationId: ORG, entryDate: T0 + 1 * DAY, vendorId,
-        gallons: 100, pricePerGallon: 4, totalCost: 450, // should be 400
-        createdAt: now, updatedAt: now, createdBy: USER,
-      });
-    });
-    const res = await t.query(api.fuelReports.reportSummary, {
-      organizationId: ORG, dateRangeStart: T0, dateRangeEnd: T0 + 7 * DAY, bucketStarts: [T0],
-    });
-    expect(res.exceptions.mismatch).toBe(1);
-    expect(res.exceptions.price).toBe(0);
-    expect(res.exceptions.total).toBe(4 + 4 + 1); // receipt + unlink on all four, plus the mismatch
-  });
-
   it('stops counting a reviewed row as an exception, and finds it again under the reviewed filter', async () => {
     const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
     const vendorId = await t.run(async (ctx) => seedVendor(ctx, 'Pilot'));
@@ -360,7 +338,7 @@ describe('reportSummary', () => {
 
     const all = await t.query(api.fuelReports.reportSummary, args);
     expect(all.totals.entries).toBe(2);
-    expect(all.exceptions).toEqual({ receipt: 1, offcard: 1, price: 0, unlink: 1, mismatch: 0, total: 3, reviewed: 1 });
+    expect(all.exceptions).toEqual({ receipt: 1, offcard: 1, price: 0, unlink: 1, total: 3, reviewed: 1 });
 
     const offcard = await t.query(api.fuelReports.reportSummary, { ...args, exceptions: ['offcard'] });
     expect(offcard.totals.entries).toBe(1);

@@ -43,9 +43,6 @@ export const PRICE_ANOMALY = {
   floor: 0.25,
 } as const;
 
-/** price × gallons should equal the recorded total, within a few cents. */
-export const TOTAL_MISMATCH = { abs: 0.05, pct: 0.005 } as const;
-
 export type PriceTier = 'state' | 'fleet' | 'thin' | 'none';
 
 export interface AnomalyInput {
@@ -54,7 +51,6 @@ export interface AnomalyInput {
   entryDate: number;
   pricePerGallon: number;
   gallons: number;
-  totalCost: number;
   state?: string;
 }
 
@@ -68,12 +64,6 @@ export interface PriceAssessment {
   tier: PriceTier;
   peers: number;
   flagged: boolean;
-}
-
-export function isTotalMismatch(e: Pick<AnomalyInput, 'pricePerGallon' | 'gallons' | 'totalCost'>): boolean {
-  const expected = e.pricePerGallon * e.gallons;
-  const tolerance = Math.max(TOTAL_MISMATCH.abs, Math.abs(e.totalCost) * TOTAL_MISMATCH.pct);
-  return Math.abs(expected - e.totalCost) > tolerance;
 }
 
 export function median(values: number[]): number {
@@ -192,11 +182,12 @@ export function assessOne(
 // errors, and the fix differs for each. These checks are cheap pattern
 // tests against the benchmark; each fires only when the corrected value
 // would land inside the tolerance the fill itself failed.
+//
+// Only price and gallons are ever entered by a person — every write path
+// derives the total from them — so there is no total to cross-check.
 
 export type PriceCause =
-  | 'mismatch'      // price × gallons ≠ total
   | 'swapped'       // price and gallons typed in each other's fields
-  | 'total_as_price' // the receipt total typed into the price field
   | 'decimal'       // decimal point slipped (×10 or ×100)
   | 'product'       // priced like the OTHER product (DEF vs diesel)
   | 'none';         // nothing obvious; the price itself is high
@@ -211,32 +202,22 @@ const fits = (price: number, benchmark: number, opts: typeof PRICE_ANOMALY) =>
  * first; `none` only when nothing matched.
  */
 export function diagnosePrice(
-  me: Pick<AnomalyInput, 'pricePerGallon' | 'gallons' | 'totalCost'>,
+  me: Pick<AnomalyInput, 'pricePerGallon' | 'gallons'>,
   benchmark: number | null,
   otherBenchmark: number | null = null,
   opts: typeof PRICE_ANOMALY = PRICE_ANOMALY,
 ): PriceCause[] {
   const out: PriceCause[] = [];
-  const { pricePerGallon: price, gallons, totalCost: total } = me;
+  const { pricePerGallon: price, gallons } = me;
   const near = (x: number) => benchmark !== null && fits(x, benchmark, opts);
 
-  // Swapped: the gallons figure reads as a plausible price and the
-  // price figure as a plausible fill size, and the product still
-  // matches the recorded total.
-  if (
-    gallons > 0 && near(gallons) &&
-    Math.abs(price * gallons - total) <= Math.max(TOTAL_MISMATCH.abs, total * TOTAL_MISMATCH.pct)
-  ) {
-    out.push('swapped');
-  }
-  // Total typed into the price field.
-  if (total > 0 && Math.abs(price - total) <= Math.max(0.01, total * 0.01)) out.push('total_as_price');
+  // Swapped: the gallons figure reads as a plausible price while the
+  // price figure does not.
+  if (gallons > 0 && near(gallons) && !near(price)) out.push('swapped');
   // Decimal slipped: $41.99 or $419.9 for $4.199.
   if (near(price / 10) || near(price / 100)) out.push('decimal');
   // Looks like the other product's going rate.
   if (otherBenchmark !== null && fits(price, otherBenchmark, opts)) out.push('product');
-  // Internal inconsistency — reported last because the others explain it.
-  if (isTotalMismatch(me)) out.push('mismatch');
 
   return out.length ? out : ['none'];
 }
