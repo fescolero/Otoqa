@@ -1857,11 +1857,12 @@ function FuelPurchasesTable({
     }
   };
 
-  const grid = '92px 1.5fr 122px 1.4fr 84px 80px 86px 96px 1fr';
+  const grid = '76px 1.3fr 1fr 122px 1.4fr 84px 80px 86px 96px 1fr';
   const cols: Array<{ key: PurchaseSortKey; label: string; right?: boolean }> = [
-    { key: 'date',    label: 'Date' },
-    { key: 'vendor',  label: 'Vendor · location' },
-    { key: 'type',    label: 'Type' },
+    { key: 'date',     label: 'Date' },
+    { key: 'vendor',   label: 'Vendor' },
+    { key: 'location', label: 'Location' },
+    { key: 'type',     label: 'Type' },
     { key: 'driver',  label: 'Driver · truck' },
     { key: 'gallons', label: 'Gallons', right: true },
     { key: 'ppg',     label: '$/gal',   right: true },
@@ -1942,8 +1943,9 @@ function FuelPurchasesTable({
       ) : (
         rows.map((r) => {
           const d = new Date(r.entryDate);
+          // Entries carry a day, not a time (the form and importers write
+          // midnight), so the cell shows the date alone.
           const dateLabel = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-          const timeLabel = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
           const locLabel = r.location ? `${r.location.city}, ${r.location.state}` : '';
           const typeLabel = fuelProductLabel(r.fuelType);
           const truckLoad = [r.truckUnitId, r.loadReference ?? (r.loadId ? String(r.loadId).slice(-6) : null)]
@@ -1970,7 +1972,6 @@ function FuelPurchasesTable({
             >
               <div className="px-3.5 py-2">
                 <div className="num text-[12px] font-medium">{dateLabel}</div>
-                <div className="num text-[10.5px] text-[var(--text-tertiary)] mt-0.5">{timeLabel}</div>
               </div>
               <div className="px-3.5 py-2 flex items-center gap-2 min-w-0">
                 <span
@@ -1985,12 +1986,14 @@ function FuelPurchasesTable({
                 >
                   <WIcon name="droplet" size={11} />
                 </span>
-                <div className="min-w-0">
-                  <div className="text-[12.5px] font-medium truncate">{r.vendorName}</div>
-                  <div className="text-[11px] text-[var(--text-tertiary)] truncate mt-0.5">
-                    {locLabel || '—'}
-                  </div>
-                </div>
+                <div className="text-[12.5px] font-medium truncate min-w-0">{r.vendorName}</div>
+              </div>
+              <div className="px-3.5 py-2 min-w-0">
+                {locLabel ? (
+                  <div className="text-[12px] truncate">{locLabel}</div>
+                ) : (
+                  <span className="text-[var(--text-tertiary)]">—</span>
+                )}
               </div>
               <div className="px-3.5 py-2 flex items-center gap-1.5 min-w-0">
                 <span
@@ -2114,6 +2117,7 @@ function FuelPurchasesTable({
           }}
         >
           <div className="px-3.5 py-2 text-[12px] font-bold">Range total</div>
+          <div />
           <div />
           <div />
           <div className="px-3.5 py-2 text-right text-[11px] text-[var(--text-tertiary)]">

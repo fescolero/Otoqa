@@ -1097,6 +1097,8 @@ export const reportEntries = query({
 export const purchaseSortKeyValidator = v.union(
   v.literal('date'),
   v.literal('vendor'),
+  /** State, then city; rows with no location sort first ascending. */
+  v.literal('location'),
   v.literal('type'),
   v.literal('driver'),
   v.literal('gallons'),
@@ -1151,10 +1153,13 @@ export const reportPurchases = query({
 
     const dir = args.sortDir === 'asc' ? 1 : -1;
     const delta = (r: RangeRow) => range.assess.get(r.entry._id as string)?.delta ?? 0;
+    const locKey = (r: RangeRow) =>
+      r.entry.location ? `${r.entry.location.state.trim().toUpperCase()} ${r.entry.location.city.trim()}` : '';
     const cmp = (a: RangeRow, b: RangeRow): number => {
       switch (args.sortKey) {
         case 'date':    return a.entry.entryDate - b.entry.entryDate;
         case 'vendor':  return (vendorName.get(a.entry.vendorId) ?? '').localeCompare(vendorName.get(b.entry.vendorId) ?? '');
+        case 'location': return locKey(a).localeCompare(locKey(b));
         // Canonical product order (Diesel, DEF, …) rather than
         // alphabetical, so the grouping matches the rest of the page.
         case 'type':    return FUEL_PRODUCT_ORDER.indexOf(a.product) - FUEL_PRODUCT_ORDER.indexOf(b.product);

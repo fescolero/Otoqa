@@ -179,3 +179,22 @@ describe('reportPurchases delta sort', () => {
     expect(page.page.slice(1).every((r) => r.priceDelta <= 0)).toBe(true);
   });
 });
+
+describe('reportPurchases location sort', () => {
+  it('orders by state then city, rows without a location first', async () => {
+    const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
+    const vendorId = await t.run(async (ctx) => seedVendor(ctx, 'Pilot'));
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const base = { organizationId: ORG, vendorId, gallons: 10, pricePerGallon: 4, totalCost: 40, createdAt: now, updatedAt: now, createdBy: USER };
+      await ctx.db.insert('fuelEntries', { ...base, entryDate: T0 + 1 * DAY, location: { city: 'Reno', state: 'NV' } });
+      await ctx.db.insert('fuelEntries', { ...base, entryDate: T0 + 2 * DAY, location: { city: 'Sacramento', state: 'CA' } });
+      await ctx.db.insert('fuelEntries', { ...base, entryDate: T0 + 3 * DAY });
+      await ctx.db.insert('fuelEntries', { ...base, entryDate: T0 + 4 * DAY, location: { city: 'Redding', state: 'ca' } });
+    });
+    const page = await t.query(api.fuelReports.reportPurchases, {
+      ...RANGE, sortKey: 'location', sortDir: 'asc', paginationOpts: { numItems: 10, cursor: null },
+    });
+    expect(page.page.map((r) => r.location?.city ?? null)).toEqual([null, 'Redding', 'Sacramento', 'Reno']);
+  });
+});
