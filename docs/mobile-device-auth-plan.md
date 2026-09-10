@@ -125,7 +125,7 @@ What we get: one-tap sign-in with no code entry, the structural removal of the f
 | OQ-10 | **Enrollment token TTLs.** SMS 15 min? QR 2 min? | Anyone can photograph a screen; QR must be short. |
 | OQ-11 | **Dormancy window** before a session is marked dormant (no refresh for N days). | 90 days proposed. |
 | OQ-12 | **Org identifier in the token for carrier-only orgs.** They have no `workosOrgId`; today they're matched by `clerkOrgId`. | Recommendation: `org_id` = `organizations._id` string for carrier-only orgs, matching the existing `assertCallerInCarrierOrg` match set (`clerkOrgId`/`workosOrgId`/`_id`). Do **not** introduce a fourth identifier. Consolidating 57 tables keyed by `workosOrgId` onto `_id` is a separate platform migration, out of scope. |
-| OQ-13 | **Replace the shared static key on `POST /v1/mobile/locations`** (`MOBILE_LOCATION_API_KEY`, one secret for every device) with the per-device JWT? | Recommendation: yes, as a follow-on (W13). The plan makes it possible; it isn't required for launch. |
+| OQ-13 | **Replace the shared static key on `POST /v1/mobile/locations`** with the per-device JWT. | **Resolved: yes, in scope (W13, part of the driver-app workstream).** The key is an `EXPO_PUBLIC` var shipped in the binary, and the handler trusts client-supplied `driverId`, `sessionId`, and `organizationId`, so anyone who extracts the key can write pings for any driver in any org. The route reads the bearer token, resolves the caller via the helper's action variant, takes driver and org from the token, verifies the session belongs to that driver in `ingestBatch`, and rate-limits per device. The three client sync paths (websocket, Clerk-token HTTP client, static-key route) collapse to one HTTP path using the headless token accessor. 401 → one refresh and retry; revoked → stop tracking and abandon the queue. Only the driver app sends locations (dispatch has no location dependency); authorization is by `kind` including `driver`, not by app. Transition: accept bearer or key behind the flag, delete the key path after a week of zero key requests. |
 
 ---
 
@@ -534,7 +534,7 @@ Long-lead items start on day 1 regardless of the spike outcome.
 | W10 | Native builds (entitlements), device matrix, store submission | W5, W6, W0 | 3–4 days + review |
 | W11 | WorkOS webhooks making `orgMembers` authoritative + DB authorization for members | W3 | 3–4 days, can follow launch |
 | W12 | Decommission (§16), including the field-drop migrations and the `userIdentityLinks` retirement | cutover | 3 days |
-| W13 | Location ingest on device JWT instead of the shared static key (OQ-13) | W5 | 1 day, follow-on |
+| W13 | Location ingest on device JWT instead of the shared static key; collapse the three client sync paths (OQ-13) | W4 | 1–2 days, ships with W5 |
 | W14 | `orgMembers` evolution + `userIdentityLinks` backfill + `resolveCaller` helper + lint rule | W2 | 3 days (moved out of W3 because it touches 22 + 29 call sites) |
 
 Roughly 3 engineer-weeks of build for the core (W1–W9, W14) plus W0's calendar lead time and store review. W11 and W13 can trail.
