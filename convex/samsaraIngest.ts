@@ -109,115 +109,142 @@ export const pollOneIntegration = internalAction({
       return { ok: true, pingsIngested: 0, pagesDrained: 0 };
     }
 
-    // Decrypt the API token in its own action (samsaraCrypto runs in node).
-    const apiToken: string = await ctx.runAction(
-      internal.samsaraCrypto.decryptSamsaraToken,
-      { encryptedToken: context.encryptedApiToken },
-    );
-
-    // Optionally filter the feed to vehicles we actually map. Cuts payload
-    // for orgs whose Samsara fleet is larger than their Otoqa fleet, and
-    // avoids ingesting GPS for vehicles we'd just discard. If no mapped
-    // trucks exist, there's nothing to do this tick.
-    const mappedVehicleIds: string[] = await ctx.runQuery(
-      internal.samsaraIngestMutations.listMappedSamsaraVehicleIds,
-      { workosOrgId: context.workosOrgId },
-    );
-    if (mappedVehicleIds.length === 0) {
-      await ctx.runMutation(
-        internal.samsaraIngestMutations.updateSyncStateAfterTick,
-        {
-          syncStateId: context.syncStateId,
-          newCursor: context.pollCursor,
-          pingsIngested: 0,
-          errorMessage: undefined,
-        },
-      );
-      return { ok: true, pingsIngested: 0, pagesDrained: 0 };
-    }
-
+    // From here on the claim is held. It is released by stamping
+    // `lastPolledAt`, which only updateSyncStateAfterTick does — so a throw
+    // anywhere below would leave the claim held until the 30s lock timeout,
+    // i.e. three 10s ticks with no GPS ingested. The calls below are all
+    // runQuery / runAction / runMutation, any of which can fail with a
+    // transient platform error (ServiceUnavailable, InternalServerError),
+    // so the release has to survive an exception. `finishTick` is that
+    // release; the catch below runs it and then rethrows untouched.
     let cursor = context.pollCursor;
     let totalIngested = 0;
     let pages = 0;
     let lastErrorMessage: string | undefined;
     let disableIntegration = false;
+    let released = false;
 
-    for (let i = 0; i < MAX_DRAIN_ITERATIONS; i++) {
-      const result = await fetchVehicleStatsFeed({
-        apiToken,
-        environment: context.environment as SamsaraEnvironment,
-        cursor,
-        vehicleIds: mappedVehicleIds,
-      });
-
-      if (result.kind === 'auth_failed') {
-        lastErrorMessage = `auth_failed status=${result.status} msg=${result.message}`;
-        disableIntegration = true;
-        break;
-      }
-      if (result.kind === 'cursor_invalid') {
-        lastErrorMessage = `cursor_invalid status=${result.status} msg=${result.message}`;
-        cursor = undefined; // recover on next tick
-        break;
-      }
-      if (result.kind === 'rate_limited') {
-        lastErrorMessage = `rate_limited retryAfterSec=${result.retryAfterSec}`;
-        break;
-      }
-      if (result.kind === 'transient_error') {
-        lastErrorMessage = `transient_error status=${result.status ?? 'n/a'} msg=${result.message}`;
-        break;
-      }
-
-      // ok
-      pages++;
-      // Project Samsara's response down to the exact shape our mutation
-      // validator expects. Samsara periodically adds fields to GPS points
-      // (isEcuSpeed, reverseGeo, address, etc.) and Convex's v.object()
-      // rejects extras — projecting at the boundary keeps the mutation
-      // validator strict without making us brittle to upstream additions.
-      const vehicleEntries = (result.body.data as SamsaraVehicleEntry[]).map(
-        (entry) => ({
-          id: entry.id,
-          name: entry.name,
-          gps: entry.gps?.map((p) => ({
-            latitude: p.latitude,
-            longitude: p.longitude,
-            headingDegrees: p.headingDegrees,
-            speedMilesPerHour: p.speedMilesPerHour,
-            time: p.time,
-          })),
-        }),
-      );
-      const ingestResult = await ctx.runMutation(
-        internal.samsaraIngestMutations.processVehicleStats,
+    const finishTick = async (errorMessage: string | undefined) => {
+      released = true;
+      await ctx.runMutation(
+        internal.samsaraIngestMutations.updateSyncStateAfterTick,
         {
-          workosOrgId: context.workosOrgId,
-          vehicleEntries,
+          syncStateId: context.syncStateId,
+          newCursor: cursor,
+          pingsIngested: totalIngested,
+          errorMessage,
         },
       );
-      totalIngested += ingestResult.pingsIngested;
-      cursor = result.body.pagination.endCursor;
-      if (!result.body.pagination.hasNextPage) break;
-    }
+    };
 
-    await ctx.runMutation(
-      internal.samsaraIngestMutations.updateSyncStateAfterTick,
-      {
-        syncStateId: context.syncStateId,
-        newCursor: cursor,
-        pingsIngested: totalIngested,
-        errorMessage: lastErrorMessage,
-      },
-    );
-
-    if (disableIntegration) {
-      await ctx.runMutation(
-        internal.samsaraIngestMutations.disableIntegration,
-        { integrationId: args.integrationId, reason: lastErrorMessage ?? 'auth_failed' },
+    try {
+      // Decrypt the API token in its own action (samsaraCrypto runs in node).
+      const apiToken: string = await ctx.runAction(
+        internal.samsaraCrypto.decryptSamsaraToken,
+        { encryptedToken: context.encryptedApiToken },
       );
-    }
 
-    return { ok: !disableIntegration && !lastErrorMessage, pingsIngested: totalIngested, pagesDrained: pages };
+      // Optionally filter the feed to vehicles we actually map. Cuts payload
+      // for orgs whose Samsara fleet is larger than their Otoqa fleet, and
+      // avoids ingesting GPS for vehicles we'd just discard. If no mapped
+      // trucks exist, there's nothing to do this tick.
+      const mappedVehicleIds: string[] = await ctx.runQuery(
+        internal.samsaraIngestMutations.listMappedSamsaraVehicleIds,
+        { workosOrgId: context.workosOrgId },
+      );
+      if (mappedVehicleIds.length === 0) {
+        await finishTick(undefined);
+        return { ok: true, pingsIngested: 0, pagesDrained: 0 };
+      }
+
+      for (let i = 0; i < MAX_DRAIN_ITERATIONS; i++) {
+        const result = await fetchVehicleStatsFeed({
+          apiToken,
+          environment: context.environment as SamsaraEnvironment,
+          cursor,
+          vehicleIds: mappedVehicleIds,
+        });
+
+        if (result.kind === 'auth_failed') {
+          lastErrorMessage = `auth_failed status=${result.status} msg=${result.message}`;
+          disableIntegration = true;
+          break;
+        }
+        if (result.kind === 'cursor_invalid') {
+          lastErrorMessage = `cursor_invalid status=${result.status} msg=${result.message}`;
+          cursor = undefined; // recover on next tick
+          break;
+        }
+        if (result.kind === 'rate_limited') {
+          lastErrorMessage = `rate_limited retryAfterSec=${result.retryAfterSec}`;
+          break;
+        }
+        if (result.kind === 'transient_error') {
+          lastErrorMessage = `transient_error status=${result.status ?? 'n/a'} msg=${result.message}`;
+          break;
+        }
+
+        // ok
+        pages++;
+        // Project Samsara's response down to the exact shape our mutation
+        // validator expects. Samsara periodically adds fields to GPS points
+        // (isEcuSpeed, reverseGeo, address, etc.) and Convex's v.object()
+        // rejects extras — projecting at the boundary keeps the mutation
+        // validator strict without making us brittle to upstream additions.
+        const vehicleEntries = (result.body.data as SamsaraVehicleEntry[]).map(
+          (entry) => ({
+            id: entry.id,
+            name: entry.name,
+            gps: entry.gps?.map((p) => ({
+              latitude: p.latitude,
+              longitude: p.longitude,
+              headingDegrees: p.headingDegrees,
+              speedMilesPerHour: p.speedMilesPerHour,
+              time: p.time,
+            })),
+          }),
+        );
+        const ingestResult = await ctx.runMutation(
+          internal.samsaraIngestMutations.processVehicleStats,
+          {
+            workosOrgId: context.workosOrgId,
+            vehicleEntries,
+          },
+        );
+        totalIngested += ingestResult.pingsIngested;
+        cursor = result.body.pagination.endCursor;
+        if (!result.body.pagination.hasNextPage) break;
+      }
+
+      await finishTick(lastErrorMessage);
+
+      if (disableIntegration) {
+        await ctx.runMutation(
+          internal.samsaraIngestMutations.disableIntegration,
+          { integrationId: args.integrationId, reason: lastErrorMessage ?? 'auth_failed' },
+        );
+      }
+
+      return { ok: !disableIntegration && !lastErrorMessage, pingsIngested: totalIngested, pagesDrained: pages };
+    } catch (err) {
+      // Release the claim so the next 10s tick can run, recording the cursor
+      // and ping count earned before the throw. Then rethrow: the failure
+      // still surfaces in Convex logs and error tracking.
+      if (!released) {
+        try {
+          await finishTick(
+            `tick_threw msg=${err instanceof Error ? err.message : String(err)}`,
+          );
+        } catch (releaseErr) {
+          // A failed release just falls back to the 30s lock timeout, which
+          // is what that timeout is for. Never let it mask the real error.
+          console.error(
+            `[samsaraIngest.pollOneIntegration] claim release failed integrationId=${args.integrationId}`,
+            releaseErr,
+          );
+        }
+      }
+      throw err;
+    }
   },
 });
