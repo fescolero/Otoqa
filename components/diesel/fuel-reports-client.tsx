@@ -73,6 +73,12 @@ type ExceptionId = (typeof EXCEPTION_RULES)[number]['id'];
 const REVIEWED = 'reviewed';
 type ExceptionFilterId = ExceptionId | typeof REVIEWED;
 type ExceptionCounts = Record<ExceptionId, number> & { total: number; reviewed: number };
+/** Review status as it fits in the purchases table's Δ column. */
+const REVIEW_SHORT: Record<keyof typeof REVIEW_LABELS, string> = {
+  OK: 'Reviewed',
+  CORRECTED: 'Corrected',
+  DRIVER_FOLLOW_UP: 'Follow-up',
+};
 type PriceTierCounts = { state: number; fleet: number; thin: number; none: number };
 
 // Fixed per-product series colors — color follows the entity, so a
@@ -1851,7 +1857,7 @@ function FuelPurchasesTable({
     }
   };
 
-  const grid = '92px 1.5fr 122px 1.4fr 84px 80px 78px 96px 1fr';
+  const grid = '92px 1.5fr 122px 1.4fr 84px 80px 86px 96px 1fr';
   const cols: Array<{ key: PurchaseSortKey; label: string; right?: boolean }> = [
     { key: 'date',    label: 'Date' },
     { key: 'vendor',  label: 'Vendor · location' },
@@ -2051,11 +2057,13 @@ function FuelPurchasesTable({
                   </span>
                 )}
                 {r.review && (
+                  // Short form fits the column; the full label, reviewer
+                  // and note sit in the tooltip.
                   <div
-                    className="text-[10.5px] mt-0.5 text-[var(--text-tertiary)]"
+                    className="text-[10.5px] mt-0.5 text-[var(--text-tertiary)] whitespace-nowrap truncate"
                     title={`${REVIEW_LABELS[r.review.status]}${r.review.reviewedByName ? ` by ${r.review.reviewedByName}` : ''}${r.review.note ? ` — ${r.review.note}` : ''}`}
                   >
-                    {REVIEW_LABELS[r.review.status]}
+                    {REVIEW_SHORT[r.review.status]}
                   </div>
                 )}
               </div>
