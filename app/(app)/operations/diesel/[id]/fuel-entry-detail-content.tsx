@@ -30,7 +30,6 @@ import {
   DSCard,
   DSProps,
   DSPropsEditable,
-  type DSPropsEditableItem,
   DetailsFullPage,
   FPCommentsPeek,
   type FPKpi,
@@ -356,7 +355,6 @@ export function FuelEntryDetailContent({ id }: { id: string }) {
           check={priceCheck}
           ppg={ppg}
           gallons={gallons}
-          total={total}
           onOpenPeer={(peerId, peerType) =>
             router.push(`/operations/diesel/${peerId}${peerType === 'def' ? '?type=def' : ''}`)
           }
@@ -845,13 +843,11 @@ function peerScope(check: NonNullable<PriceCheckData>, state?: string): string {
   }
 }
 
-function causeText(cause: PriceCause, check: NonNullable<PriceCheckData>, ppg: number, gallons: number, total: number): string {
+function causeText(cause: PriceCause, check: NonNullable<PriceCheckData>, ppg: number, gallons: number): string {
   const b = check.assessment.benchmark;
   switch (cause) {
     case 'swapped':
-      return `Price and gallons look swapped: $${gallons.toFixed(3)}/gal × ${ppg.toFixed(2)} gal would sit with nearby fills and still add up to the total.`;
-    case 'total_as_price':
-      return `The price equals the receipt total ($${total.toFixed(2)}). The total may have been typed into the price field.`;
+      return `Price and gallons look swapped: $${gallons.toFixed(3)}/gal × ${ppg.toFixed(2)} gal would sit with nearby fills.`;
     case 'decimal': {
       const fixed = b !== null && Math.abs(ppg / 10 - b) <= Math.abs(ppg / 100 - b) ? ppg / 10 : ppg / 100;
       return `A decimal point may have slipped: $${fixed.toFixed(3)}/gal would match nearby fills.`;
@@ -861,8 +857,6 @@ function causeText(cause: PriceCause, check: NonNullable<PriceCheckData>, ppg: n
       const ob = check.otherBenchmark;
       return `Priced like ${other} (nearby ${other} fills run about $${ob?.toFixed(3)}/gal). This may be a ${other} purchase logged as ${fuelProductLabel(check.product).toLowerCase()}.`;
     }
-    case 'mismatch':
-      return `$${ppg.toFixed(3)} × ${gallons.toFixed(2)} gal = $${(ppg * gallons).toFixed(2)}, but the recorded total is $${total.toFixed(2)}. One of the three was entered wrong.`;
     case 'none':
       return 'No entry error detected. The price itself is high — check the receipt or the vendor’s pump price.';
   }
@@ -872,13 +866,11 @@ function PriceCheck({
   check,
   ppg,
   gallons,
-  total,
   onOpenPeer,
 }: {
   check: PriceCheckData | undefined;
   ppg: number;
   gallons: number;
-  total: number;
   onOpenPeer: (id: string, type: 'fuel' | 'def') => void;
 }) {
   if (check === undefined) {
@@ -956,7 +948,7 @@ function PriceCheck({
                 size={12}
                 style={{ color: 'var(--text-tertiary)', marginTop: 3, flexShrink: 0 }}
               />
-              <span>{causeText(c, check, ppg, gallons, total)}</span>
+              <span>{causeText(c, check, ppg, gallons)}</span>
             </div>
           ))}
         </div>
@@ -1075,10 +1067,7 @@ function ReviewBlock({
     if (a.flagged) return { icon: 'alert', text: `Price ${Math.round(a.pct * 100)}% above nearby fills`, when: '' };
     return { icon: 'check', text: 'Price in line with nearby fills', when: '' };
   })();
-  const mismatchSignal: SignalItem[] = check?.mismatch
-    ? [{ icon: 'alert', text: 'Price × gallons does not match the total', when: '' }]
-    : [];
-  const items = [priceSignal, ...mismatchSignal, ...signals];
+  const items = [priceSignal, ...signals];
   const open = items.filter((i) => i.icon === 'alert').length;
 
   const act = async (status: ReviewStatus | null) => {

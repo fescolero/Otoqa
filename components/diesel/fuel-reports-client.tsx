@@ -58,7 +58,7 @@ import { REVIEW_LABELS } from '@/convex/lib/fuelReview';
 const FLEET_MPG = 6.4;
 
 /**
- * The five exception rules the server counts (fuelReports.exceptionsFor).
+ * The four exception rules the server counts (fuelReports.exceptionsFor).
  * Subtitles describe the actual rule, not an aspiration.
  */
 const EXCEPTION_RULES = [
@@ -66,7 +66,6 @@ const EXCEPTION_RULES = [
   { id: 'offcard',  label: 'Paid off fuel card',     sub: 'Cash, check, or card on file',             icon: 'doc-dollar', tone: 'warn'   },
   { id: 'price',    label: 'Price anomaly',          sub: 'Over 5% or 25¢ above nearby fills',        icon: 'alert',      tone: 'danger' },
   { id: 'unlink',   label: 'Not linked to a load',   sub: 'No load reference on the entry',           icon: 'package',    tone: 'muted'  },
-  { id: 'mismatch', label: 'Price × gallons ≠ total', sub: 'Recorded total disagrees with the math', icon: 'alert',      tone: 'danger' },
 ] as const;
 type ExceptionId = (typeof EXCEPTION_RULES)[number]['id'];
 /** Exception-filter value that selects reviewed rows (fuelReports.REVIEWED_FILTER). */
@@ -531,11 +530,11 @@ export function FuelReportsClient() {
     });
   }, [bucketDefs, summary]);
 
-  // Exception counts — the five rules evaluated server-side over the
+  // Exception counts — the four rules evaluated server-side over the
   // filtered pool, plus how many rows a person has already reviewed
   // (those trip no rule; see fuelReports.exceptionsFor).
   const exceptionCounts: ExceptionCounts = summary?.exceptions ?? {
-    receipt: 0, offcard: 0, price: 0, unlink: 0, mismatch: 0, total: 0, reviewed: 0,
+    receipt: 0, offcard: 0, price: 0, unlink: 0, total: 0, reviewed: 0,
   };
   const priceTiers: PriceTierCounts = summary?.priceTiers ?? { state: 0, fleet: 0, thin: 0, none: 0 };
   const peersCapped = summary?.peersCapped ?? false;

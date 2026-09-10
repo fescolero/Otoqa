@@ -26,7 +26,7 @@ async function seedVendor(ctx: MutationCtx, name: string): Promise<Id<'fuelVendo
 
 async function insertFuel(
   ctx: MutationCtx,
-  opts: { vendorId: Id<'fuelVendors'>; entryDate: number; gallons: number; ppg: number; total?: number; state?: string; city?: string },
+  opts: { vendorId: Id<'fuelVendors'>; entryDate: number; gallons: number; ppg: number; state?: string; city?: string },
 ): Promise<Id<'fuelEntries'>> {
   const now = Date.now();
   return await ctx.db.insert('fuelEntries', {
@@ -35,7 +35,7 @@ async function insertFuel(
     vendorId: opts.vendorId,
     gallons: opts.gallons,
     pricePerGallon: opts.ppg,
-    totalCost: opts.total ?? opts.gallons * opts.ppg,
+    totalCost: opts.gallons * opts.ppg,
     location: opts.state ? { city: opts.city ?? 'Redding', state: opts.state } : undefined,
     createdAt: now, updatedAt: now, createdBy: USER,
   });
@@ -115,18 +115,17 @@ describe('entryPriceCheck', () => {
     expect(res!.causes).toEqual(['product']);
   });
 
-  it('reports nothing to compare against when the fill is alone, and still checks the total', async () => {
+  it('reports nothing to compare against when the fill is alone', async () => {
     const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
     const me = await t.run(async (ctx) => {
       const v = await seedVendor(ctx, 'Pilot');
-      return await insertFuel(ctx, { vendorId: v, entryDate: T0, gallons: 100, ppg: 4.2, total: 500 });
+      return await insertFuel(ctx, { vendorId: v, entryDate: T0, gallons: 100, ppg: 4.2 });
     });
     const res = await t.query(api.fuelReports.entryPriceCheck, { type: 'fuel', entryId: me });
     expect(res!.assessment.tier).toBe('none');
     expect(res!.assessment.benchmark).toBeNull();
     expect(res!.peers).toEqual([]);
-    expect(res!.mismatch).toBe(true);
-    expect(res!.causes).toEqual(['mismatch']);
+    expect(res!.causes).toEqual([]);
   });
 
   it('agrees with the reports in a window busier than the reports\' side-window cap', async () => {
