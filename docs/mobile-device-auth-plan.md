@@ -1,6 +1,6 @@
 # Mobile Device Auth — Replace Clerk with device-bound credentials
 
-> Status: **v0.4 draft, all open questions resolved** — captures the 2026-09-10 discussion end to end. Nothing here is built. v0.2 reworked the schema for reactivity (§23). v0.3 folded in four code audits (§24) and the product-owner decision that **there are no active drivers, so the cutover happens in one 24-hour window** (§14). v0.4 converts every open question into a decision (D23–D32); §4 is now an index.
+> Status: **v0.5 draft, adversarially reviewed** — captures the 2026-09-10 discussion end to end. Nothing here is built. v0.2 reworked the schema for reactivity (§23). v0.3 folded in four code audits (§24) and the decision that **there are no active drivers, so the cutover happens in one 24-hour window** (§14). v0.4 converted every open question into a decision (D23–D32). v0.5 is a confidence review of the plan itself (§25): it found a broken refresh-grace design, a privilege-escalation path through the member sync, and a missing brute-force control, and fixed them (D33–D35).
 >
 > Scope: **Otoqa Driver** and **Otoqa Dispatch** mobile apps, the web **Settings → Mobile access** page, and the platform console's mobile tooling. The web app and the staff console **stay on WorkOS**.
 > Backend: the single shared Convex deployment (topology unchanged).
@@ -111,7 +111,7 @@ What gates it externally: Twilio 10DLC registration (weeks) and a store-reviewed
 | D11 | Identity is the **driver record / member identity**, not the phone number. `sub` = `drivers._id` or WorkOS user id. | Phone changes and shared numbers must not move access. |
 | D12 | Authorize mobile **member** requests from `orgMemberships` rows once the mirror is authoritative; until then, refresh-time WorkOS membership check with bounded grace. | See OQ-1. |
 | D13 | Clerk sign-in tokens rejected as the destination. | Keeps every reliability problem. |
-| D14 | Convex Auth (`@convex-dev/auth`) gets a time-boxed **spike** before hand-rolling. | Beta; verify background-token access and revocation fit. |
+| ~~D14~~ | ~~Convex Auth spike.~~ **Superseded by D33 (v0.5): hand-rolled, no spike.** | |
 | D15 | Optional biometric gate on owner-mode pay screens. | Answers "no MFA?" on questionnaires; ~1 day. |
 | D16 *(v0.3)* | **The `kind` claim is the only discriminator between driver and member callers.** Org-claim presence is never used as a signal again. | Six existing branches use absence-of-org-claim as "driver"; the new token carries `org_id` for everyone. |
 | D17 *(v0.3)* | **Revocation lives in the mobile caller helper, which is where mobile traffic actually flows** (`resolveCaller`, replacing `resolveAuthenticatedDriver` and `requireCarrierAuth`). The `lib/auth.ts` helpers stay database-free for WorkOS tokens and delegate to `resolveCaller` only when the token's issuer is ours. In action contexts the check goes through `ctx.runQuery`. | `AnyCtx` typing on 22 action call sites; driver traffic bypasses `lib/auth.ts` today. |
@@ -130,6 +130,9 @@ What gates it externally: Twilio 10DLC registration (weeks) and a store-reviewed
 | D30 *(v0.4, was OQ-10)* | **TTLs: SMS token 15 min, QR token 2 min, typed code same as its token.** A resend invalidates the outstanding token. | Codes are shoulder-surfable; SMS delivery can lag. |
 | D31 *(v0.4, was OQ-11)* | **Dormant after 90 days without a refresh.** Marked by the daily sweep; a later refresh is rejected and the device re-enrolls. | Long enough for seasonal drivers, short enough that a forgotten phone doesn't hold a live credential for a year. |
 | D32 *(v0.4, was OQ-14)* | **Historical Clerk subjects stay as they are.** Fix `payProfiles.resolveActorName` so a non-`user_` id renders "Unknown user", not "System". | No real users; rewriting audit history is worse than a few unresolvable names. |
+| D33 *(v0.5)* | **Hand-rolled issuer; the Convex Auth spike (D14) is dropped.** Revisit only if Convex Auth leaves beta and supports custom claims, per-request revocation, and headless token access without wrapping. | Every downstream piece (claim shape, `resolveCaller`, ingest auth, settings page) depends on the token design. Keeping a fork open would have meant designing twice; Convex Auth's magic-link and rotation are the two parts that are cheapest to write ourselves, and its beta status was already the stated risk. |
+| D34 *(v0.5)* | **Membership rows for WorkOS-backed orgs are written only by a Convex Node action that fetches from WorkOS with a server API key.** No public mutation accepts membership data from a client. | `orgMembers.syncMembers` is public and trusts its payload today; with `role`/`permissions` on the row and the row authorizing mobile requests, that would be a privilege escalation. |
+| D35 *(v0.5)* | **Refresh-token reuse detection revokes the session.** A superseded token presented outside the grace window, or an invalidated successor, ends the whole family. | Standard rotation security; also fixes the v0.4 grace design, which assumed the server could re-return a token it never stored. |
 
 ---
 
@@ -177,7 +180,8 @@ No "principals" table. Never the phone number, never the Clerk user id. A person
 4. **No duplicate of existing state.** Push tokens stay on `driverSessions` / `driverPushTokens` / `dispatchPushTokens`.
 5. **Org references follow the existing convention.** New tables carry both `organizationId: v.id('organizations')` and `orgKey: string` (the token's `org_id`).
 6. **Small tables, narrow indexes, one purpose each.**
-7. **Every field drop is a numbered migration** (`convex/migrations/NNN_*.ts`, next free number 019; follow `007_strip_parsed_columns.ts`: paginated batch, `patch({ field: undefined })` guarded by `!== undefined`, `internalAction` driver, run before the schema push). `userIdentityLinks.clerkUserId` is **non-optional**, so that table is dropped whole after backfill rather than stripped.
+7. **Every field drop is a numbered migration** (`convex/migrations/NNN_*.ts`, next free number 019; follow `007_strip_parsed_columns.ts`: paginated batch, `patch({ field: undefined })` guarded by `!== undefined`, `internalAction` driver, run before the schema push). `userIdentityLinks.clerkUserId` is **non-optional**, so that table is dropped whole after backfill rather than stripped. **A table can only leave the schema once it is empty**: the drop migrations for `userIdentityLinks` and `orgMembers` delete every row (paginated) after the backfill is verified, and only then does the schema push remove the table.
+8. **`orgMemberships` rows are write-rarely too.** After W11 the mobile helper reads the caller's membership row on every request (primary key via `deviceSessions.membershipId`), so every open dispatch app subscribes to it. The sync must patch **only when a field actually changed** (the current `syncMembers` already does this for names); there is no `syncedAt` bump on an unchanged row, and nothing like `lastSeenAt` ever lives on it. Sync bookkeeping goes on a separate `orgMembershipSyncs` row per org.
 
 ### 5.3 New tables (Convex)
 
@@ -207,15 +211,16 @@ deviceSessions                           // THE doc the mobile helper reads. Wri
   deviceId: Id<'devices'>
   principalKind, driverId?, workosUserId?, membershipId?, organizationId, orgKey   // denormalized: helper needs no second read
   status: 'active' | 'revoked'
-  revokedAt?, revokedReason?: 'admin' | 'sign_out' | 'driver_deactivated' | 'member_removed' | 'device_replaced' | 'dormant'
+  revokedAt?, revokedReason?: 'admin' | 'sign_out' | 'driver_deactivated' | 'member_removed' | 'device_replaced' | 'dormant' | 'token_reuse'
   .index('by_device', ['deviceId'])
 
 deviceRefreshTokens                      // rotation state; read only by the refresh action
   sessionId: Id<'deviceSessions'>
   tokenHash: string                       // sha-256 via Web Crypto, raw never stored (pattern: externalTrackingAuth)
-  status: 'active' | 'superseded'
+  status: 'active' | 'superseded' | 'invalidated'   // invalidated = successor of a replayed-in-grace token; never usable
   supersededAt?, successorId?: Id<'deviceRefreshTokens'>
-  expiresAt
+  usedAt?                                 // set when this token is presented; a successor with usedAt set cannot be invalidated by grace replay
+  expiresAt                               // rotation time + 90 days (D31) — expiry IS the dormancy mechanism
   .index('by_hash', ['tokenHash'])
   .index('by_session', ['sessionId'])
   .index('by_status_expires', ['status', 'expiresAt'])
@@ -246,7 +251,7 @@ orgMemberships                           // D18: the ONE membership table, both 
   status: 'active' | 'inactive'
   source: 'workos' | 'local'
   firstName?, lastName?, email?, phone?   // display snapshot (replaces orgMembers)
-  syncedAt, createdAt, updatedAt
+  createdAt, updatedAt                    // updatedAt moves only when a field changed (rule 8)
   .index('by_orgkey_user', ['orgKey', 'workosUserId'])   // replaces orgMembers.by_org_user
   .index('by_orgkey_status', ['orgKey', 'status'])
   .index('by_driver', ['driverId'])
@@ -255,7 +260,8 @@ orgMemberships                           // D18: the ONE membership table, both 
 
 ### 5.4 Existing tables
 
-- **`orgMemberships` replaces both `orgMembers` and `userIdentityLinks`.** `orgMembers` readers (8 sites, mostly through `getMemberDisplayMap` in `convex/orgMembers.ts:77`) repoint to `orgMemberships` by `orgKey` + `workosUserId`. The login-time sync (`lib/sync-org-members.ts` → `orgMembers.syncMembers`) writes `orgMemberships` with `source: 'workos'` and **only upserts, never deletes** (D23). `userIdentityLinks` (50 non-test references; 12 in `carrierPartnerships.ts` including a full-table `.collect()` at `:2350`) backfills into `orgMemberships` with `source: 'local'`, then the table is dropped.
+- **`orgMemberships` replaces both `orgMembers` and `userIdentityLinks`.** `orgMembers` readers (8 sites, mostly through `getMemberDisplayMap` in `convex/orgMembers.ts:77`) repoint to `orgMemberships` by `orgKey` + `workosUserId`. `userIdentityLinks` (50 non-test references; 12 in `carrierPartnerships.ts` including a full-table `.collect()` at `:2350`) backfills into `orgMemberships` with `source: 'local'`, then the table is emptied and dropped.
+- **The WorkOS-side rows are written only by Convex itself (v0.5, D34).** Today `orgMembers.syncMembers` is a **public mutation that trusts a client-supplied member array** (`convex/orgMembers.ts:23-40`; the comment there admits it and relies on the payload being display-only). Once the table carries `role`/`permissions` and authorizes mobile requests, any authenticated web member could call it directly and write themselves `admin`. So: `syncMembers` becomes an `internalMutation`; a Convex Node action `orgMemberships.syncFromWorkOS` fetches `listOrganizationMemberships` (role slug per member) and the org's roles → permissions map (`listOrganizationRoles` / environment roles) from the WorkOS REST API using a new `WORKOS_API_KEY` env var on the deployment, then writes through the internal mutation. The web login callback and the "resolve names" client hook call a public action `orgMemberships.requestSync` that takes **no data**, derives the org from the caller's identity, and schedules the Node action. `lib/sync-org-members.ts` and `app/api/organization/members/sync/route.ts` shrink to that trigger. The same Node action serves D23's refresh-time check.
 - **`organizations`**: drop `clerkOrgId` and index `by_clerk_org`; update `orgType` comments.
 - **`drivers`**: drop `clerkUserId`, `clerkSyncStatus`, `clerkSyncError`, `clerkSyncedAt` via strip migration.
 - **`orgHealthSnapshots.identityLinkCount`** → `membershipCount`.
@@ -286,15 +292,18 @@ iat, exp (12h), nbf
 ### 6.2 Signing and validation (D20)
 
 - RS256 with Web Crypto in the V8 runtime, following `convex/fcmWake.ts:158-195` (PKCS#8 import, `RSASSA-PKCS1-v1_5`, `crypto.subtle.sign`). Private key PEM in a Convex env var; `kid` in the header.
-- JWKS as a static file on the web app's domain. Rotation: add new key to JWKS → sign with it → keep old key ≥ 13h → remove.
+- JWKS as a static file on the **production** web domain (`/.well-known/jwks.json`), which must be publicly fetchable by Convex: not a preview URL, not behind Vercel deployment protection, no auth. Rotation: add new key to JWKS → sign with it → keep old key ≥ 13h → remove. Convex caches JWKS, so a rotation is announced to Convex by the `kid` on the next token.
 - `convex/auth.config.ts`: one `customJwt` provider `{ issuer, algorithm: 'RS256', jwks, applicationID: 'convex' }`. The Clerk provider block is removed in the same deploy.
 
 ### 6.3 Refresh flow
 
 1. Client holds `accessToken` (memory + SecureStore) and `refreshToken` (SecureStore).
 2. Token callback returns the cached access token unless within N minutes of `exp` or `forceRefreshToken` is set and the last refresh was more than a few seconds ago.
-3. `refresh` action: `deviceRefreshTokens.by_hash`. `active` → proceed; `superseded` within `GRACE_MS` → return the successor pair again; else `session_unknown`. Then `ctx.runQuery` session status; `status !== 'active'` → `session_revoked`.
-4. Rotate: insert successor, mark old `superseded`. **Nothing on `deviceSessions` is written.**
+3. `refresh` action looks up `deviceRefreshTokens.by_hash`, then `ctx.runQuery` session status (`status !== 'active'` → `session_revoked`). Then, by token state:
+   - `active` → rotate (step 4).
+   - `superseded` **within** `GRACE_MS` (60s) of `supersededAt` **and** its successor has never been used → the client's earlier response was lost. Mark that successor `invalidated`, rotate again from this token, return the new pair. (v0.5 fix: v0.4 said "return the successor pair again", which is impossible — raw tokens are never stored.)
+   - `superseded` outside grace, or `invalidated`, or expired → **reuse detected**: revoke the whole session (`deviceSessions.status = 'revoked'`, `revokedReason: 'token_reuse'`), audit it, return `session_revoked`. Presenting a token that should no longer exist means either a replay attack or a cloned credential; the OAuth refresh-rotation recommendation is to kill the family.
+4. Rotate: insert successor (`expiresAt = now + 90 days`, D31), mark old `superseded` with `supersededAt` and `successorId`. **Nothing on `deviceSessions` is written.**
 5. Members: re-read role/permissions per D23; membership gone → revoke, `member_removed`.
 6. Response codes: `ok`, `session_revoked`, `member_removed`, `device_dormant`; client-side `server_unreachable`.
 
@@ -323,7 +332,13 @@ iat, exp (12h), nbf
 
 ### 7.1 Common exchange
 
-`POST /enroll` (HTTP action): `{ token | code, platform, deviceName, installId, appId, appVersion, osVersion }` → verify by `tokenHash` or `codeHash` (Web Crypto SHA-256 in V8, per `http.ts:49-55`), not used, not expired → create `devices` + `deviceSessions` + first `deviceRefreshTokens` → mark used → return `{ accessToken, refreshToken, principal }`. Single use, bound to the first redeemer. Rate limited by adding named limits (`enrollByToken`, `enrollByIp` is **not** possible — Convex exposes no client IP, `http.ts:102-109`) to the existing `RateLimiter` instance in `externalTrackingAuth.ts`, consumed through an `internalMutation` like `consumeRateLimit`.
+`POST /enroll` (HTTP action): `{ token | code, platform, deviceName, installId, appId, appVersion, osVersion }` → verify by `tokenHash` or `codeHash` (Web Crypto SHA-256 in V8, per `http.ts:49-55`), not used, not expired → create `devices` + `deviceSessions` + first `deviceRefreshTokens` → mark used → return `{ accessToken, refreshToken, principal }`. Single use, bound to the first redeemer.
+
+Abuse controls (v0.5): Convex exposes no client IP (`http.ts:102-109`), so per-IP limiting is impossible and the typed code is the brute-force surface. Controls, all through named limits on the existing `RateLimiter` instance, consumed via an `internalMutation` like `consumeRateLimit`:
+- **Global failed-enrollment bucket**: 60 failures/min platform-wide. When it trips, every `/enroll` returns 429 for the window and a platform alert fires (`platform/alerts`). An 8-character base32 code is 40 bits; at 60 guesses/min against a 15-minute token the success probability is ~1e-9, and the alert makes any attempt visible.
+- **Per-token/code bucket**: 5 attempts, then the token is burned (`usedAt` set, `deliveryStatus` unchanged) and the admin sees "code locked, resend".
+- **Uniform responses**: invalid, expired, used, and burned all return the same 400 body and similar latency; nothing distinguishes "no such code" from "expired code".
+- Refresh gets its own bucket keyed by `sid` (10/min) so a misbehaving client can't hammer rotation.
 
 ### 7.2 SMS (drivers, carriers)
 
@@ -361,7 +376,7 @@ iat, exp (12h), nbf
 | Admin revoke / driver deactivated | next request `SessionRevoked` → app clears local state → "Access removed" |
 | Member removed on the web | team route revokes directly (§6.5); refresh catches anything missed (D23) |
 | Sign out | confirmation → `performSignOut` sequence (push token, ping queue, motion service, yard fences) → server revoke. Dispatch gets the same `logout.ts` (it has none today) |
-| Dormant | no refresh for 90 days (D31) → `dormant`; later refresh rejected → re-enroll |
+| Dormant | the active refresh token carries `expiresAt = rotation + 90 days` (D31); a refresh after that is rejected as expired → re-enroll. The daily sweep marks `devices.status = 'dormant'` for rows whose only active refresh token has expired, purely so the settings page shows the truth; security does not depend on the sweep. |
 | Cleanup cron | daily; template `driverSessions.sweepStaleSessionsForAutoTimeout` (`.take(batch)` + self-reschedule) and `entityDocuments:sweepPending` (created-but-never-finalized). Deletes used/expired `enrollmentTokens`, `superseded` refresh tokens past grace, marks dormant devices. Housekeeping only. |
 
 ---
@@ -398,7 +413,7 @@ iat, exp (12h), nbf
 
 ### 10.3 Team page and routes
 
-- `app/api/team/members/[membershipId]/route.ts:69-73,95` (deactivate/reactivate/delete) call `deviceAuth.revokeForMember` through `ConvexHttpClient` with the caller's WorkOS token. Failure of that call is logged, not fatal to the WorkOS action, and the refresh path (D23) is the backstop.
+- `app/api/team/members/[membershipId]/route.ts:69-73,95` (deactivate/reactivate/delete) call `deviceAuth.revokeForMember({ workosUserId })` through `ConvexHttpClient` with the caller's WorkOS token. The mutation re-checks on the Convex side that the caller holds `team:manage` (`assertOrgPermission`) and that the target's `orgMemberships` row is in the caller's org; it never trusts the route. Failure of that call is logged, not fatal to the WorkOS action, and the refresh path (D23) is the backstop.
 - Kebab menu gains "Manage devices" → Mobile access page.
 
 ### 10.4 Platform console (`apps/admin`)
@@ -480,7 +495,7 @@ Order of operations, each step green before the next:
 3. **Deploy functions.** `resolveCaller`, rewritten helpers (§9), issuer + JWKS, enrollment/refresh/revoke, settings page APIs, `/v1/mobile/locations` on bearer, `auth.config.ts` with the new provider and **without** Clerk. Web deploy with the settings page and team-route hooks.
 4. **Apps.** Publish JS via `eas update` (with the `.env.local` rule from the dispatch plan) for both apps; native build submitted in parallel for §11.5.
 5. **Re-enroll internal testers** (QR / code). Verify background location on a locked iPhone, revoke, offline > 12h.
-6. **Strip migrations** (`019_strip_driver_clerk_fields`, `020_strip_org_clerk_org_id`), then schema push dropping `drivers.clerk*`, `organizations.clerkOrgId` + `by_clerk_org`, `userIdentityLinks`, `orgMembers`.
+6. **Strip and empty migrations** (`019_strip_driver_clerk_fields`, `020_strip_org_clerk_org_id`, `021_empty_user_identity_links`, `022_empty_org_members`), each verified with a count, then the schema push dropping `drivers.clerk*`, `organizations.clerkOrgId` + `by_clerk_org`, `userIdentityLinks`, `orgMembers`. Convex refuses to drop a table that still has rows.
 7. **Decommission** (§16): delete Clerk code, env vars, dependencies, `MOBILE_LOCATION_API_KEY`.
 
 Rollback within the window: redeploy the previous Convex functions and `auth.config.ts` (Clerk provider restored), republish the previous app bundle. Steps 6–7 are only run after step 5 passes, so rollback never has to restore dropped fields.
@@ -578,10 +593,10 @@ Long-lead items (W0) start on day 1. Everything else lands in the cutover window
 | # | Workstream | Depends on | Rough size |
 |---|---|---|---|
 | W0 | Twilio + 10DLC, short domain, AASA/assetlinks, STOP/HELP + status webhooks | — | 2–3 days of work, **weeks of waiting**; not gating the cutover |
-| W1 | Spike: Convex Auth vs hand-rolled; confirm `fcmWake` signing pattern for RS256 + JWKS export | — | 1–2 days |
+| W1 | Signing spike only (D33): RS256 via the `fcmWake` pattern, JWKS export, `customJwt` provider round-trip in a dev deployment, WorkOS REST from a Node action with `WORKOS_API_KEY` | — | 1 day |
 | W2 | Shared test fixture + migrate 47 files (D21) | — | 2 days |
 | W3 | Authorization rewrite (§9): `resolveCaller`, six `kind` branches, `isPermitted`, `lib/auth.ts` issuer delegation, lint rule | W2 | 4–5 days (was 2–3; 26 + 20 + 6 + 18 sites) |
-| W4 | `orgMemberships`: schema, backfill scripts, repoint 8 `orgMembers` readers + 50 `userIdentityLinks` refs, login sync rewrite, `getUserRoles` collapse | W3 | 4 days |
+| W4 | `orgMemberships`: schema, backfill scripts, repoint 8 `orgMembers` readers + 50 `userIdentityLinks` refs, **sync rewritten as a Node action with `WORKOS_API_KEY` (D34)**, `getUserRoles` collapse | W3 | 4–5 days |
 | W5 | Issuer: tables, enroll/refresh/revoke, JWKS, cleanup cron, rate limits, key-rotation runbook | W1, W3 | 3–4 days |
 | W6 | `packages/mobile-core/auth` incl. headless accessor + headless mutation processor | W5 | 3 days |
 | W7 | Driver app (§11.2) incl. the location sync collapse | W6 | 4–5 days |
@@ -606,7 +621,7 @@ Roughly **4 engineer-weeks** for W1–W10 + W12–W13 (up from 3; the authorizat
 - **Universal Link flakiness.** Mitigation: code entry always works.
 - **Refresh rotation lockout.** Mitigation: grace window + tests; admin "send new code" backstop.
 - **Permission freshness for members** until W11. Mitigation: refresh-time WorkOS check with bounded grace (D23).
-- **Convex Auth beta surprises.** Mitigation: time-boxed spike; hand-rolled path fully specified.
+- **Refresh reuse detection false positives** (a driver's phone retries an old token after a long dead zone). Mitigation: the 60s grace covers network retries; a reuse revocation shows "Access removed, request a new code", which the admin can resolve in seconds, and the audit row says why. Tune the grace window from telemetry (`device_auth_refresh` codes) before widening it.
 
 ---
 
@@ -705,3 +720,36 @@ The seeder never back-fills existing populated roles; legacy tenants get everyth
 ### 24.11 Smaller items folded in
 
 Dispatch hardcoded key fallbacks; dispatch SecureStore without accessibility class; dispatch has no logout teardown; `expo-auth-session` unused in the driver app; `expo-linking` never imported; `carrierPartnerships.ts:2350` full-table scan; `platform/support.recordActionAudit` single-literal union; `payProfiles.resolveActorName` `user_` prefix heuristic; `orgHealthSnapshots.identityLinkCount`; `platform/health.ts` Clerk dependency row; `comments.authorId` edit gate keyed on subject; six docs with stale Clerk sections; no mobile sign-in runbook.
+
+---
+
+## 25. Confidence review (v0.5)
+
+An adversarial pass over v0.4 asking, for each mechanism, "what would make this fail in production, leak access, or slow the platform." Score before the pass: **6/10**. Score after: **8/10**. What was found, what changed, and what still caps the score.
+
+### 25.1 Found and fixed
+
+| # | Issue in v0.4 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | Refresh grace said "return the successor pair again" on a replay. | Raw refresh tokens are never stored (only hashes), so the server cannot re-return one. As written, every lost-response retry would have locked the device out — the exact race the grace window exists to prevent. | §6.3 rewritten: replay-in-grace invalidates the unused successor and rotates again; any other superseded/invalidated token = reuse → revoke the family (D35). `usedAt`, `invalidated` state, `token_reuse` reason added to the schema. |
+| 2 | `orgMemberships` was to be authoritative for mobile authorization, but its WorkOS rows were written by the existing `orgMembers.syncMembers`, a **public mutation that trusts a client-supplied member array**. | Any authenticated web member could call it directly and write themselves `admin`; after W11 that would grant mobile dispatch permissions. The current code's comment defends it as "display-only either way", which stops being true the moment `role` lands on the row. | D34: sync becomes an `internalMutation` fed only by a Convex Node action that fetches memberships and role→permission maps from the WorkOS REST API with a server `WORKOS_API_KEY`. Public surface is a data-free `requestSync`. Same action serves D23. |
+| 3 | No brute-force control on the typed enrollment code; Convex exposes no client IP, so the usual per-IP limit is unavailable. | 40-bit codes are strong, but "no control" is not a security posture, and a spray would have been invisible. | §7.1: global failed-enrollment bucket with a platform alert, per-code burn after 5 attempts, uniform error responses, per-`sid` refresh bucket. |
+| 4 | Post-W11 the helper reads `orgMemberships` on every member request, and the sync would have bumped `syncedAt` on every web login. | Every open dispatch app subscribes to that row; a per-login write re-runs all of them — the same reactivity hazard §23.1 fixed for `deviceSessions`. | Rule 8 in §5.2: patch only on real change, no sync timestamps on the row, bookkeeping in `orgMembershipSyncs`. |
+| 5 | Cutover step 6 dropped `userIdentityLinks` and `orgMembers` from the schema after backfill. | Convex refuses to remove a table that still holds rows; the push would have failed mid-window. | Empty-table migrations `021`/`022` with count verification before the schema push. |
+| 6 | Dormancy relied on a sweep writing `devices` status. | A sweep is a housekeeping job; security should not depend on it running. | Refresh tokens expire 90 days after rotation; the sweep only updates the display status. |
+| 7 | The Convex Auth spike (D14) left the token design forked until the spike ran. | Every downstream workstream depends on the claim shape and revocation semantics; a late switch would have re-opened §5–§11. | D33: hand-rolled, spike dropped, W1 is a one-day signing round-trip. |
+| 8 | JWKS "static file on Vercel" without saying where. | A preview URL or a protected deployment would make Convex unable to fetch keys → every mobile token rejected. | §6.2: production domain, `.well-known`, public, no protection. |
+| 9 | Team-route revoke hook passed a WorkOS user id through `ConvexHttpClient` with no statement of server-side checks. | The route is authenticated, but the mutation must not trust it; cross-org revocation would otherwise be one crafted call away. | §10.3: mutation re-asserts `team:manage` and same-org target. |
+| 10 | D23 and D34 both need WorkOS API access from Convex, which does not exist today (`WORKOS_API_KEY` lives only in `lib/workos.ts` on the web side). | An unstated new dependency on the cutover day. | Named in D34 and W1; env var on the deployment; REST via `fetch` in a Node action, no SDK added to Convex. |
+
+### 25.2 What keeps it at 8 rather than 9–10
+
+- **Nothing is built or measured.** The per-request primary-key read, the reactivity claims, and the ~150ms signing cost are reasoned from code and Convex semantics, not observed under load. W1 and the device matrix convert reasoning into evidence.
+- **The authorization rewrite is large** (~70 mobile call sites, six web-visible branches, 47 test files). The lint rule and shared fixture reduce regression risk; they don't remove it. A second reviewer on the `resolveCaller` diff is worth the hour.
+- **External gates are outside our control**: Twilio 10DLC approval and store review for associated domains. Codes and QR make them non-blocking, but one-tap SMS is not day-one.
+- **WorkOS as a refresh-time dependency for members** (D23) is a deliberate, bounded regression of goal 5 ("no third party on the mobile critical path") until W11 lands. Drivers are unaffected.
+- **Grace-window tuning** (60s) is a guess. Too short creates false reuse revocations for drivers in dead zones; telemetry decides.
+
+### 25.3 What would take it to 9
+
+W1 done (signing + `customJwt` round-trip + WorkOS REST from Convex), the device matrix passed on a preview build including the locked-iPhone background upload, and W11 shipped so member authorization no longer touches WorkOS at refresh.
