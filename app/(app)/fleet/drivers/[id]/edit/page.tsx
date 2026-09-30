@@ -6,8 +6,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
-// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
-import { useMutation, useQuery } from 'convex/react';
+import { useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { useRouter, useParams } from 'next/navigation';
 import { useState, FormEvent, useEffect, useRef } from 'react';
@@ -27,7 +27,12 @@ export default function EditDriverPage() {
   const params = useParams();
   const driverId = params.id as Id<'drivers'>;
 
-  const driver = useQuery(api.drivers.get, { id: driverId, includeSensitive: true });
+  // `drivers.get` is org-scoped server-side, and `driverId` is a route param
+  // that is truthy on the first client render, so a raw useQuery here opens
+  // the subscription before the Convex auth handshake and throws
+  // ConvexError('Unauthenticated'). `payPlans.list` below is already gated
+  // behind `driver`, but goes through the same hook for consistency.
+  const driver = useAuthQuery(api.drivers.get, { id: driverId, includeSensitive: true });
   const updateDriver = useMutation(api.drivers.update);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [addressData, setAddressData] = useState<AddressData | null>(null);
@@ -43,7 +48,7 @@ export default function EditDriverPage() {
   const [showPayPlanWarning, setShowPayPlanWarning] = useState(false);
 
   // Fetch available pay plans
-  const payPlans = useQuery(
+  const payPlans = useAuthQuery(
     api.payPlans.list,
     driver ? { workosOrgId: driver.organizationId } : 'skip'
   );

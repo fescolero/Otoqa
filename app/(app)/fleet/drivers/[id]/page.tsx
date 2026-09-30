@@ -3,11 +3,11 @@
 import * as React from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
-// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
-import { useMutation, useQuery } from 'convex/react';
+import { useMutation } from 'convex/react';
 import { Loader2, MapPin, Phone, Mail, Briefcase } from 'lucide-react';
 import { toast } from 'sonner';
 
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useOrganizationId } from '@/contexts/organization-context';
@@ -132,24 +132,31 @@ export default function DriverDetailPage() {
   const organizationId = useOrganizationId();
   const driverId = params.id as Id<'drivers'>;
 
-  const driver = useQuery(api.drivers.get, { id: driverId, includeSensitive: true });
-  const allDrivers = useQuery(api.drivers.list, organizationId ? { organizationId, includeDeleted: true } : 'skip');
+  // Every query below is org-scoped server-side (`requireCallerOrgId`), so a
+  // subscription opened before the Convex auth handshake lands throws
+  // ConvexError('Unauthenticated') rather than returning undefined. Nothing on
+  // this page can gate them by hand either: `driverId` comes straight off the
+  // route params and `organizationId` is seeded by the server, so both are
+  // already truthy on the very first client render. useAuthQuery holds them at
+  // 'skip' until `useConvexAuth().isAuthenticated` flips.
+  const driver = useAuthQuery(api.drivers.get, { id: driverId, includeSensitive: true });
+  const allDrivers = useAuthQuery(api.drivers.list, organizationId ? { organizationId, includeDeleted: true } : 'skip');
   const [loadStatusFilter, setLoadStatusFilter] = React.useState<AssignedLoadStatus>('Assigned');
-  const driverLoadsData = useQuery(api.loads.getByDriver, { driverId, status: loadStatusFilter });
+  const driverLoadsData = useAuthQuery(api.loads.getByDriver, { driverId, status: loadStatusFilter });
   // The Overview "Now" card and the Active-loads stat read the driver's
   // Assigned loads regardless of the Loads tab's filter, so flipping the
   // tab to Completed can't blank the card.
-  const assignedLoadsData = useQuery(api.loads.getByDriver, { driverId, status: 'Assigned' });
+  const assignedLoadsData = useAuthQuery(api.loads.getByDriver, { driverId, status: 'Assigned' });
   // Calendar-year bounds in the viewer's local time, fixed for the
   // component's life (a stale bound only matters across New Year's).
   const yearBounds = React.useMemo(() => {
     const y = new Date().getFullYear();
     return { yearStartMs: new Date(y, 0, 1).getTime(), yearEndMs: new Date(y + 1, 0, 1).getTime() };
   }, []);
-  const yearStats = useQuery(api.loads.getDriverYearStats, { driverId, ...yearBounds });
+  const yearStats = useAuthQuery(api.loads.getDriverYearStats, { driverId, ...yearBounds });
   // Completed only — an Assigned load isn't a trip yet, and showing it
   // under "Recent trips" read as if it had already run.
-  const recentDriverLoads = useQuery(api.loads.getRecentByDriver, { driverId, limit: 4, status: 'Completed' });
+  const recentDriverLoads = useAuthQuery(api.loads.getRecentByDriver, { driverId, limit: 4, status: 'Completed' });
   // Documents summary — same rows/status as the Documents tab (one source).
   // Held at 'skip' until the driver row is confirmed: listForEntity throws
   // for a cross-org id, which must not pre-empt the "not found" state.
@@ -1465,7 +1472,7 @@ function DriverLoadsTab({
  * payload (from / to / reason / note / effectiveDate) into `metadata`.
  */
 function DriverStatusHistoryCard({ driverId }: { driverId: Id<'drivers'> }) {
-  const log = useQuery(api.auditLog.getEntityAuditLog, {
+  const log = useAuthQuery(api.auditLog.getEntityAuditLog, {
     entityType: 'driver',
     entityId: driverId as unknown as string,
     limit: 50,
