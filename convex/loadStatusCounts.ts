@@ -32,6 +32,17 @@ const BUILD_PAGE_SIZE = 500;
 const WRITE_CHUNK = 800;
 /** Cache rows deleted per GC mutation. */
 const GC_CHUNK = 800;
+/** Bucket-key groups merged per mergeCacheRows mutation (1 read + ≤5 writes each). */
+const MERGE_CHUNK = 250;
+/**
+ * Load pages scanned per rebuildOrg execution. A rebuild that hasn't finished
+ * the scan by then flushes what it has and hands the cursor to a scheduled
+ * continuation, so no single action accumulates an unbounded number of system
+ * operations (or an unbounded in-memory tally).
+ */
+const MAX_PAGES_PER_RUN = 10;
+/** GC pages deleted per execution before handing off to a continuation. */
+const MAX_GC_PAGES_PER_RUN = 20;
 /** Force a rebuild at least this often even if no change was detected. */
 const SAFETY_NET_MS = 30 * 60 * 1000;
 /** A build older than this is presumed stuck and may be restarted. */
@@ -54,6 +65,16 @@ export const READ_FROM_CACHE_FLAG = 'loadStatusCounts.readFromCache';
 
 const LOAD_STATUSES = ['Open', 'Assigned', 'Completed', 'Canceled', 'Expired'] as const;
 type LoadStatus = (typeof LOAD_STATUSES)[number];
+
+type CacheScope = 'ALL' | 'HCR' | 'TRIP' | 'HCRTRIP';
+/** One computed cache row, before it is written to `loadStatusCounts`. */
+type CacheRow = {
+  scope: CacheScope;
+  scopeValue: string;
+  bucket: string;
+  status: LoadStatus;
+  count: number;
+};
 
 const scopeValidator = v.union(
   v.literal('ALL'),
@@ -217,6 +238,8 @@ export const pageLoadsForBuild = internalQuery({
   args: {
     workosOrgId: v.string(),
     cursor: v.union(v.string(), v.null()),
+    /** Overrides BUILD_PAGE_SIZE. Only the tests pass this, to force chunking. */
+    pageSize: v.optional(v.number()),
   },
   returns: v.object({
     page: v.array(
@@ -234,7 +257,10 @@ export const pageLoadsForBuild = internalQuery({
     const res = await ctx.db
       .query('loadInformation')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
-      .paginate({ numItems: BUILD_PAGE_SIZE, cursor: args.cursor });
+      .paginate({
+        numItems: args.pageSize ?? BUILD_PAGE_SIZE,
+        cursor: args.cursor,
+      });
 
     const page = await Promise.all(
       res.page.map(async (load) => {
@@ -270,10 +296,22 @@ export const beginBuild = internalMutation({
     const nextEpoch =
       Math.max(meta?.activeEpoch ?? 0, meta?.buildingEpoch ?? 0) + 1;
     if (meta) {
+      // A buildingEpoch still set here means the previous build died mid-flight
+      // — the gate only lets us claim a new epoch once that one is presumed
+      // stuck. Its partial rows are unreachable (no reader looks at anything
+      // but activeEpoch) but nothing else would ever delete them, so hand them
+      // to the GC chain rather than leaking a generation per failed build.
+      const abandonedEpoch = meta.buildingEpoch;
       await ctx.db.patch(meta._id, {
         buildingEpoch: nextEpoch,
         buildStartedAt: now,
       });
+      if (abandonedEpoch !== undefined) {
+        await ctx.scheduler.runAfter(0, internal.loadStatusCounts.gcEpochChain, {
+          workosOrgId: args.workosOrgId,
+          epoch: abandonedEpoch,
+        });
+      }
     } else {
       await ctx.db.insert('loadStatusCountsMeta', {
         workosOrgId: args.workosOrgId,
@@ -318,30 +356,131 @@ export const writeCacheRows = internalMutation({
 });
 
 /**
- * Atomically flip `activeEpoch` to the just-built epoch. Readers switch over in
- * one step and never observe a half-built generation. Returns the previous
- * active epoch (if any) so the caller can GC it.
+ * Merge a chunk of counts into an in-flight epoch, adding to whatever this
+ * build already wrote for the same key.
+ *
+ * Continuation chunks necessarily re-visit keys that earlier chunks tallied
+ * (every chunk of the scan sees ALL/`__total__`, for instance), so they must
+ * accumulate rather than insert a second row. `readScopedCounts` does sum every
+ * row it finds, so duplicates would still total correctly — but the day-grain
+ * read is capped at READ_ROW_CAP, and one row per key *per chunk* would push a
+ * wide scope over that cap and permanently demote it to the fallback scan.
+ *
+ * The existing statuses for a key cost one index read per group, not one per
+ * status, because `by_scope_bucket` stops at `bucket` (≤ 5 rows per group).
  */
-export const finalizeBuild = internalMutation({
-  args: { workosOrgId: v.string(), epoch: v.number(), rows: v.number() },
-  returns: v.object({ previousEpoch: v.union(v.number(), v.null()) }),
+export const mergeCacheRows = internalMutation({
+  args: {
+    workosOrgId: v.string(),
+    epoch: v.number(),
+    rows: v.array(
+      v.object({
+        scope: scopeValidator,
+        scopeValue: v.string(),
+        bucket: v.string(),
+        status: statusValidator,
+        count: v.number(),
+      }),
+    ),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const groups = new Map<string, CacheRow[]>();
+    for (const r of args.rows) {
+      const key = JSON.stringify([r.scope, r.scopeValue, r.bucket]);
+      const group = groups.get(key);
+      if (group) group.push(r);
+      else groups.set(key, [r]);
+    }
+
+    for (const group of groups.values()) {
+      const { scope, scopeValue, bucket } = group[0];
+      const existing = await ctx.db
+        .query('loadStatusCounts')
+        .withIndex('by_scope_bucket', (q) =>
+          q
+            .eq('workosOrgId', args.workosOrgId)
+            .eq('epoch', args.epoch)
+            .eq('scope', scope)
+            .eq('scopeValue', scopeValue)
+            .eq('bucket', bucket),
+        )
+        .collect();
+      const byStatus = new Map(existing.map((e) => [e.status, e]));
+
+      for (const r of group) {
+        const hit = byStatus.get(r.status);
+        if (hit) {
+          await ctx.db.patch(hit._id, { count: hit.count + r.count });
+        } else {
+          await ctx.db.insert('loadStatusCounts', {
+            workosOrgId: args.workosOrgId,
+            epoch: args.epoch,
+            scope: r.scope,
+            scopeValue: r.scopeValue,
+            bucket: r.bucket,
+            status: r.status,
+            count: r.count,
+          });
+        }
+      }
+    }
+    return null;
+  },
+});
+
+/**
+ * Heartbeat for a chunked build: refresh `buildStartedAt` so the gate's
+ * stuck-build detection doesn't restart a rebuild that is still making
+ * progress, and report whether a newer build has already claimed the slot.
+ */
+export const touchBuild = internalMutation({
+  args: { workosOrgId: v.string(), epoch: v.number() },
+  returns: v.object({ superseded: v.boolean() }),
   handler: async (ctx, args) => {
     const meta = await ctx.db
       .query('loadStatusCountsMeta')
       .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
       .first();
-    const previousEpoch = meta?.activeEpoch ?? null;
-    const now = Date.now();
-    if (meta) {
-      await ctx.db.patch(meta._id, {
-        activeEpoch: args.epoch,
-        buildingEpoch: undefined,
-        buildStartedAt: undefined,
-        lastBuiltAt: now,
-        lastBuildRows: args.rows,
-      });
+    if (!meta || meta.buildingEpoch !== args.epoch) return { superseded: true };
+    await ctx.db.patch(meta._id, { buildStartedAt: Date.now() });
+    return { superseded: false };
+  },
+});
+
+/**
+ * Atomically flip `activeEpoch` to the just-built epoch. Readers switch over in
+ * one step and never observe a half-built generation. Returns the previous
+ * active epoch (if any) so the caller can GC it.
+ *
+ * Refuses to publish when the meta row no longer names this epoch as the one
+ * being built: a restart-on-stuck race means another build owns the slot, and
+ * flipping to a generation the gate abandoned would publish counts that were
+ * never finished.
+ */
+export const finalizeBuild = internalMutation({
+  args: { workosOrgId: v.string(), epoch: v.number(), rows: v.number() },
+  returns: v.object({
+    previousEpoch: v.union(v.number(), v.null()),
+    superseded: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const meta = await ctx.db
+      .query('loadStatusCountsMeta')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .first();
+    if (!meta || meta.buildingEpoch !== args.epoch) {
+      return { previousEpoch: null, superseded: true };
     }
-    return { previousEpoch };
+    const previousEpoch = meta.activeEpoch ?? null;
+    await ctx.db.patch(meta._id, {
+      activeEpoch: args.epoch,
+      buildingEpoch: undefined,
+      buildStartedAt: undefined,
+      lastBuiltAt: Date.now(),
+      lastBuildRows: args.rows,
+    });
+    return { previousEpoch, superseded: false };
   },
 });
 
@@ -366,18 +505,84 @@ export const gcEpoch = internalMutation({
 });
 
 /**
- * Rebuild one org's cache: scan loads (joining tags) into an in-memory tally,
- * write the new epoch, flip it active, then GC the old epoch. Accumulation in
- * action memory keeps each transaction bounded; the realistic envelope is
- * tens-of-thousands of loads per org (see design §5).
+ * Delete a superseded epoch's rows across as many transactions as it takes.
+ * Split out of rebuildOrg so a very large old generation — or one abandoned by
+ * a build that died — can be collected without extending any single action's
+ * system-operation budget without bound.
  */
-export const rebuildOrg = internalAction({
-  args: { workosOrgId: v.string() },
+export const gcEpochChain = internalAction({
+  args: {
+    workosOrgId: v.string(),
+    epoch: v.number(),
+    cursor: v.optional(v.union(v.string(), v.null())),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const { epoch } = await ctx.runMutation(internal.loadStatusCounts.beginBuild, {
-      workosOrgId: args.workosOrgId,
-    });
+    let cursor: string | null = args.cursor ?? null;
+    let pages = 0;
+    for (;;) {
+      const r: { isDone: boolean; continueCursor: string } = await ctx.runMutation(
+        internal.loadStatusCounts.gcEpoch,
+        { workosOrgId: args.workosOrgId, epoch: args.epoch, cursor },
+      );
+      pages++;
+      if (r.isDone) return null;
+      cursor = r.continueCursor;
+      if (pages >= MAX_GC_PAGES_PER_RUN) {
+        await ctx.scheduler.runAfter(0, internal.loadStatusCounts.gcEpochChain, {
+          workosOrgId: args.workosOrgId,
+          epoch: args.epoch,
+          cursor,
+        });
+        return null;
+      }
+    }
+  },
+});
+
+/**
+ * Rebuild one org's cache: scan loads (joining tags) into an in-memory tally,
+ * write the new epoch, flip it active, then GC the old epoch.
+ *
+ * The scan is CHUNKED. Each child transaction was already sized well under the
+ * per-transaction ceiling (a page is ~1500 reads, a write chunk 800 inserts),
+ * but the action driving them looped until the org ran out of loads, so its own
+ * system-operation count grew with the org's data volume — which is how a big
+ * org's rebuild started failing with "too many system operations". An execution
+ * now scans at most MAX_PAGES_PER_RUN pages, flushes that much of the tally,
+ * and re-schedules itself with the cursor. Work per execution is therefore
+ * bounded no matter how large the org is, and so is the in-memory tally.
+ *
+ * `epoch`/`cursor`/`rowsWritten` are continuation state and are absent on the
+ * first execution of a rebuild. Partial generations stay invisible to readers:
+ * rows land under `buildingEpoch` and only `finalizeBuild` flips `activeEpoch`,
+ * so the cache still can only LAG, never DRIFT.
+ */
+export const rebuildOrg = internalAction({
+  args: {
+    workosOrgId: v.string(),
+    epoch: v.optional(v.number()),
+    cursor: v.optional(v.union(v.string(), v.null())),
+    rowsWritten: v.optional(v.number()),
+    /**
+     * Chunk-size overrides. Only the tests pass these — real rebuilds would
+     * need thousands of loads to reach a continuation, so this is how the
+     * chunked path is exercised deterministically.
+     */
+    pageSize: v.optional(v.number()),
+    maxPages: v.optional(v.number()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    // A continuation inherits its epoch; a fresh rebuild claims a new one.
+    const continuing = args.epoch !== undefined;
+    const epoch =
+      args.epoch ??
+      (
+        await ctx.runMutation(internal.loadStatusCounts.beginBuild, {
+          workosOrgId: args.workosOrgId,
+        })
+      ).epoch;
 
     const cutoff = windowCutoff(Date.now());
     // key = scope \x01 scopeValue \x01 bucket \x01 status
@@ -392,7 +597,9 @@ export const rebuildOrg = internalAction({
       tally.set(key, (tally.get(key) ?? 0) + 1);
     };
 
-    let cursor: string | null = null;
+    let cursor: string | null = args.cursor ?? null;
+    let pages = 0;
+    let scanComplete = false;
     for (;;) {
       const res: {
         page: Array<{
@@ -406,6 +613,7 @@ export const rebuildOrg = internalAction({
       } = await ctx.runQuery(internal.loadStatusCounts.pageLoadsForBuild, {
         workosOrgId: args.workosOrgId,
         cursor,
+        pageSize: args.pageSize,
       });
 
       for (const load of res.page) {
@@ -425,18 +633,18 @@ export const rebuildOrg = internalAction({
         }
       }
 
-      if (res.isDone) break;
+      pages++;
+      if (res.isDone) {
+        scanComplete = true;
+        break;
+      }
       cursor = res.continueCursor;
+      // Hand the rest to a continuation.
+      if (pages >= (args.maxPages ?? MAX_PAGES_PER_RUN)) break;
     }
 
-    // Flush the tally to cache rows in bounded chunks.
-    const rows: Array<{
-      scope: 'ALL' | 'HCR' | 'TRIP' | 'HCRTRIP';
-      scopeValue: string;
-      bucket: string;
-      status: LoadStatus;
-      count: number;
-    }> = [];
+    // Flush this execution's slice of the tally to cache rows.
+    const rows: CacheRow[] = [];
     for (const [key, count] of tally) {
       const [scope, scopeValue, bucket, status] = key.split('\u0001');
       rows.push({
@@ -447,22 +655,80 @@ export const rebuildOrg = internalAction({
         count,
       });
     }
-    for (let i = 0; i < rows.length; i += WRITE_CHUNK) {
-      await ctx.runMutation(internal.loadStatusCounts.writeCacheRows, {
-        workosOrgId: args.workosOrgId,
-        epoch,
-        rows: rows.slice(i, i + WRITE_CHUNK),
-      });
-    }
-
-    const { previousEpoch } = await ctx.runMutation(
-      internal.loadStatusCounts.finalizeBuild,
-      { workosOrgId: args.workosOrgId, epoch, rows: rows.length },
+    // Group the statuses of a bucket key together so a merge chunk never has
+    // to read the same group twice.
+    rows.sort((a, b) =>
+      `${a.scope}/${a.scopeValue}/${a.bucket}`.localeCompare(
+        `${b.scope}/${b.scopeValue}/${b.bucket}`,
+      ),
     );
 
-    // GC the superseded epoch (paginated).
+    if (continuing) {
+      // Earlier chunks of this epoch may already hold any of these keys.
+      for (let i = 0; i < rows.length; i += MERGE_CHUNK) {
+        await ctx.runMutation(internal.loadStatusCounts.mergeCacheRows, {
+          workosOrgId: args.workosOrgId,
+          epoch,
+          rows: rows.slice(i, i + MERGE_CHUNK),
+        });
+      }
+    } else {
+      // First execution: the epoch is empty, so plain inserts — no read-back.
+      for (let i = 0; i < rows.length; i += WRITE_CHUNK) {
+        await ctx.runMutation(internal.loadStatusCounts.writeCacheRows, {
+          workosOrgId: args.workosOrgId,
+          epoch,
+          rows: rows.slice(i, i + WRITE_CHUNK),
+        });
+      }
+    }
+
+    // `lastBuildRows` counts flushed tally entries: for a single-execution
+    // build that is exactly the number of distinct rows (unchanged meaning),
+    // and for a chunked build it is an upper bound, since continuations merge
+    // into keys earlier chunks already wrote.
+    const rowsWritten = (args.rowsWritten ?? 0) + rows.length;
+
+    if (!scanComplete) {
+      const { superseded } = await ctx.runMutation(
+        internal.loadStatusCounts.touchBuild,
+        { workosOrgId: args.workosOrgId, epoch },
+      );
+      if (superseded) {
+        // Another build claimed the slot; drop what this one wrote and stop.
+        await ctx.scheduler.runAfter(0, internal.loadStatusCounts.gcEpochChain, {
+          workosOrgId: args.workosOrgId,
+          epoch,
+        });
+        return null;
+      }
+      await ctx.scheduler.runAfter(0, internal.loadStatusCounts.rebuildOrg, {
+        workosOrgId: args.workosOrgId,
+        epoch,
+        cursor,
+        rowsWritten,
+        pageSize: args.pageSize,
+        maxPages: args.maxPages,
+      });
+      return null;
+    }
+
+    const { previousEpoch, superseded } = await ctx.runMutation(
+      internal.loadStatusCounts.finalizeBuild,
+      { workosOrgId: args.workosOrgId, epoch, rows: rowsWritten },
+    );
+    if (superseded) {
+      await ctx.scheduler.runAfter(0, internal.loadStatusCounts.gcEpochChain, {
+        workosOrgId: args.workosOrgId,
+        epoch,
+      });
+      return null;
+    }
+
+    // GC the superseded epoch (paginated, bounded — tail goes to the chain).
     if (previousEpoch !== null) {
       let gcCursor: string | null = null;
+      let gcPages = 0;
       for (;;) {
         const r: { isDone: boolean; continueCursor: string } =
           await ctx.runMutation(internal.loadStatusCounts.gcEpoch, {
@@ -470,8 +736,21 @@ export const rebuildOrg = internalAction({
             epoch: previousEpoch,
             cursor: gcCursor,
           });
+        gcPages++;
         if (r.isDone) break;
         gcCursor = r.continueCursor;
+        if (gcPages >= MAX_GC_PAGES_PER_RUN) {
+          await ctx.scheduler.runAfter(
+            0,
+            internal.loadStatusCounts.gcEpochChain,
+            {
+              workosOrgId: args.workosOrgId,
+              epoch: previousEpoch,
+              cursor: gcCursor,
+            },
+          );
+          break;
+        }
       }
     }
 
