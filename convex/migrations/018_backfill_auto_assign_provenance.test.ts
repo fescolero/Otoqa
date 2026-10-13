@@ -18,6 +18,13 @@ const migration: any = (internal as any)['migrations/018_backfill_auto_assign_pr
 
 const setup = () => convexTest(schema);
 
+// Service dates must stay in the future: releaseUnclaimed only frees
+// upcoming loads, so a hardcoded date rots into PAST once it goes by.
+const daysFromNow = (days: number) =>
+  new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+const ROBOT_DATE = daysFromNow(3);
+const HUMAN_DATE = daysFromNow(4);
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function seedOrg(ctx: any) {
   const now = Date.now();
@@ -77,8 +84,8 @@ async function world() {
     const org = await seedOrg(ctx);
     return {
       ...org,
-      robot: await seedLoad(ctx, org.customerId, 'R', '2026-10-05'),
-      human: await seedLoad(ctx, org.customerId, 'H', '2026-10-06'),
+      robot: await seedLoad(ctx, org.customerId, 'R', ROBOT_DATE),
+      human: await seedLoad(ctx, org.customerId, 'H', HUMAN_DATE),
     };
   });
   const asUser = t.withIdentity({ subject: USER, org_id: ORG });
@@ -152,7 +159,7 @@ describe('018 — backfill auto-assignment provenance', () => {
     const totals = await w.t.action(migration.startBackfill, { dryRun: true });
     expect(totals.skippedNoRule).toBe(1);
     expect(totals.noRuleLoads).toEqual([
-      { orderNumber: 'ORD-R', hcr: HCR, trip: undefined, serviceDate: '2026-10-05', reason: 'NO_RULE' },
+      { orderNumber: 'ORD-R', hcr: HCR, trip: undefined, serviceDate: ROBOT_DATE, reason: 'NO_RULE' },
     ]);
   });
 

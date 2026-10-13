@@ -69,6 +69,10 @@ export async function fetchVehicleStatsFeed(args: {
   // care about trucks mapped in this org). Undefined = all vehicles in
   // the org's Samsara fleet.
   vehicleIds?: string[];
+  // Abort the request (headers AND body read) after this many ms. The
+  // 10s poll cron has no slack for a hung socket — a timeout surfaces as
+  // transient_error and the next tick resumes from the same cursor.
+  timeoutMs?: number;
 }): Promise<FetchVehicleStatsResult> {
   const url = new URL(`${BASE_URL[args.environment]}/fleet/vehicles/stats/feed`);
   url.searchParams.set('types', 'gps');
@@ -85,6 +89,7 @@ export async function fetchVehicleStatsFeed(args: {
         Authorization: `Bearer ${args.apiToken}`,
         Accept: 'application/json',
       },
+      signal: args.timeoutMs !== undefined ? AbortSignal.timeout(args.timeoutMs) : undefined,
     });
   } catch (err) {
     return {

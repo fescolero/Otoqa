@@ -38,12 +38,38 @@ import {
 
 const MAX_DRAIN_ITERATIONS = 10;
 
+// Wall-clock budget for one cron tick. The cron fires every 10s and Convex
+// never overlaps runs of the same cron job: a tick that runs past 10s makes
+// the scheduler skip the next run ("Skipping N run(s) of cron job
+// 'samsara-gps-poll'"). 7s leaves room for cronRunner's markStarted/record
+// mutations and the final updateSyncStateAfterTick around the drain loop.
+export const POLL_TICK_BUDGET_MS = 7_000;
+// Cap on any single Samsara request, so one hung socket can't eat the tick.
+export const SAMSARA_FETCH_TIMEOUT_MS = 4_000;
+// Don't start a page with less time than this left — it would almost
+// certainly be aborted, wasting a request.
+export const MIN_PAGE_BUDGET_MS = 1_000;
+
+/**
+ * Timeout to give the next feed request, or null when the tick's budget is
+ * spent and the drain loop should stop (the persisted cursor picks up the
+ * remaining pages on the next tick).
+ */
+export function pageFetchTimeoutMs(deadline: number, now: number): number | null {
+  const remaining = deadline - now;
+  if (remaining < MIN_PAGE_BUDGET_MS) return null;
+  return Math.min(SAMSARA_FETCH_TIMEOUT_MS, remaining);
+}
+
 export const pollAllIntegrations = internalAction({
   args: {},
   returns: v.object({
     integrationsProcessed: v.number(),
   }),
   handler: async (ctx): Promise<{ integrationsProcessed: number }> => {
+    // One deadline shared by every integration in this tick, so the
+    // sequential loop below stays inside the cron interval as a whole.
+    const deadline = Date.now() + POLL_TICK_BUDGET_MS;
     const integrations: Array<{ integrationId: any }> = await ctx.runQuery(
       internal.samsaraIngestMutations.getActiveSamsaraIntegrations,
       {},
@@ -58,6 +84,7 @@ export const pollAllIntegrations = internalAction({
       try {
         await ctx.runAction(internal.samsaraIngest.pollOneIntegration, {
           integrationId,
+          deadline,
         });
       } catch (err) {
         // One integration's failure mustn't poison the rest of the tick.
@@ -73,7 +100,12 @@ export const pollAllIntegrations = internalAction({
 });
 
 export const pollOneIntegration = internalAction({
-  args: { integrationId: v.id('orgIntegrations') },
+  args: {
+    integrationId: v.id('orgIntegrations'),
+    // Epoch ms by which the drain loop must stop starting requests. Set by
+    // pollAllIntegrations; defaults to a full tick budget from now.
+    deadline: v.optional(v.number()),
+  },
   returns: v.object({
     ok: v.boolean(),
     pingsIngested: v.number(),
@@ -84,6 +116,7 @@ export const pollOneIntegration = internalAction({
     pingsIngested: number;
     pagesDrained: number;
   }> => {
+    const deadline = args.deadline ?? Date.now() + POLL_TICK_BUDGET_MS;
     const context = await ctx.runQuery(
       internal.samsaraIngestMutations.getIntegrationForPoll,
       { integrationId: args.integrationId },
@@ -143,11 +176,21 @@ export const pollOneIntegration = internalAction({
     let disableIntegration = false;
 
     for (let i = 0; i < MAX_DRAIN_ITERATIONS; i++) {
+      const timeoutMs = pageFetchTimeoutMs(deadline, Date.now());
+      if (timeoutMs === null) {
+        // Out of tick budget. Not an error: the cursor saved below resumes
+        // the drain on the next tick instead of overrunning this one.
+        console.log(
+          `[samsaraIngest.pollOneIntegration] tick budget spent integrationId=${args.integrationId} pagesDrained=${pages}`,
+        );
+        break;
+      }
       const result = await fetchVehicleStatsFeed({
         apiToken,
         environment: context.environment as SamsaraEnvironment,
         cursor,
         vehicleIds: mappedVehicleIds,
+        timeoutMs,
       });
 
       if (result.kind === 'auth_failed') {
